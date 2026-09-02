@@ -17,8 +17,8 @@ compatibility_flags = []
 # with no id at all). Then replace the placeholder id below with the id
 # that command prints.
 [[kv_namespaces]]
-binding = "NIGHTWATCH_KV"
-id = "REPLACE_ME_WITH_REAL_KV_NAMESPACE_ID"          # <-- placeholder, see SETUP above
+binding = "NIGHTWATCH_SNAPSHOTS"
+id = "2d25f0102d524891990b28e26851f48a"          # <-- placeholder, see SETUP above
 preview_id = "REPLACE_ME_WITH_PREVIEW_KV_NAMESPACE_ID" # <-- placeholder, used by `wrangler dev`
 
 # --- Cron triggers ---------------------------------------------------------
@@ -35,7 +35,7 @@ crons = ["*/5 16-21 * * *"]
 
 # --- Vars (non-secret) ------------------------------------------------------
 [vars]
-FIREBASE_PROJECT_ID = "REPLACE_ME_WITH_FIREBASE_PROJECT_ID"
+FIREBASE_PROJECT_ID = "etoronightwatch"
 
 # --- Secrets (set via `npx wrangler secret put <NAME>`, never in this file) -
 #

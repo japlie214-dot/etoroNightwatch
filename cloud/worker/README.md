@@ -120,7 +120,7 @@ throwaway public key).
 
 ```sh
 npx wrangler login          # once, opens a browser
-npx wrangler kv namespace create NIGHTWATCH_KV
+npx wrangler kv namespace create NIGHTWATCH_SNAPSHOTS
 # -> paste the printed id into wrangler.toml's [[kv_namespaces]] id field
 npx wrangler deploy
 ```

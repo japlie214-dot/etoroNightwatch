@@ -52,10 +52,10 @@ async function readBodyWithLimit(request, maxBytes) {
 }
 
 function requireKv(env) {
-  if (!env.NIGHTWATCH_KV) {
-    throw new Error("NIGHTWATCH_KV binding is not configured (see wrangler.toml)");
+  if (!env.NIGHTWATCH_SNAPSHOTS) {
+    throw new Error("NIGHTWATCH_SNAPSHOTS binding is not configured (see wrangler.toml)");
   }
-  return env.NIGHTWATCH_KV;
+  return env.NIGHTWATCH_SNAPSHOTS;
 }
 
 // --- /health -----------------------------------------------------------
@@ -68,7 +68,7 @@ function handleHealth(env) {
   for (const name of REQUIRED_SECRETS) secrets[name] = Boolean(env[name] && String(env[name]).length > 0);
   const vars = {};
   for (const name of REQUIRED_VARS) vars[name] = Boolean(env[name] && String(env[name]).length > 0);
-  const kvBound = Boolean(env.NIGHTWATCH_KV);
+  const kvBound = Boolean(env.NIGHTWATCH_SNAPSHOTS);
   const allSecretsPresent = Object.values(secrets).every(Boolean) && Object.values(vars).every(Boolean);
   return json({
     ok: true,

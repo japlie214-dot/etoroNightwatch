@@ -39,7 +39,7 @@ class FakeKv {
 
 function baseEnv(overrides = {}) {
   return {
-    NIGHTWATCH_KV: new FakeKv(),
+    NIGHTWATCH_SNAPSHOTS: new FakeKv(),
     PHONE_PUSH_SECRET: "phone-secret",
     WEB_READ_TOKEN: "web-token",
     COMMAND_HMAC_SECRET: "command-secret",
@@ -58,7 +58,7 @@ function req(method, path, { headers = {}, body } = {}) {
 
 describe("GET /health", () => {
   it("reports every secret absent, and never leaks values, when nothing is configured", async () => {
-    const env = { NIGHTWATCH_KV: undefined };
+    const env = { NIGHTWATCH_SNAPSHOTS: undefined };
     const res = await worker.fetch(req("GET", "/health"), env, {});
     expect(res.status).toBe(200);
     const body = await res.json();
@@ -206,7 +206,7 @@ describe("POST /command", () => {
   it("sends an allowed command via FCM and increments the counter", async () => {
     _resetTokenCacheForTests();
     const env = baseEnv({ FIREBASE_SERVICE_ACCOUNT_JSON: await makeServiceAccountJson() });
-    await env.NIGHTWATCH_KV.put("device_token", "device-abc");
+    await env.NIGHTWATCH_SNAPSHOTS.put("device_token", "device-abc");
 
     const fetchMock = vi.fn(async (url) => {
       if (String(url).includes("oauth2.googleapis.com")) {
@@ -227,7 +227,7 @@ describe("POST /command", () => {
       expect(body.ok).toBe(true);
       expect(body.command).toBe("halt");
       expect(body.counter).toBe(1);
-      expect(await env.NIGHTWATCH_KV.get("command_counter")).toBe("1");
+      expect(await env.NIGHTWATCH_SNAPSHOTS.get("command_counter")).toBe("1");
     } finally {
       vi.unstubAllGlobals();
     }
@@ -238,7 +238,7 @@ describe("POST /refresh", () => {
   it("clears a stale device token from KV on an UNREGISTERED FCM error", async () => {
     _resetTokenCacheForTests();
     const env = baseEnv({ FIREBASE_SERVICE_ACCOUNT_JSON: await makeServiceAccountJson() });
-    await env.NIGHTWATCH_KV.put("device_token", "dead-token");
+    await env.NIGHTWATCH_SNAPSHOTS.put("device_token", "dead-token");
 
     const fetchMock = vi.fn(async (url) => {
       if (String(url).includes("oauth2.googleapis.com")) {
@@ -262,7 +262,7 @@ describe("POST /refresh", () => {
     try {
       const res = await worker.fetch(req("POST", "/refresh", { headers: { "x-web-read-token": "web-token" } }), env, {});
       expect(res.status).toBe(502);
-      expect(await env.NIGHTWATCH_KV.get("device_token")).toBeNull();
+      expect(await env.NIGHTWATCH_SNAPSHOTS.get("device_token")).toBeNull();
     } finally {
       vi.unstubAllGlobals();
     }
@@ -278,6 +278,6 @@ describe("POST /device-token", () => {
       {}
     );
     expect(res.status).toBe(200);
-    expect(await env.NIGHTWATCH_KV.get("device_token")).toBe("new-token-xyz");
+    expect(await env.NIGHTWATCH_SNAPSHOTS.get("device_token")).toBe("new-token-xyz");
   });
 });
