@@ -24,3 +24,10 @@ desktop.ini
 .vscode/
 .idea/
 *git-credentials*
+
+# --- cloud/worker (Cloudflare Worker) ---
+cloud/worker/node_modules/
+cloud/worker/.wrangler/
+cloud/worker/.dev.vars
+*service-account*.json
+google-services.json

@@ -1,0 +1,79 @@
+# Cloudflare Worker config for etoroNightwatch (DESIGN.md §9, §7.2, §11 step 8).
+# Docs: https://developers.cloudflare.com/workers/wrangler/configuration/
+
+name = "etoro-nightwatch-worker"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+compatibility_flags = []
+
+# --- KV namespace ---------------------------------------------------------
+# Stores: the latest portfolio snapshot, the phone's current FCM device
+# token, and the monotonic /command counter.
+#
+# SETUP: run `npx wrangler kv namespace create NIGHTWATCH_KV` (and, for
+# local dev without hitting the real Cloudflare API, `npx wrangler kv
+# namespace create NIGHTWATCH_KV --preview` if you want an explicit
+# preview id — `wrangler dev` also works with an ad-hoc local KV store
+# with no id at all). Then replace the placeholder id below with the id
+# that command prints.
+[[kv_namespaces]]
+binding = "NIGHTWATCH_KV"
+id = "REPLACE_ME_WITH_REAL_KV_NAMESPACE_ID"          # <-- placeholder, see SETUP above
+preview_id = "REPLACE_ME_WITH_PREVIEW_KV_NAMESPACE_ID" # <-- placeholder, used by `wrangler dev`
+
+# --- Cron triggers ---------------------------------------------------------
+# Every 5 minutes across a UTC window (16:00-21:55) wide enough to contain
+# both the EST and EDT instants of both the 15:30 ET normal target and the
+# 12:30 ET half-day target. See the long comment on scheduled() in
+# src/index.js for why this can't just be "one UTC time" — Cloudflare cron
+# triggers are UTC-only and DST moves the ET->UTC offset by an hour twice a
+# year. shouldFireSessionTrigger() in src/holidays.js does the real ET
+# check on every tick and is idempotent (KV flag), so firing every 5
+# minutes here costs nothing beyond a handful of no-op invocations a day.
+[triggers]
+crons = ["*/5 16-21 * * *"]
+
+# --- Vars (non-secret) ------------------------------------------------------
+[vars]
+FIREBASE_PROJECT_ID = "REPLACE_ME_WITH_FIREBASE_PROJECT_ID"
+
+# --- Secrets (set via `npx wrangler secret put <NAME>`, never in this file) -
+#
+#   npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON
+#     -> paste the *entire contents* of the downloaded service-account
+#        JSON file (Firebase console -> Project settings -> Service
+#        accounts -> Generate new private key) as one line/blob when
+#        prompted. The Worker parses it as JSON at request time.
+#
+#   npx wrangler secret put PHONE_PUSH_SECRET
+#     -> a long random string. Sent by the phone as the
+#        `x-phone-push-secret` header on POST /snapshot and
+#        POST /device-token.
+#
+#   npx wrangler secret put WEB_READ_TOKEN
+#     -> a different long random string. Sent by the web app as the
+#        `x-web-read-token` header on GET /snapshot, POST /refresh,
+#        POST /command. Deliberately a *different* credential from
+#        PHONE_PUSH_SECRET (DESIGN.md §6.F / §9.4: separate credentials by
+#        privilege).
+#
+#   npx wrangler secret put COMMAND_HMAC_SECRET
+#     -> a third long random string, shared with the phone out-of-band (it
+#        must be embedded in the Android app's config, not fetched at
+#        runtime). Used to HMAC-sign POST /command payloads so the phone
+#        can verify a command actually came from this Worker
+#        (DESIGN.md §8.2).
+#
+# Generate a random secret locally with e.g.
+#   node -e "console.log(crypto.randomUUID()+crypto.randomUUID())"
+# or `openssl rand -hex 32`.
+#
+# For local `wrangler dev`, secrets are NOT read from `npx wrangler secret
+# put` (that only affects the deployed Worker) — instead create a
+# `.dev.vars` file in this directory (already gitignored) with:
+#   FIREBASE_SERVICE_ACCOUNT_JSON={"type":"service_account",...}
+#   PHONE_PUSH_SECRET=dev-secret-1
+#   WEB_READ_TOKEN=dev-secret-2
+#   COMMAND_HMAC_SECRET=dev-secret-3
+#   FIREBASE_PROJECT_ID=dev-project-id
+# See https://developers.cloudflare.com/workers/configuration/secrets/#local-development-with-secrets

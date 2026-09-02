@@ -1467,6 +1467,13 @@ class Repo:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    def get_command(self, command_id: int) -> Command | None:
+        """Return one command row by id."""
+        row = self.conn.execute(
+            "SELECT * FROM commands WHERE id = ?", (command_id,)
+        ).fetchone()
+        return self._command(row) if row else None
+
     def get_commands(
         self, channel: str | None = None, sender_id: str | None = None, limit: int = 50
     ) -> list[Command]:

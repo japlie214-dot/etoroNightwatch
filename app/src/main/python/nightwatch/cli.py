@@ -19,9 +19,9 @@ from typing import Sequence
 
 from .config import ConfigError, load_config
 from .db.repo import Repo, default_db_path
-from .host import get_host
+from .host import Host, get_host
 
-__all__ = ["main", "build_parser"]
+__all__ = ["main", "build_parser", "set_halt", "clear_halt"]
 
 #: Which build step (DESIGN §10) each not-yet-implemented subcommand needs.
 _NOT_YET_IMPLEMENTED = {
@@ -53,6 +53,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("halt", help="set the HALT flag (preflight gate 1 will abort every session)")
     sub.add_parser("resume", help="clear the HALT flag")
     sub.add_parser("initdb", help="create/migrate the SQLite database")
+    sub.add_parser(
+        "telegram-test",
+        help="smoke-test Telegram: report config, send one message, check inbound",
+    )
 
     return parser
 
@@ -107,11 +111,33 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_halt(args: argparse.Namespace) -> int:
-    host = get_host()
+def set_halt(host: Host) -> Path:
+    """Create the HALT flag file (DESIGN §5 gate 1, §7.2 ``/halt``).
+
+    Shared by the ``halt`` CLI subcommand and the Telegram ``/halt`` command
+    (:mod:`nightwatch.notify.commands`) so the two never drift apart.
+    """
     path = host.halt_flag_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("halted by nightwatch.cli halt\n", encoding="utf-8")
+    return path
+
+
+def clear_halt(host: Host) -> bool:
+    """Remove the HALT flag file if present. Returns True if it existed.
+
+    Shared by the ``resume`` CLI subcommand and the Telegram ``/resume``
+    command (:mod:`nightwatch.notify.commands`).
+    """
+    path = host.halt_flag_path()
+    existed = path.exists()
+    if existed:
+        path.unlink()
+    return existed
+
+
+def _cmd_halt(args: argparse.Namespace) -> int:
+    path = set_halt(get_host())
     print(f"HALT flag set: {path}")
     print("preflight gate 1 will abort every future session until 'nightwatch resume'.")
     return 0
@@ -120,12 +146,95 @@ def _cmd_halt(args: argparse.Namespace) -> int:
 def _cmd_resume(args: argparse.Namespace) -> int:
     host = get_host()
     path = host.halt_flag_path()
-    if path.exists():
-        path.unlink()
+    if clear_halt(host):
         print(f"HALT flag cleared: {path}")
     else:
         print(f"HALT flag was not set: {path}")
     return 0
+
+
+def _cmd_telegram_test(args: argparse.Namespace) -> int:
+    """Verify Telegram before any eToro credentials exist.
+
+    Reports whether the token and chat id are configured (never their
+    values), sends one test message, polls ``getUpdates`` once, and prints a
+    clear PASS/FAIL summary. This is meant to run standalone, with nothing
+    else built yet, so it does its own tiny bit of config loading rather
+    than depending on the session engine.
+
+    The report is printed as two clearly distinct things: the ``enabled``
+    *feature toggle* from ``config.toml`` (does the user want Telegram at
+    all) versus the *runtime state* (are credentials actually present) --
+    printing both under the same word ("enabled") reads as a
+    self-contradiction, so they get separate, unambiguous labels.
+    """
+    import logging
+
+    from .db.repo import Repo, default_db_path
+    from .notify.telegram import TelegramNotifier
+
+    host = get_host()
+    ok = True
+
+    try:
+        config = load_config(config_path=args.config, secrets_path=args.secrets, host=host)
+    except ConfigError as exc:
+        print(f"config: ERROR - {exc}", file=sys.stderr)
+        print("FAIL: could not load config.toml")
+        return 1
+
+    has_token = bool(config.telegram.secrets.get("TELEGRAM_BOT_TOKEN"))
+    has_chat_id = bool(config.telegram.secrets.get("TELEGRAM_CHAT_ID"))
+    has_command_secret = config.telegram.has_command_secret
+
+    # TelegramNotifier.__init__ logs a warning when disabled, and with no
+    # handler configured Python's logging "handler of last resort" prints it
+    # straight to stderr -- above everything else we print, burying the
+    # header below. We report the same fact ourselves, explicitly and in
+    # context, so demote that one log line to DEBUG for the life of this
+    # command rather than let it print out of order.
+    telegram_logger = logging.getLogger("nightwatch.notify.telegram")
+    previous_level = telegram_logger.level
+    telegram_logger.setLevel(logging.ERROR)
+
+    print("Telegram configuration")
+    print(f"  enabled in config.toml         : {'yes' if config.telegram.enabled else 'no'}")
+    print(f"  TELEGRAM_BOT_TOKEN set         : {'yes' if has_token else 'no'}")
+    print(f"  TELEGRAM_CHAT_ID set           : {'yes' if has_chat_id else 'no'}")
+    print(f"  NIGHTWATCH_COMMAND_SECRET set  : {'yes' if has_command_secret else 'no'}")
+
+    try:
+        with Repo.open(default_db_path(host), host=host) as repo:
+            notifier = TelegramNotifier(
+                config.telegram, repo, environment=config.environment.value
+            )
+            try:
+                if not notifier.enabled:
+                    ok = False
+                    print(f"  runtime state                  : DISABLED ({notifier.disabled_reason})")
+                else:
+                    print("  runtime state                  : ENABLED")
+                    print("sending one test message...")
+
+                notification = notifier.send(
+                    "etoroNightwatch telegram-test: this is a smoke test.",
+                    event="message",
+                )
+                print(f"send status: {notification.status}" + (
+                    f" ({notification.error})" if notification.error else ""
+                ))
+                if notification.status not in ("sent", "skipped"):
+                    ok = False
+
+                updates = notifier.get_updates()
+                print(f"pending inbound updates: {len(updates)}")
+            finally:
+                notifier.close()
+    finally:
+        telegram_logger.setLevel(previous_level)
+
+    print("PASS" if ok else "FAIL")
+    return 0 if ok else 1
 
 
 def _cmd_not_implemented(command: str) -> int:
@@ -151,6 +260,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _cmd_halt(args)
     if args.command == "resume":
         return _cmd_resume(args)
+    if args.command == "telegram-test":
+        return _cmd_telegram_test(args)
     if args.command in _NOT_YET_IMPLEMENTED:
         return _cmd_not_implemented(args.command)
 

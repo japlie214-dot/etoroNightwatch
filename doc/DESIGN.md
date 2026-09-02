@@ -731,7 +731,7 @@ observation**, then re-verified after every OS update.
 | 5 | App **locked in Recents** | Recents → app card → lock |
 
 Reports exist of alarms failing on vivo hardware **even with all five applied**
-(https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61). That is why §11 step 0 is an
+(https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61). That is why §11 step 4 is an
 empirical multi-night proof and not a paperwork exercise.
 
 **After every OS update, re-verify all five and re-run a one-night proof before trusting the
@@ -831,6 +831,7 @@ connectivity will abort safely at **preflight gate 3** rather than trade blind.
 | `/next` | next scheduled run, in ET and WIB |
 | `/halt` | set the halt flag — preflight gate 1 will abort every future session |
 | `/resume` | clear the halt flag |
+| `/help` | list the supported commands above |
 
 **Explicitly not available: config changes, arming live mode, manual trades, budget changes.**
 
@@ -969,26 +970,33 @@ minimums, and injectable failures (timeout after submit, rejection, partial fill
 
 ## 11. Build order
 
-Nothing touches real money until step 9 passes on demo.
+**No eToro credential is required until step 5, and no real-money credential until step 12.**
+The order below is deliberately re-sequenced from a strict dependency order to front-load the
+questions with the cheapest, most reversible answers: prove the free infrastructure works with
+nothing but a laptop and a bot token, *then* decide whether the Android platform risk (§1.2,
+§12) and the eToro integration are worth building against. See `doc/RUNBOOK_INFRA.md` for the
+step-by-step console/CLI instructions behind steps 0–2.
 
 | # | Step | Gate |
 |---|---|---|
-| 0 | **Android platform proof.** A minimal APK — nothing but `setAlarmClock()`, a boot receiver, and a job that hits an HTTPS endpoint and logs the result. Grant `SCHEDULE_EXACT_ALARM` and the battery-optimization exemption, apply the vivo checklist, then **leave the phone on battery overnight** and confirm the alarm fires **on time** *and* **has working network**, for **several consecutive nights**, including one across a reboot. | **Blocks everything** |
-| 1 | Gradle + Chaquopy scaffold: config, SQLite schema, logging, `host.py` bridge, desktop CLI parity | |
-| 2 | eToro client: auth, rate limiting, retries, all read endpoints, typed models | Against **demo** |
-| 3 | Market calendar + bar store + seeding (400 daily bars) + provisional/settle | |
-| 4 | Strategy port with the four fixes; unit tests vs `etoro_trader` fixtures | |
-| 5 | Forward-test harness + fake broker; criteria 1–8 (desktop CPython) | **Gate** |
-| 6 | Session engine: preflight, executor, idempotency, reconciliation | |
-| 7 | Telegram: outbound events, heartbeat, FCM-driven inbound with escalation-only hourly poll and the allowlist | |
-| 8 | Cloudflare Worker (snapshot KV/D1 store, shared push secret, separate read token, on-demand FCM relay) + Cloudflare Pages static web app (§9); embedded FastAPI demoted to LAN-only debug view (§9.5) — no DHCP reservation required for normal operation | |
-| 9 | Demo end-to-end **on the phone, on battery**: alarm → real demo orders → back to Doze, several consecutive sessions | **Gate** |
-| 10 | Go live: real keys, `NIGHTWATCH_ARM`, small budget override, watch closely | Your call |
+| 0 | **Telegram smoke test.** Create the bot, obtain a chat id, send one message end to end (`RUNBOOK_INFRA.md` Part C). No credential beyond a bot token — proves the one outbound channel that has no dependency on the phone, the Worker, or eToro (§8.1). | |
+| 1 | **Firebase project + Cloudflare Worker.** Mint a Google OAuth token from the service-account JSON, then call FCM HTTP v1 and get back either a message id or a "no such registration token" error — the latter is a **pass**, since no device is registered yet (`RUNBOOK_INFRA.md` Parts A, B, D). **Proves free-tier viability with no phone and no eToro keys.** | **GATE — the question asked first** |
+| 2 | Cloudflare Pages static web app reading a **stub** snapshot from the Worker (hand-written JSON, not a real portfolio). Proves the read path — Pages → Worker → KV → browser, with the read token enforced — end to end before any real data exists. | |
+| 3 | **Android tooling install** — JDK + Android SDK + `adb`. Currently absent from this machine (§12) and explicitly a prerequisite, not assumed; deferred to here so it is only installed once step 1 has proven the cloud side is worth building against. | |
+| 4 | Minimal APK: FCM receive + `setAlarmClock()`, nothing else — the same shape as the old gate-zero `WakeProof.ps1` from the Windows design, now proving the Android platform instead of Task Scheduler. Grant `SCHEDULE_EXACT_ALARM` and the battery-optimization exemption, apply the vivo checklist (§7.4). | **GATE — the multi-night on-battery proof.** Fires on time *and* has network, unplugged, screen off, untouched, for **3+ hours**, on **several consecutive nights**, including once across a reboot. Additionally confirm `RemoteMessage.getPriority()` still reports `PRIORITY_HIGH` after a week of pushes (§8.2 demotion canary) — this is the check that catches Google's 7-day silent-send demotion before it ever costs a live session. |
+| 5 | eToro client: auth, rate limiting, retries, all read endpoints, typed models. **First step that needs any eToro key at all**, and only the **demo** pair. | Against **demo** |
+| 6 | Market calendar + bar store + seeding (400 daily bars) + provisional/settle | |
+| 7 | Strategy port with the four approved bug fixes (§1.4); unit tests against `etoro_trader` fixtures | |
+| 8 | Forward-test harness + fake broker; acceptance criteria 1–8 (§10, desktop CPython) | **Gate** |
+| 9 | Session engine: preflight (§5), executor, idempotency, reconciliation, sleeve accounting (§4.5) | |
+| 10 | Full app integration: Telegram inbound with escalation-only hourly poll and the allowlist (§8.2), snapshot push to the Worker, the web app now reading live data instead of the step-2 stub; embedded FastAPI demoted to LAN-only debug view (§9.5) | |
+| 11 | Demo end-to-end **on the phone, on battery**: scheduled wake → real demo orders → back to Doze, several consecutive sessions | **Gate** |
+| 12 | Go live: real keys, `NIGHTWATCH_ARM`, small `cash_allocation_usd`, watch closely | Your call |
 
-Step 0 is the same kind of gate-zero the Windows design gave to `WakeProof.ps1`, and it
-replaces it. **Do not build steps 1–10 on an unproven platform.** If the minimal APK cannot
-reliably fire with network on battery on this specific handset, no amount of application code
-fixes it.
+**Do not build steps 3–12 on an unproven platform.** If the minimal APK (step 4) cannot reliably
+fire with network on battery on this specific handset, no amount of application code fixes it —
+that gate is unchanged from the original design, only its number and its position relative to
+the cloud-infrastructure proof have moved.
 
 ---
 
@@ -1001,11 +1009,12 @@ recorded here as a standing risk, not re-argued.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| **vivo's undocumented background killing on battery** — dontkillmyapp rates vivo 3/5 and states restrictions *"have not been fully uncovered yet"*; developers report alarms failing even with every known setting applied | **High** | §11 step 0 multi-night proof on battery before anything else; all five vivo settings (§7.4); foreground service for the run; daily Telegram heartbeat so a silent kill is detected the same morning. **There is no way to make this risk go away — only to detect it fast.** |
+| **vivo's undocumented background killing on battery** — dontkillmyapp rates vivo 3/5 and states restrictions *"have not been fully uncovered yet"*; developers report alarms failing even with every known setting applied | **High** | §11 step 4 multi-night proof on battery before anything else; all five vivo settings (§7.4); foreground service for the run; daily Telegram heartbeat so a silent kill is detected the same morning. **There is no way to make this risk go away — only to detect it fast.** |
 | **Battery-optimization exemption revoked** (by an OS update, a "battery saver" sweep, or the user) — silently removes network in the Rare/Restricted buckets | **High** | Preflight gate 2 checks it every run and fails loudly with the exact Settings path. Detected within one session. |
 | **OS upgrade resets power-management settings** — the Z10 is early in its support life and *will* take major upgrades | **High** | Runbook: re-verify all five vivo settings **and re-run a one-night proof** after every OS update. Host panel shows the last-verified date. |
 | **`SCHEDULE_EXACT_ALARM` revoked** — *"your app stops, and all future exact alarms are canceled"* | **High** | `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` receiver + `canScheduleExactAlarms()` in preflight gate 2. Never silently downgrade to an inexact alarm. |
-| **Orders near the close may behave differently than documented** | **High** | Step 9 on demo settles it; status 11 handled either way. |
+| **Orders near the close may behave differently than documented** | **High** | Step 11 on demo settles it; status 11 handled either way. |
+| **No Android build tooling on the development machine** — no JDK, no Android SDK, no `adb` installed as of this writing | Medium | Recorded as an explicit prerequisite gap, not assumed away. §11 sequences the Firebase/Cloudflare infrastructure proof (steps 0–2) *before* this install (step 3) specifically so the tooling install is deferred until it's known to be worth doing. Installing it is mechanical (Android Studio or SDK Studio command-line tools + a JDK) but is real setup time, not yet spent. |
 | **Running on battery rather than mains** — a flat phone is a missed session with no alert | Medium | Preflight gate 2 aborts below 40% and says so; daily heartbeat makes a dead phone obvious; charge cap and periodic inspection for the opposite failure. |
 | **Battery swelling** from long periods on charge; 7300 mAh cell | Medium | Funtouch 80% charge cap if available (*unverified — community-sourced, confirm on device*); periodic physical inspection; replace at ~3 years. A swollen cell is a fire risk. |
 | UPRO may not be tradable on your eToro entity | Medium | Preflight gate 8 — `allowOpenPosition` is authoritative. |

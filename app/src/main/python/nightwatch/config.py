@@ -327,6 +327,25 @@ class TelegramConfig:
             and self.secrets.get("TELEGRAM_CHAT_ID")
         )
 
+    @property
+    def command_secret(self) -> str:
+        """Shared HMAC secret for inbound command auth (DESIGN §7.2).
+
+        Every inbound command carries an HMAC of ``(command, counter)`` keyed
+        by this value. Raises if absent, mirroring :attr:`bot_token`.
+        """
+        secret = self.secrets.get("NIGHTWATCH_COMMAND_SECRET", "")
+        if not secret:
+            raise MissingCredentialError(
+                "missing NIGHTWATCH_COMMAND_SECRET in config/.secrets.env"
+            )
+        return secret
+
+    @property
+    def has_command_secret(self) -> bool:
+        """True when ``NIGHTWATCH_COMMAND_SECRET`` is present."""
+        return bool(self.secrets.get("NIGHTWATCH_COMMAND_SECRET"))
+
 
 @dataclass(frozen=True, slots=True)
 class WebappConfig:
