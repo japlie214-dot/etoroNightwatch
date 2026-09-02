@@ -8,12 +8,16 @@ as a small always-reachable personal server, contacted over Telegram.
 
 etoroNightwatch wakes the phone in the Jakarta small hours, verifies it is safe to trade, runs
 the Std Band Ladder Cash Recycle strategy against live US market prices **thirty minutes before
-the close**, executes on eToro, reports to Telegram, and lets the device fall back into Doze. A
-FastAPI webapp embedded in the app shows the whole portfolio from any device on the same LAN.
+the close**, executes on eToro, reports to Telegram, and lets the device fall back into Doze.
+The real eToro account holds other assets besides UPRO and SCHG; etoroNightwatch **displays
+everything but manages only the managed set** (§1.4). A static web app (Cloudflare Pages,
+reading a snapshot pushed by the phone to a Cloudflare Worker, §9) is the primary way to check
+the portfolio from anywhere; an embedded FastAPI server remains as an optional LAN-only debug
+view (§9.5).
 
 The phone is woken by **three independent paths** — an on-device `setAlarmClock()`, a
 cloud-scheduled FCM high-priority push, and a manual command — converging on **one idempotent
-session** (§6.2).
+session** (§7.2).
 
 ---
 
@@ -67,9 +71,9 @@ is precisely the condition this host runs in.
 | `setAlarmClock()` surfaces a **visible alarm icon in the status bar**. | Cosmetic. Accepted. |
 | **Chaquopy is free and open-source under MIT** (https://chaquo.com/chaquopy/, https://github.com/chaquo/chaquopy/blob/master/LICENSE.txt). It embeds a real CPython interpreter in the APK and ships prebuilt native wheels for NumPy, SciPy, pandas and scikit-learn. | The Python strategy, SQLite layer, eToro client and Telegram code port over largely unchanged. **We do not have to drop numpy/pandas.** |
 | Cost: a Gradle / Android Studio build pipeline, and sideloading a new APK on every code change. | Slower iteration than editing a `.py` on a laptop. Accepted. |
-| `setAndAllowWhileIdle()` / `setExactAndAllowWhileIdle()` *"cannot fire alarms more than once per nine minutes, per app."* | Would have constrained a polling cadence. **Mostly moot** — inbound control is push-driven, not polled, in the normal case (§7.2). The daily safety-net alarm uses this family once a day; the escalation-only hourly Telegram poll (§7.2) also uses it, but only while escalated, at 1 hour — comfortably above the 9-minute floor. |
-| Doze names **FCM high-priority messages** as a wake mechanism: *"FCM high priority messages let you wake your app to engage the user. In Doze or App Standby mode, the system delivers the message and gives the app temporary access to network services and partial wakelocks, then returns the device or app to the idle state."* (https://developer.android.com/training/monitoring-device-state/doze-standby) | The inbound control channel and the redundant daily trigger (§7.2, §6.2). Note what is granted: **network + partial wakelock, temporarily**, at delivery time. |
-| AOSP names telephony as the *other* Doze-exempt wake path: *"MMS/SMS/telephony services function independently of Doze and always wake the client apps even while the device remains in Doze mode."* … *"Apps receiving SMS and MMS messages are put on a temporary whitelist so that they can complete their processing."* (https://source.android.com/docs/core/power/platform_mgmt) | Technically the strongest fallback — and **rejected on cost**, not on capability. Recorded with its reasoning in §7.2 so the trade-off is not silently re-litigated. |
+| `setAndAllowWhileIdle()` / `setExactAndAllowWhileIdle()` *"cannot fire alarms more than once per nine minutes, per app."* | Would have constrained a polling cadence. **Mostly moot** — inbound control is push-driven, not polled, in the normal case (§8.2). The daily safety-net alarm uses this family once a day; the escalation-only hourly Telegram poll (§8.2) also uses it, but only while escalated, at 1 hour — comfortably above the 9-minute floor. |
+| Doze names **FCM high-priority messages** as a wake mechanism: *"FCM high priority messages let you wake your app to engage the user. In Doze or App Standby mode, the system delivers the message and gives the app temporary access to network services and partial wakelocks, then returns the device or app to the idle state."* (https://developer.android.com/training/monitoring-device-state/doze-standby) | The inbound control channel and the redundant daily trigger (§8.2, §7.2). Note what is granted: **network + partial wakelock, temporarily**, at delivery time. |
+| AOSP names telephony as the *other* Doze-exempt wake path: *"MMS/SMS/telephony services function independently of Doze and always wake the client apps even while the device remains in Doze mode."* … *"Apps receiving SMS and MMS messages are put on a temporary whitelist so that they can complete their processing."* (https://source.android.com/docs/core/power/platform_mgmt) | Technically the strongest fallback — and **rejected on cost**, not on capability. Recorded with its reasoning in §8.2 so the trade-off is not silently re-litigated. |
 | Android 12+ requires `SCHEDULE_EXACT_ALARM` (user-granted, Settings → Apps → Special app access → Alarms & reminders) or `USE_EXACT_ALARM` (auto-granted, but carries a Play Store policy that does not apply to a sideloaded personal app). | We use `SCHEDULE_EXACT_ALARM`, check `AlarmManager.canScheduleExactAlarms()` before every schedule, and register a receiver for `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` — because *"When the `SCHEDULE_EXACT_ALARMS` permission is revoked for your app, your app stops, and all future exact alarms are canceled."* |
 | Doze *"ignores wake locks."* | A wake lock **does not escape Doze**. It only keeps the CPU alive once we are already running. Correct pattern: the alarm gets us running, a partial wake lock holds through the ~60s of API calls, released in a `finally` block. |
 | Android 10+ ships **time zone rules as an APEX mainline module**, updated through Google Play system updates independently of the system image. (https://source.android.com/docs/core/permissions/timezone-rules) | tzdata stays current without an OS upgrade. `zoneinfo("America/New_York")` can be trusted. |
@@ -98,14 +102,14 @@ treated as a hard failure.
 
 #### vivo / iQOO — stated plainly
 
-This is the weakest link and the user chose it knowingly (§11).
+This is the weakest link and the user chose it knowingly (§12).
 
 - dontkillmyapp.com/vivo rates vivo **3/5** and states: *"System restrictions on Vivo phones have not been fully uncovered yet."*
 - There is **no vivo developer documentation** on background execution restrictions. Behaviour is reverse-engineered by the community, not specified.
 - Developers report alarms failing on vivo devices **even with autostart enabled, battery optimization disabled, and the app locked in Recents** (https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61). Alarmy maintains a dedicated vivo troubleshooting article.
 - Contrast, honestly: Samsung is **more aggressive by default** but **documents its off switch**. vivo is less aggressive on paper and documents nothing. Undocumented is worse than aggressive-but-known, because it cannot be verified — only observed.
 
-Required vivo settings (all of them, §6.4):
+Required vivo settings (all of them, §7.4):
 
 1. Autostart enabled — Settings → More settings → Applications → Autostart, or i Manager → App manager → Autostart manager
 2. Battery usage → **Unrestricted**
@@ -156,6 +160,14 @@ Three instruments, three roles:
 - **SPY** — signal only, never traded. Source of `cone_5_z`, the running all-time high, and the drawdown tier.
 - **SCHG** — the 1x core book. Bought only on new-ATH bars from surplus cash; sold only to fund a ladder buy; never below `core_floor_pct × equity`. Its **prior-year mean market value sets next year's UPRO budget.**
 - **UPRO** — the only traded risk asset, in two books: `catapult` (the normal ladder) and `reentry` (deferred tranches).
+
+**The managed set.** The real eToro account is not exclusively ours to manage — it can hold,
+and does hold, other assets besides these three. etoroNightwatch defines the **managed set** =
+{UPRO, SCHG}, a hardcoded allowlist, as the only symbols it will ever open, close, or size a
+position in. SPY is signal-only and is never held. Everything else in the account — any
+position outside this set — is **displayed, never touched** (§3, §6.D, §9). This distinction is
+load-bearing throughout the rest of this document: reconciliation (§5 gate 11), the executor's
+close path (§6.D), and the dashboard (§9) all key off it.
 
 The signal, exactly:
 
@@ -263,8 +275,8 @@ etoroNightwatch/
       ExactAlarmPermissionReceiver.kt  # ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED
       NightwatchMessagingService.kt    # FirebaseMessagingService: onMessageReceived does the
                                  # work inline; getPriority() demotion canary; HMAC verify;
-                                 # posts a visible notification for every command (§7.2)
-      TelegramPollReceiver.kt    # escalation-only hourly poll; normally NOT scheduled (§7.2)
+                                 # posts a visible notification for every command (§8.2)
+      TelegramPollReceiver.kt    # escalation-only hourly poll; normally NOT scheduled (§8.2)
       SessionService.kt          # foreground service; partial wake lock; calls Python
       PowerStatus.kt             # battery level/charging, exemption + canScheduleExactAlarms,
                                  # FCM token validity, last-seen message priority
@@ -276,11 +288,13 @@ etoroNightwatch/
       strategy/                  # cone.py, ladder.py, state.py, params.py
       engine/                    # preflight.py, session.py, executor.py, reconcile.py
       notify/                    # telegram.py (outbound), commands.py (inbound allowlist)
-      web/                       # app.py, routers/, templates/, static/
+      web/                       # app.py, routers/, templates/, static/ — optional LAN-only
+                                 # debug view now, not the primary UI (§9.5)
       host.py                    # thin bridge: Kotlin ⇄ Python entry points
       cli.py                     # run | seed | webapp | status | halt  (desktop dev + tests)
   config/
-    config.toml                  # strategy params, symbols, budget override, mode
+    config.toml                  # strategy params, symbols, budget override, mode,
+                                 # cash_allocation_usd (§4.5)
     .secrets.env                 # API keys — gitignored, never logged
                                  # on-device: app-private storage, not external
   data/nightwatch.db             # SQLite, WAL — app-private filesDir on device
@@ -290,6 +304,11 @@ etoroNightwatch/
     replay.py                    # time-travel harness over the LIVE engine
     fake_broker.py               # eToro semantics: async fills, positionIds, min size
   tests/
+  cloud/                         # not part of the Gradle build; deployed separately (§9, §11)
+    worker/                      # Cloudflare Worker: snapshot store, push relay, on-demand
+                                 # FCM trigger — same Worker as the cloud-scheduled daily push
+    pages/                       # Static web app (Cloudflare Pages) — reads the snapshot
+                                 # from the Worker, no server of its own
 ```
 
 Everything under `src/main/python/nightwatch/` runs unmodified on a desktop CPython for
@@ -308,12 +327,12 @@ development, unit tests and the forward test. Only `host.py` differs in what cal
 | `decisions` | per-session `cone_z`, `spy`, `ath`, `drawdown`, `tier`, intents JSON, reason |
 | `intents` | one row per `OrderIntent` **written before any HTTP call**, with its `x-request-id` UUID — the idempotency anchor |
 | `orders` | eToro `orderId`, `referenceId`, status history, terminal status, fill price/units |
-| `lots` | the ladder book: units, entry price, `entry_reference_spy`, `cost_basis`, `position_id`, `book`, `entry_spy_ath/close/drawdown`, exit fields |
+| `lots` | the ladder book, **managed-set symbols only**: units, entry price, `entry_reference_spy`, `cost_basis`, `position_id`, `book`, `entry_spy_ath/close/drawdown`, exit fields. The executor may only close a `position_id` present here (§6.D) |
 | `buckets` | `bucket_id, sale_date, sale_spy_close, proceeds, tranche_amount, tranches_bought, last_reference_spy, created_bar` |
 | `strategy_state` | singleton: `bars`, `ath`, `below_streak`, `recyclable_cash`, `budget_year`, `budget`, `order_size`, `cash_target`, `sale_batch_sequence`, `sale_batch_date` |
 | `schg_daily_values` | `(date, value)` — feeds next year's budget |
 | `budget_history` | `(year, budget, order_size, cash_target, source: auto\|override)` |
-| `portfolio_snapshots` | per-session equity, cash, available cash, unrealized P&L, per-position rows |
+| `portfolio_snapshots` | per-session **account-level** totals (all-asset equity, total cash, `broker_available_cash`) **and sleeve** totals (`cash_allocation_usd`, `sleeve_cash`, `sleeve_equity`, sleeve unrealized/realized P&L, §4.5), plus per-position rows for every broker position with an `is_managed` flag — non-managed holdings are recorded for display only (§1.4, §9). This is also the row pushed to the Cloudflare Worker (§9) |
 | `notifications` | Telegram send log with delivery status |
 | `commands` | inbound control audit: command text, `channel` (`fcm`\|`telegram`), sender/chat id, HMAC counter (replay rejection), verdict (accepted/rejected + reason), timestamp — an inbound control channel must be auditable |
 
@@ -325,7 +344,7 @@ development, unit tests and the forward test. Only `host.py` differs in what cal
 
 ```
 T-15min  setAlarmClock() fires → SessionAlarmReceiver → SessionService (foreground)
-         Acquire PARTIAL_WAKE_LOCK (released in finally, §6.6)
+         Acquire PARTIAL_WAKE_LOCK (released in finally, §7.6)
          ↓
   [1]    PREFLIGHT — 12 gates, all must pass (§5)
          ↓  abort → Telegram with reason, hold the wake lock, no return to Doze
@@ -337,7 +356,8 @@ T-15min  setAlarmClock() fires → SessionAlarmReceiver → SessionService (fore
          ↓
   [5]    COMPUTE cone_5_z over 265+ bars ending on today's provisional close
          ↓
-  [6]    DECIDE — strategy.decide() → OrderIntents  (persisted to `decisions`)
+  [6]    DECIDE — strategy.decide() → OrderIntents  (persisted to `decisions`; every cash/
+         equity input is the sleeve, never the account, §4.5)
          ↓
   [7]    ARM GATE — mode==live AND NIGHTWATCH_ARM set AND no HALT flag
          ↓  else → log + Telegram "would have done X", stop cleanly
@@ -374,7 +394,7 @@ signal is computed against a slightly wrong history, and the error compounds sil
 close is taken **20 minutes further from the true official close** than the design originally
 carried. That is a real cost to signal fidelity — the price can move meaningfully in twenty
 extra minutes of trading — not a rounding error to be assumed away. It is not left as an
-unmeasured assumption: the forward test (§9) replays the strategy using provisional closes
+unmeasured assumption: the forward test (§10) replays the strategy using provisional closes
 sampled at both T-10 and T-30 against the official close series and reports the divergence
 directly, in `cone_5_z` and in the resulting trade decisions.
 
@@ -406,22 +426,61 @@ mandate a `stopLossRate`.
 `minPositionExposure`. etoroNightwatch **blocks and alerts loudly** rather than silently
 resizing — a silent bump would break the tier-cap arithmetic the whole strategy rests on.
 
+See §6.A for why `leverage: 1` and `settlementType: real` are enforced structurally, not just
+in this payload.
+
 ### 4.4 Extra deposits
 
-Your assumption is right, and here is precisely why. Equity and cash are read live from the
-API each session. The budget is struck **annually** from the prior year's mean SCHG value, so
-a mid-year deposit does not move it — matching backtest semantics exactly. The new cash sits
-in the account, raises `equity`, and is swept into SCHG on the next new-ATH bar by the
-existing surplus rule. No special service needed.
+**Revised by the sleeve model (§4.5).** With `cash_allocation_usd` an absolute figure in
+config, a deposit no longer moves automatically. This is deliberate, not a regression: the app
+manages a fixed slice of the account, so a deposit sitting in the wider account does **not**
+raise `sleeve_cash`, does **not** raise `sleeve_equity`, and cannot be swept into SCHG by
+surprise. To make new money available to the strategy, raise `cash_allocation_usd` in config —
+an explicit, auditable act, not an automatic one.
 
-**One consequence worth knowing:** a large deposit will be moved into SCHG in a single sweep
-on the next new-ATH bar. If you would rather stage that, deposit in tranches or set a
-temporary budget override. Flagging, not changing — this is existing behaviour.
+The **annual budget rule is unchanged**: `budget = floor(0.4 × prior_year_mean_SCHG_value / 20)
+× 20`, struck once a year from the sleeve's own SCHG history, and unaffected either way by a
+mid-year deposit.
 
-### 4.5 Budget: auto with override
+Think of this as more control than the original design, not less: previously any deposit —
+intended for the strategy or not — was liable to be swept into SCHG on the next new-ATH bar.
+Now nothing moves until you say so.
+
+### 4.5 The sleeve: what `cash` and `equity` mean
+
+The user allocates a fixed slice of the eToro account to this app; the rest of the account is
+the user's to use freely, entirely outside etoroNightwatch's view. So the strategy must never
+reason about **whole-account** cash or equity — only about the slice it was given. Call that
+slice the **sleeve**.
+
+| Term | Definition |
+|---|---|
+| `cash_allocation_usd` | An **absolute USD figure in config** (e.g. `2000`) — the app's cash. Nullable/absent means "all available cash"; the shipped default in `config.toml` is an explicit number, not `null`. |
+| `sleeve_cash` | `min(cash_allocation_usd, broker_available_cash)`. If the configured allocation exceeds what is actually available, **clamp to available cash and send a loud Telegram warning** — never fail the session for this, but never let the sleeve claim more cash than exists. |
+| `broker_available_cash` | Computed with eToro's documented formula (§1.1, §9), **not** `totalBalance` (which is portfolio value, not cash): `available = credit − (Σ ordersForOpen[i].amount where mirrorID = 0 + Σ orders[i].amount)`. |
+| `sleeve_equity` | `sleeve_cash + market value of our UPRO lots + market value of our SCHG lots`. Explicitly **not** account equity — non-managed holdings never enter this number. |
+
+**Every place the strategy reads cash or equity now means the sleeve, not the account:**
+
+- the G-B cash gate in `_buy_if_allowed`
+- `cash_target = 8 × order_size`
+- the SCHG core floor, `core_floor_pct × equity` — reads `0.5 × sleeve_equity`
+- the first-year budget fallback, `core_fraction × equity` — reads `0.4 × sleeve_equity`
+- the SCHG surplus sweep threshold
+- the SCHG sell-to-fund calculation
+
+**Why this matters, stated plainly.** If any of these read whole-account values while the app
+controls only a slice, the arithmetic is wrong in both directions, and not symmetrically — the
+worst case is the core floor computed against an account equity figure far larger than what the
+app actually manages, which **permanently blocks buys** the sleeve could otherwise afford.
+Getting this half-right — reading the sleeve in some places and the account in others — is
+worse than not doing it at all, because the failure is silent arithmetic, not a crash.
+
+### 4.6 Budget: auto with override
 
 Auto (the backtest rule): `budget = floor(0.4 × prior_year_mean_SCHG_value / 20) × 20`;
-first year `0.4 × equity`. Then `order_size = max(budget/60, 10)`, `cash_target = 8 × order_size`.
+first year `0.4 × sleeve_equity` (§4.5). Then `order_size = max(budget/60, 10)`,
+`cash_target = 8 × order_size`.
 
 Override: `config.strategy.budget_override_usd`. Non-null wins immediately, `order_size` and
 `cash_target` recompute from it, and the change is written to `budget_history` with
@@ -448,7 +507,7 @@ reachable for diagnosis in the morning.
 | 8 | **Instruments** | UPRO/SCHG/SPY unresolvable; `allowOpenPosition` false; `minPositionExposure` > `order_size` |
 | 9 | **Calendar** | Not a US trading day; also resolves early-close (13:00 ET) days so T-30min is correct |
 | 10 | **Price data** | < 265 settled SPY bars; any unsettled provisional bar; stale/zero live rate |
-| 11 | **Reconciliation** | Broker positions and DB lots disagree (unknown position, or a lot with no position) |
+| 11 | **Reconciliation** | An **unknown broker position in a managed symbol** (UPRO/SCHG we did not open) → hard failure. A **DB lot with no matching broker position** → hard failure (closed outside the app; needs reconciliation and a notification, never a silent re-buy). A position in **any non-managed symbol** is ignored for trading and recorded for display only — never a failure (§1.4, §6.D) |
 | 12 | **Risk caps** | Session order count or notional exceeds configured caps; daily loss guard tripped |
 
 **Gate 2 deserves emphasis.** The two host permissions it checks are the ones Android can take
@@ -458,36 +517,164 @@ cancels every future exact alarm**. Both are checked on every run and both fail 
 Telegram, naming the exact Settings path to restore them. A quiet degradation here would look
 identical to "the market was closed."
 
-### Safety beyond preflight
-
-- **Two-key arming.** Live execution needs `mode = "live"` in config **and** the `NIGHTWATCH_ARM` flag. Neither alone is sufficient.
-- **Separate credentials by privilege.** A Real+**Read** key for the webapp; a Real+**Write** key used only by the session service; a Demo pair for the forward test. Use eToro's IP-whitelist and expiry options on all of them.
-- **Idempotency.** The `x-request-id` UUID is persisted to `intents` **before** the HTTP call and doubles as eToro's `referenceId`. If the response is lost (crash, network drop, process death), recovery looks the order up by `referenceId` rather than re-sending. This is the difference between a lost response and a double buy.
-- **One session per date**, enforced by a unique constraint, backed by the "already ran today" flag the safety-net alarm consults.
-- **Never return to Doze on failure** — an aborted run holds the wake lock so the device stays reachable.
+Beyond the twelve gates above: an aborted run **never returns to Doze** — the wake lock is
+held so the device stays reachable for diagnosis in the morning. Everything else that used to
+live here — arming, credential separation, idempotency, session dedup — is consolidated into
+§6, so it sits alongside the rest of the app's safety design rather than being split across two
+sections.
 
 ---
 
-## 6. Host integration — Android (iQOO Z10)
+## 6. Safety mechanisms
 
-### 6.1 App architecture
+Every control below is either **structural** — impossible by construction, enforced in code
+before any HTTP call is made — or **procedural** — a check that runs every session but could,
+in principle, be bypassed by a bug elsewhere. Structural controls are preferred wherever the
+API allows them; procedural controls exist where a structural one isn't possible (nothing stops
+eToro's servers from misbehaving, so a poll-to-terminal check is procedural by necessity). Both
+kinds are listed together below, grouped by what they protect against.
+
+### A. Never margin, never short — structurally, not by convention
+
+- Every open order intent sends `leverage: 1` exactly. An intent constructed with any other
+  leverage value is **rejected before the HTTP call is made**, not merely defaulted.
+- `max_leverage = 1` is a **hardcoded Python constant, not a `config.toml` value** — so no
+  config edit, however wrong, can raise it.
+- `transaction` is only ever `buy`. The code path that would send `sellShort` or `buyToCover`
+  does not exist.
+- `settlementType` is only ever `real`. Never `cfd`, `marginTrade`, or `realFutures` — those are
+  eToro's leveraged/short settlement paths.
+- Reductions happen **only** by closing a `positionId` we already own, via the market-close
+  endpoint (§4.3). There is no code path that opens a short to reduce exposure.
+- **Cross-check from §1.1:** eToro requires `stopLossRate` when `leverage > 1`. If the API ever
+  demands a stop-loss on one of our orders, that is not something to satisfy — it is proof we
+  are accidentally leveraged, and it is treated as an **abort condition**.
+- Preflight gate 12 (risk caps) additionally checks: if any existing managed-symbol position
+  reports `leverage > 1`, halt and notify. That should be structurally unreachable; the check
+  exists anyway, because "should be unreachable" is not the same guarantee as "is checked."
+- **Stated honestly:** UPRO is itself a 3x-leveraged ETF. We buy it **unleveraged** — our own
+  order carries `leverage: 1` — and let the fund's internal leverage do the work. The
+  strategy's `leverage=3` metadata (§1.4, §4.3) is descriptive only; the backtest deducted full
+  notional cash, and so do we.
+
+### B. Never exceed available cash
+
+- `sleeve_cash` is clamped to `broker_available_cash`, computed with eToro's documented formula
+  (§4.5), never `totalBalance`.
+- The **sum of all intent amounts in one session** must not exceed `sleeve_cash` minus the
+  tier-1 reserve.
+- Each order **re-checks remaining sleeve cash immediately before submission**, not once at
+  planning time — an earlier fill in the same session changes what is left.
+
+### C. Blast-radius caps (config, with defaults)
+
+| Config key | Purpose |
+|---|---|
+| `max_orders_per_session` | Independent backstop on how much can happen in one run. |
+| `max_notional_per_session_usd` | Independent backstop in dollar terms. |
+| `max_open_lots` | Independent backstop; the strategy's own `MAX_LOTS = 60` (§1.4) is a strategy-level bound — this is a second, separate one. |
+| daily loss guard | If sleeve P&L for the day is worse than a configured threshold, halt and notify (feeds preflight gate 12 and auto-halt, §6.I). |
+
+### D. Symbol allowlist
+
+The **managed set** (§1.4) = {UPRO, SCHG}, hardcoded, plus SPY as signal-only. Two enforcement
+points:
+
+- **Opens.** An order intent for any symbol outside the managed set is rejected before the HTTP
+  call — there is no config path to widen this set at runtime.
+- **Closes.** The executor may only ever close a `positionId` that (a) exists in our own `lots`
+  table **and** (b) whose symbol is in the managed set. This is the single most important
+  blast-radius control in the app: it makes it **structurally impossible** to close a position
+  we did not open ourselves, including any other holding in the same eToro account.
+
+This is also what fixes preflight gate 11 (§5) for an account that holds more than UPRO and
+SCHG: an unknown position in a **managed** symbol is a hard failure (something opened UPRO/SCHG
+we don't know about — do not trade blind); a DB lot with no matching broker position is a hard
+failure (closed outside the app, needs reconciliation and a notification, never a silent
+re-buy); a position in **any non-managed symbol** is ignored for trading and recorded for
+display only (§9) — never a failure. Before this fix, gate 11 would have aborted every session
+against a real, multi-asset account.
+
+### E. Arming
+
+- Live execution needs **both** `mode = "live"` in config **and** the `NIGHTWATCH_ARM`
+  environment variable, **and** no `HALT` flag set. Neither of the first two is sufficient
+  alone.
+- **The invariant:** every kill switch in §6.I can only ever **stop** trading. None of them,
+  alone or combined with anything else, can **start** a trade.
+
+### F. Environment safety
+
+- Preflight probes that the API key's environment actually matches the configured environment
+  (`real`/`demo`) **before any write** — probed against the API, not trusted from config
+  (§5 gate 7).
+- If the two disagree, the session refuses to execute live.
+- **Separate credentials by privilege:** a Real+**Read** key for the webapp/snapshot, a
+  Real+**Write** key used only by the session service, a Demo pair for the forward test. eToro's
+  IP-whitelist and expiry options are used on all of them.
+- Every Telegram message and every dashboard view states **DEMO** or **REAL** unmistakably — no
+  ambiguity about which environment a number belongs to.
+
+### G. Bad-data safety
+
+- Reject a live rate whose timestamp is older than a configured staleness limit.
+- **Bad-tick guard:** reject a live price that deviates from the previous settled close by more
+  than a configured percentage. The entry signal fires when `cone_5_z < −2`, so a single bad
+  tick on the downside could manufacture a spurious buy signal — this is a real failure mode for
+  a system that trades on one live price point (§4.2), not a theoretical one.
+- Sanity-bound the signal itself: an implausible `|cone_5_z|` (say, > 10) **aborts** rather than
+  trades on it.
+- Refuse to trade with fewer than 265 settled SPY bars (§1.4), or with any unsettled provisional
+  bar still in the window (§4.2, preflight gate 10).
+
+### H. Order-verification safety
+
+- HTTP 200 means accepted, not filled (§1.1). Every order is polled via `orders:lookup` to a
+  terminal status.
+- Status **11 (WaitingForMarket)** is explicitly "queued, not filled" — recorded as such, with a
+  decision on whether to cancel; it is never booked as a fill.
+- Status **5 (PartiallyFilled)** records the actual filled units; the requested quantity is
+  never assumed.
+- The `x-request-id` UUID is persisted to `intents` **before** the HTTP call and doubles as
+  eToro's `referenceId`. A lost response (crash, network drop, process death) is recovered by
+  looking the order up by `referenceId`, never by re-sending — the difference between a lost
+  response and a double buy.
+- The documented write rate limit (20/min, §1.1) is respected with a token bucket.
+
+### I. Kill switches and auto-halt
+
+- Manual: the `HALT` file, the Telegram `/halt` command (§8.2), and `mode = "dry_run"` in
+  config.
+- **Auto-halt**, triggered by: any reconciliation mismatch in a managed symbol (§6.D), N
+  consecutive session failures, or the daily loss guard (§6.C) tripping. Auto-halt always
+  notifies with the reason.
+- **One session per trading date**, enforced by a unique constraint on `sessions.trading_date`
+  and backed by the "already ran today" flag the safety-net alarm consults (§7.2) — the safety
+  net can re-register freely without ever causing a second session.
+- Restated: **every kill switch here can only stop trading, never start it** (§6.E).
+
+---
+
+## 7. Host integration — Android (iQOO Z10)
+
+### 7.1 App architecture
 
 | Component | Language | Responsibility |
 |---|---|---|
-| `MainActivity` | Kotlin | Setup and status UI. Permission funnel: `SCHEDULE_EXACT_ALARM`, battery-optimization exemption, notification permission. Renders the vivo settings checklist (§6.4) with a "verified on" date. |
-| `AlarmScheduler` | Kotlin | Computes nothing itself — asks Python for the next fire instant, then calls `setAlarmClock()`. Owns the daily session alarm and the daily safety-net alarm unconditionally; registers the hourly Telegram poll alarm **only while the app is in the escalated state** (§7.2), and cancels it on de-escalation. |
+| `MainActivity` | Kotlin | Setup and status UI. Permission funnel: `SCHEDULE_EXACT_ALARM`, battery-optimization exemption, notification permission. Renders the vivo settings checklist (§7.4) with a "verified on" date. |
+| `AlarmScheduler` | Kotlin | Computes nothing itself — asks Python for the next fire instant, then calls `setAlarmClock()`. Owns the daily session alarm and the daily safety-net alarm unconditionally; registers the hourly Telegram poll alarm **only while the app is in the escalated state** (§8.2), and cancels it on de-escalation. |
 | `SessionAlarmReceiver` | Kotlin | Fires on the session alarm, immediately starts `SessionService`. Does no work in the receiver. |
 | `SessionService` | Kotlin | Foreground service (`dataSync`) with a persistent notification, so Android will not kill the ~15 minutes of run. Acquires the partial wake lock, invokes the Python entry point, releases in `finally`. |
 | `BootReceiver` | Kotlin | `RECEIVE_BOOT_COMPLETED` → re-register the session alarm and the daily safety-net alarm; re-register the escalation poll only if persisted state says the app is currently escalated. |
 | `ExactAlarmPermissionReceiver` | Kotlin | `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` → re-register alarms when the permission is granted back; alert to Telegram when it is lost. |
-| `TelegramPollReceiver` | Kotlin | Escalation-only. When scheduled, hourly `setExactAndAllowWhileIdle()` → drains the Telegram update queue and checks the de-escalation condition (§7.2). Normally not scheduled at all. |
+| `TelegramPollReceiver` | Kotlin | Escalation-only. When scheduled, hourly `setExactAndAllowWhileIdle()` → drains the Telegram update queue and checks the de-escalation condition (§8.2). Normally not scheduled at all. |
 | `nightwatch/*` | Python (Chaquopy) | Everything else: config, SQLite, eToro client, calendar, strategy, engine, notify, web. Identical to the desktop tree. |
 
 The division is deliberate: **Kotlin does only what Python cannot reach** — alarms,
 permissions, wake locks, boot, service lifecycle. All trading logic, all state, all decisions
 stay in Python where they can be forward-tested off-device.
 
-### 6.2 Alarm scheduling and DST
+### 7.2 Alarm scheduling and DST
 
 ```
 end of session  → python: next_close_minus_30("America/New_York", holidays, half_days)
@@ -518,7 +705,7 @@ Before every `setAlarmClock()` call: check `AlarmManager.canScheduleExactAlarms(
 do not silently fall back to an inexact alarm — that would be a silent downgrade to
 unreliability. Alert to Telegram and surface it in the UI.
 
-### 6.3 The mandatory exemptions
+### 7.3 The mandatory exemptions
 
 | Permission / exemption | How | Why it is not optional |
 |---|---|---|
@@ -530,7 +717,7 @@ unreliability. Alert to Telegram and surface it in the UI.
 
 Both user-granted items are re-verified in **preflight gate 2** on every run.
 
-### 6.4 vivo settings checklist
+### 7.4 vivo settings checklist
 
 None of this is documented by vivo. It is community-derived and must be **verified by
 observation**, then re-verified after every OS update.
@@ -540,43 +727,44 @@ observation**, then re-verified after every OS update.
 | 1 | Autostart **enabled** | Settings → More settings → Applications → Autostart, or i Manager → App manager → Autostart manager |
 | 2 | Battery usage **Unrestricted** | Settings → Battery → App battery usage |
 | 3 | **Allow high background power consumption** | same screen |
-| 4 | Battery optimization **disabled** for the app | the exemption dialog in §6.3 |
+| 4 | Battery optimization **disabled** for the app | the exemption dialog in §7.3 |
 | 5 | App **locked in Recents** | Recents → app card → lock |
 
 Reports exist of alarms failing on vivo hardware **even with all five applied**
-(https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61). That is why §10 step 0 is an
+(https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61). That is why §11 step 0 is an
 empirical multi-night proof and not a paperwork exercise.
 
 **After every OS update, re-verify all five and re-run a one-night proof before trusting the
 next live session.** The Z10 is early in its support life and will take major upgrades.
 
-### 6.5 Boot survival
+### 7.5 Boot survival
 
 `BootReceiver` on `RECEIVE_BOOT_COMPLETED` re-registers the session alarm and the daily
 safety-net alarm unconditionally, and re-registers the escalation-only hourly Telegram poll
-**only if persisted state says the app is currently escalated** (§7.2) — a reboot must not
+**only if persisted state says the app is currently escalated** (§8.2) — a reboot must not
 itself turn on a poll that was not running before it. **This must be tested explicitly**:
 reboot the phone, then confirm the job actually fires afterwards, before any real money is
 involved. On vivo, autostart being disabled will silently prevent the receiver from running at
 all — which is exactly the failure mode that looks like nothing happened.
 
-### 6.6 Battery strategy and returning to Doze
+### 7.6 Battery strategy and returning to Doze
 
 - The alarm gets us **running**; the partial wake lock only keeps us running. A wake lock does **not** escape Doze — Doze *"ignores wake locks."* Acquire after the service starts, release in a `finally` block, always.
 - Total awake time per session is roughly 15 minutes, of which ~60 seconds is actual API traffic.
-- **In the normal case, no Telegram polling alarm is scheduled at all** — inbound control rides FCM push, which costs no dedicated alarm or standing connection of our own (§7.2). Only on escalation (FCM demoted, token invalid, or no FCM message for N days) does `AlarmScheduler` register a repeating `setExactAndAllowWhileIdle()` hourly poll, cancelled again the moment de-escalation is detected. This keeps the battery cost of inbound control at zero in the common case and bounded to one poll/hour only in the failure case. At 1 hour the cadence is comfortably above the documented 9-minutes-per-app floor for `*AndAllowWhileIdle` alarms.
+- **In the normal case, no Telegram polling alarm is scheduled at all** — inbound control rides FCM push, which costs no dedicated alarm or standing connection of our own (§8.2). Only on escalation (FCM demoted, token invalid, or no FCM message for N days) does `AlarmScheduler` register a repeating `setExactAndAllowWhileIdle()` hourly poll, cancelled again the moment de-escalation is detected. This keeps the battery cost of inbound control at zero in the common case and bounded to one poll/hour only in the failure case. At 1 hour the cadence is comfortably above the documented 9-minutes-per-app floor for `*AndAllowWhileIdle` alarms.
 - On a clean finish: reschedule, release the wake lock, stop the foreground service, and **let the device return to Doze naturally**. Nothing is forced.
 - On an abort: hold the wake lock and stay out of Doze so the device is reachable.
 - Charging: use the Funtouch 80% charge cap if the build exposes it (*unverified*, §1.2), inspect the cell periodically, plan replacement at ~3 years.
 
 ---
 
-## 7. Telegram — the primary interface
+## 8. Telegram — the primary interface
 
-Telegram is the reliable away-channel. The dashboard (§8) is not; it depends on the phone being
-on Wi-Fi and allowed to run.
+Telegram is the reliable away-channel. The web app (§9) is much more available now that it
+reads a pushed snapshot rather than the phone's own LAN server, but it still depends on the
+phone eventually waking to push — Telegram remains the channel with no such dependency.
 
-### 7.1 Outbound
+### 8.1 Outbound
 
 One message per event, all tagged with the trading date:
 
@@ -589,7 +777,7 @@ One message per event, all tagged with the trading date:
 - **Daily heartbeat, even on no-trade days** — "ran, nothing to do, next run at X"
 
 The heartbeat is not decoration. Without it, a killed app and a quiet market look identical.
-**With it, silence is unambiguously a failure.** Given §11's top risk, this is the single most
+**With it, silence is unambiguously a failure.** Given §12's top risk, this is the single most
 valuable monitoring feature in the design.
 
 Sends are logged to `notifications` with delivery status, so a *failed* alert is itself visible.
@@ -598,7 +786,7 @@ it is generated, via a direct Telegram `sendMessage` call, with no `getUpdates` 
 on the sending path. If Telegram is unreachable the session still completes; it does not become
 a trading failure.
 
-### 7.2 Inbound — read-only plus halt
+### 8.2 Inbound — read-only plus halt
 
 Inbound is **push-driven, not polled**, in three tiers:
 
@@ -649,7 +837,7 @@ connectivity will abort safely at **preflight gate 3** rather than trade blind.
 The rationale is one sentence: **a compromised Telegram account must never be able to move
 money.** Every allowed command either reads state or *stops* trading. `HALT`/`RESUME` are safe
 precisely because halt can only ever prevent a trade, and resume only restores the normal path —
-which still requires both arming keys (§5) that Telegram cannot touch.
+which still requires both arming keys (§6.E) that Telegram cannot touch.
 
 Security:
 
@@ -660,40 +848,100 @@ Security:
 
 ---
 
-## 8. Webapp (FastAPI, embedded via Chaquopy)
+## 9. Web app
 
-The same FastAPI app runs **inside the Android process** on the Chaquopy interpreter, bound to
-`0.0.0.0` on a port **above 1024** (8000 or 8080 — binding below 1024 requires root). It is
-reachable from any device on the same LAN at `http://<phone-ip>:8080`.
+The architecture changed from a phone-hosted LAN dashboard to a **push-snapshot, static
+frontend** model, so the dashboard works from anywhere, not just on the same Wi-Fi as the
+phone.
 
-Practical requirements:
+### 9.1 Architecture
 
-- A **DHCP reservation or static IP** for the phone, so the URL is stable.
-- **Wi-Fi set to stay connected when idle** (Settings → Wi-Fi → advanced), or the server is unreachable the moment the screen sleeps.
-- Read-only eToro key. Throttled during the trading window so it cannot eat the API budget.
+- **The Z10 Android app is the server of record.** It holds the SQLite database (§3), runs the
+  strategy, and is the only thing that ever talks to eToro. Nothing about that changes.
+- **After each session (and on demand, §9.3), the phone pushes a portfolio snapshot** to the
+  Cloudflare Worker already being built for the cloud-scheduled FCM trigger (§1.2, §7.2) — same
+  infrastructure, one more job for it. The Worker stores the snapshot in Workers KV or D1 (both
+  free tier at this scale).
+- **The web app is a static page**, served from Cloudflare Pages (free), that reads the
+  snapshot from the Worker over HTTPS. There is no server of our own to secure — Pages serves
+  static assets, and the Worker is the only thing holding state.
+- **On-demand refresh.** The web app asks the Worker to fire a high-priority FCM push at the
+  phone — the exact same push mechanism already designed for the redundant daily trigger. The
+  phone wakes, pushes a fresh snapshot, the page updates. Latency: seconds, not "wait for the
+  next scheduled session."
 
-**Honest limitation.** On battery, the server is only reachable while the app is allowed to
-run. Doze, App Standby and vivo's own killer can all take it away without warning. Treat the
-dashboard as a **"when on Wi-Fi / on charge" convenience**; **Telegram remains the reliable
-away-channel.** Do not design any operational dependency on the dashboard being up.
+### 9.2 Why this over the phone-hosted dashboard
+
+| | Phone-hosted FastAPI (original) | Worker + Pages (revised) |
+|---|---|---|
+| Reachable from | Same Wi-Fi/LAN only | Anywhere |
+| While phone is in Doze | Unreachable | Snapshot is cached at the Worker — still reachable |
+| Inbound ports on the phone | None required, but the server itself listens on-device | **None** — the phone stays outbound-only; no dynamic DNS, no NAT traversal |
+| Secrets exposed to a browser | None (LAN only) | **Still none** — no Telegram bot token ever reaches a browser (§9.4) |
+
+### 9.3 Rejected alternative: the Telegram bot as the web app's API
+
+The original idea — have the web app talk to the Telegram bot directly — was considered and
+**rejected**, recorded here so it is not silently revisited:
+
+1. A browser frontend calling the bot would need the **bot token in client-side code**.
+   Unacceptable — a public, unauthenticated secret.
+2. Telegram's `getUpdates` supports only **one consumer**. The web app polling it would conflict
+   with the phone's own inbound command handling (§8.2) — they would race for the same update
+   queue.
+3. Telegram's **4096-character message limit** makes it a poor data transport for a portfolio
+   snapshot with positions, history and chart data.
+
+### 9.4 Security for the Worker path
+
+- A **shared secret** authenticates the phone's push to the Worker.
+- A **separate read token** authenticates the web app's read from the Worker — different
+  credential, different privilege, same separation principle as §6.F.
+- Everything over HTTPS.
+- The snapshot contains portfolio data (account and sleeve balances, positions) and **must
+  never be publicly readable** — the read token gates it.
+- No Telegram bot token, no eToro API key, ever reaches the browser or the Worker's public
+  surface.
+
+### 9.5 The embedded FastAPI server — now optional
+
+The FastAPI server embedded via Chaquopy (as originally designed) is **kept, but demoted**: a
+**LAN-only local/debug view**, not the primary UI. This simplifies the phone app's operational
+burden — no DHCP reservation, no "keep Wi-Fi alive when idle" requirement for normal use — while
+still leaving a direct, no-network-dependency view available for on-device debugging.
 
 Contents (server-rendered pages plus a small JSON API; TradingView lightweight-charts for the
-chart):
+chart) — the same shape is shown on **both** the LAN debug view and, in equivalent form, the
+static web app, sourced from the pushed snapshot:
 
-- **Dashboard** — equity, cash, available cash (computed with eToro's documented formula: `credit − Σ pending order amounts`, since `totalBalance` is portfolio value, not cash), unrealized P&L, budget, `order_size`, `cash_target`, `recyclable_cash`, and today's `cone_z` / drawdown / tier.
-- **Positions table** — every field the API exposes: entry price, units, invested, leverage, unrealized P&L, open date.
-- **Trade history table** — from `/trading/info/trade/history` joined to our lots, so each trade shows *why* it happened (`cone_z`, tier, book, bucket id). History lookback is capped at just under 1 year per request; we page and cache.
-- **Chart** — SPY with the cone bands and z-score, **trade markers overlaid** for every buy and sell, click-through to the decision that produced it.
-- **Strategy state** — open lots by book, live re-entry buckets with tranche progress and expiry countdown.
-- **Sessions & logs** — every session, its preflight verdict, and the day's log file.
-- **Host panel** — battery level, charging state, exemption status, `canScheduleExactAlarms()`, next alarm, last boot, date the vivo checklist was last verified.
+- **Account panel** — total cash, total equity, all broker positions (managed and non-managed),
+  clearly labelled which is which.
+- **Sleeve panel**, visually separated from the account panel — `cash_allocation_usd`,
+  `sleeve_cash`, `sleeve_equity` (§4.5), sleeve unrealized and realized P&L, budget,
+  `order_size`, `cash_target`, `recyclable_cash`, and today's `cone_z` / drawdown / tier.
+- **Positions table** — every field the API exposes: entry price, units, invested, leverage,
+  unrealized P&L, open date. Managed positions (UPRO/SCHG lots) are visually distinguished from
+  other holdings, which are shown for information only and are never actionable from here.
+- **Trade history table** — from `/trading/info/trade/history` joined to our lots, so each
+  managed trade shows *why* it happened (`cone_z`, tier, book, bucket id). History lookback is
+  capped at just under 1 year per request; we page and cache.
+- **Chart** — SPY with the cone bands and z-score, **trade markers overlaid** for every buy and
+  sell, click-through to the decision that produced it.
+- **Strategy state** — open lots by book, live re-entry buckets with tranche progress and expiry
+  countdown.
+- **Sessions & logs** — every session, its preflight verdict, and the day's log file (LAN debug
+  view only — not pushed to the Worker).
+- **Host panel** — battery level, charging state, exemption status, `canScheduleExactAlarms()`,
+  next alarm, last boot, date the vivo checklist was last verified (LAN debug view only).
+- **Snapshot freshness** — every view built from a pushed snapshot shows an explicit "as of"
+  timestamp, so staleness is visible rather than assumed away.
 
 *Overlay note (carried from etoro_trader):* chart overlays are registered indicators, never
 strategy-specific metadata.
 
 ---
 
-## 9. Forward test — the acceptance gate
+## 10. Forward test — the acceptance gate
 
 Not a backtest. The forward test drives the **real live engine** — the same session state
 machine, preflight, executor, and persistence — over historical data with a time-travel clock
@@ -719,7 +967,7 @@ minimums, and injectable failures (timeout after submit, rejection, partial fill
 
 ---
 
-## 10. Build order
+## 11. Build order
 
 Nothing touches real money until step 9 passes on demo.
 
@@ -733,7 +981,7 @@ Nothing touches real money until step 9 passes on demo.
 | 5 | Forward-test harness + fake broker; criteria 1–8 (desktop CPython) | **Gate** |
 | 6 | Session engine: preflight, executor, idempotency, reconciliation | |
 | 7 | Telegram: outbound events, heartbeat, FCM-driven inbound with escalation-only hourly poll and the allowlist | |
-| 8 | Webapp embedded + host panel; DHCP reservation, Wi-Fi-when-idle | |
+| 8 | Cloudflare Worker (snapshot KV/D1 store, shared push secret, separate read token, on-demand FCM relay) + Cloudflare Pages static web app (§9); embedded FastAPI demoted to LAN-only debug view (§9.5) — no DHCP reservation required for normal operation | |
 | 9 | Demo end-to-end **on the phone, on battery**: alarm → real demo orders → back to Doze, several consecutive sessions | **Gate** |
 | 10 | Go live: real keys, `NIGHTWATCH_ARM`, small budget override, watch closely | Your call |
 
@@ -744,7 +992,7 @@ fixes it.
 
 ---
 
-## 11. Open risks
+## 12. Open risks
 
 The host was chosen **knowing it is the highest-risk combination of the options considered**:
 an undocumented vendor OS, running on battery rather than mains, with money at stake and a
@@ -753,7 +1001,7 @@ recorded here as a standing risk, not re-argued.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| **vivo's undocumented background killing on battery** — dontkillmyapp rates vivo 3/5 and states restrictions *"have not been fully uncovered yet"*; developers report alarms failing even with every known setting applied | **High** | §10 step 0 multi-night proof on battery before anything else; all five vivo settings (§6.4); foreground service for the run; daily Telegram heartbeat so a silent kill is detected the same morning. **There is no way to make this risk go away — only to detect it fast.** |
+| **vivo's undocumented background killing on battery** — dontkillmyapp rates vivo 3/5 and states restrictions *"have not been fully uncovered yet"*; developers report alarms failing even with every known setting applied | **High** | §11 step 0 multi-night proof on battery before anything else; all five vivo settings (§7.4); foreground service for the run; daily Telegram heartbeat so a silent kill is detected the same morning. **There is no way to make this risk go away — only to detect it fast.** |
 | **Battery-optimization exemption revoked** (by an OS update, a "battery saver" sweep, or the user) — silently removes network in the Rare/Restricted buckets | **High** | Preflight gate 2 checks it every run and fails loudly with the exact Settings path. Detected within one session. |
 | **OS upgrade resets power-management settings** — the Z10 is early in its support life and *will* take major upgrades | **High** | Runbook: re-verify all five vivo settings **and re-run a one-night proof** after every OS update. Host panel shows the last-verified date. |
 | **`SCHEDULE_EXACT_ALARM` revoked** — *"your app stops, and all future exact alarms are canceled"* | **High** | `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` receiver + `canScheduleExactAlarms()` in preflight gate 2. Never silently downgrade to an inexact alarm. |
@@ -762,5 +1010,7 @@ recorded here as a standing risk, not re-argued.
 | **Battery swelling** from long periods on charge; 7300 mAh cell | Medium | Funtouch 80% charge cap if available (*unverified — community-sourced, confirm on device*); periodic physical inspection; replace at ~3 years. A swollen cell is a fire risk. |
 | UPRO may not be tradable on your eToro entity | Medium | Preflight gate 8 — `allowOpenPosition` is authoritative. |
 | Strategy is **unstudied** — no study results exist for this variant in `etoro_trader` | Medium | etoroNightwatch executes it faithfully; it does not validate the edge. Start with a small budget override. |
-| Inbound commands lag if FCM is demoted before the hourly escalation poll kicks in | Low | FCM push makes the common case near-instant; escalation (§7.2) bounds worst-case lag to an hour and de-escalates automatically. Outbound alerts are unaffected and instant. |
+| Inbound commands lag if FCM is demoted before the hourly escalation poll kicks in | Low | FCM push makes the common case near-instant; escalation (§8.2) bounds worst-case lag to an hour and de-escalates automatically. Outbound alerts are unaffected and instant. |
 | Live signal uses a provisional close; backtest used the official one | Low–Medium | Inherent to trading before the close. Quantified by the forward test. |
+| **Cloudflare Worker outage, or the phone's push failing to reach it** | Low–Medium | The on-device `setAlarmClock()` trigger and the daily session (§7.2) are independent of the Worker — trading is unaffected. Telegram remains the reliable away-channel (§8). Only the on-demand web view is degraded; the LAN debug FastAPI view (§9.5) is a fallback if on the same Wi-Fi. |
+| **Stale snapshot on the web app** — the phone was unreachable when a refresh was requested | Low | The web app shows an explicit "as of" timestamp (§9.5) so staleness is visible, never assumed away; on-demand refresh (§9.1) retries via the same FCM path already relied on for inbound commands. |
