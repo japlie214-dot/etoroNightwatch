@@ -1,0 +1,3 @@
+# TODO(step 8): static assets -- JS/CSS, including a vendored or CDN-pinned
+# copy of TradingView lightweight-charts for the SPY/cone/trade-marker chart
+# (DESIGN §8). Placeholder so the directory exists before step 8.

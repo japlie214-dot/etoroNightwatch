@@ -1,0 +1,72 @@
+"""Schema creation and the forward-only migration runner (DESIGN §3)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from nightwatch.db import migrations
+from nightwatch.db.repo import Repo, connect
+
+#: Every table DESIGN §3 names, plus `commands` (task brief §1) and the two
+#: implementation-detail tables (`schema_version`, `portfolio_snapshot_positions`).
+EXPECTED_TABLES = {
+    "bars",
+    "instruments",
+    "sessions",
+    "preflight_checks",
+    "decisions",
+    "intents",
+    "orders",
+    "lots",
+    "buckets",
+    "strategy_state",
+    "schg_daily_values",
+    "budget_history",
+    "portfolio_snapshots",
+    "portfolio_snapshot_positions",
+    "commands",
+    "notifications",
+    "schema_version",
+}
+
+
+def test_migrate_creates_every_design_table(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "nightwatch.db")
+    try:
+        version = migrations.migrate(conn)
+        assert version == migrations.BASELINE_VERSION
+        rows = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall()
+        tables = {r[0] for r in rows}
+        missing = EXPECTED_TABLES - tables
+        assert not missing, f"missing tables: {missing}"
+    finally:
+        conn.close()
+
+
+def test_migrate_is_idempotent(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "nightwatch.db")
+    try:
+        first = migrations.migrate(conn)
+        second = migrations.migrate(conn)
+        assert first == second == migrations.BASELINE_VERSION
+    finally:
+        conn.close()
+
+
+def test_pragmas_are_set(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "nightwatch.db")
+    try:
+        journal_mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        foreign_keys = conn.execute("PRAGMA foreign_keys").fetchone()[0]
+        assert journal_mode.lower() == "wal"
+        assert foreign_keys == 1
+    finally:
+        conn.close()
+
+
+def test_repo_open_reports_schema_version(tmp_path: Path) -> None:
+    with Repo.open(tmp_path / "nightwatch.db") as repo:
+        assert repo.schema_version() == migrations.BASELINE_VERSION
+        assert set(repo.table_names()) >= EXPECTED_TABLES

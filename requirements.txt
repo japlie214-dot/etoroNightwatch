@@ -1,0 +1,40 @@
+# etoroNightwatch dependencies (DESIGN §2, §10). Prefer stdlib; every
+# dependency below is justified because the stdlib genuinely cannot do the
+# job, and every one of them has a prebuilt Chaquopy-compatible wheel or is
+# pure Python (no native build step Chaquopy would need to cross-compile).
+#
+# Not yet needed by anything built in this scope (config, db, logging_setup,
+# cli, stubs, tests) -- listed here because later build steps (DESIGN §10)
+# will need them and pinning now keeps the desktop venv and the Chaquopy
+# `python { pip { install(...) } }` block in sync from day one.
+
+# --- step 2: eToro HTTP client ---------------------------------------------
+httpx==0.27.2
+# stdlib urllib.request could do this, but httpx gives us timeouts, connection
+# pooling and a testable transport seam (needed for forward_test's fake
+# broker to intercept calls) without hand-rolling retry/pooling logic.
+
+# --- step 8: embedded dashboard ---------------------------------------------
+fastapi==0.115.6
+# The ASGI framework DESIGN §8 specifies by name ("FastAPI ... embedded via
+# Chaquopy"). Pure Python, ships as a Chaquopy-compatible wheel.
+uvicorn==0.32.1
+# Minimal ASGI server to run the FastAPI app bound to 0.0.0.0:8080 (DESIGN
+# §8). Pure Python (no [standard] extras, to avoid uvloop/httptools' native
+# builds, which Chaquopy would have to cross-compile for Android).
+jinja2==3.1.4
+# Server-rendered dashboard templates (DESIGN §8 "server-rendered pages").
+# Pure Python, a FastAPI-ecosystem standard rather than hand-rolled string
+# templating for HTML.
+
+# --- dev / test only, not shipped in the APK --------------------------------
+pytest==8.3.4
+# Test runner (already installed in .venv per the task brief).
+
+# --- explicitly NOT a dependency -------------------------------------------
+# numpy / pandas / scipy: the strategy module (DESIGN §1.4) is a small,
+# self-contained rolling-window calculation (cone_5_z) over at most a few
+# thousand daily bars. Chaquopy ships prebuilt numpy/pandas wheels so we
+# *could* use them, but stdlib `statistics`/plain lists are enough here and
+# keep the desktop venv (and the APK) smaller. Revisit only if step 4's port
+# turns out to need real DataFrame semantics from the original strategy code.

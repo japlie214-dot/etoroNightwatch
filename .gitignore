@@ -1,0 +1,26 @@
+# --- SECRETS: never commit ---
+secrets/
+config/.secrets.env
+*.pat
+.git-credentials
+
+# --- runtime state ---
+.venv/
+data/
+logs/
+HALT
+
+# --- python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- os / editor ---
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*git-credentials*

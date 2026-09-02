@@ -1,0 +1,123 @@
+# etoroNightwatch configuration.
+#
+# This file holds everything that is safe to commit.  Credentials live in
+# config/.secrets.env (gitignored); see config/.secrets.env.example.
+#
+# Values here are the documented live defaults from doc/DESIGN.md §1.4.
+# Anything omitted falls back to the same default in nightwatch/config.py, so a
+# key removed from this file does not change behaviour.
+
+# ---------------------------------------------------------------------------
+# Trading mode.  This is arming key #1 of two.
+# ---------------------------------------------------------------------------
+[trading]
+# "dry_run" — compute and report the decision, place no orders.
+# "live"    — may place orders, but ONLY when arming key #2 is also present:
+#             the NIGHTWATCH_ARM environment variable.  Setting mode = "live"
+#             on its own does nothing (DESIGN §5, two-key arming).
+mode = "dry_run"
+
+# ---------------------------------------------------------------------------
+# eToro environment.
+# ---------------------------------------------------------------------------
+[etoro]
+# "demo" or "real".  This ONE value selects both:
+#   * the URL path segment  (/execution/demo/orders vs /execution/orders)
+#   * which credential pair is read from .secrets.env
+#       demo -> ETORO_DEMO_API_KEY / ETORO_DEMO_USER_KEY
+#       real -> ETORO_API_KEY / ETORO_USER_KEY   (write, session)
+#               ETORO_READ_API_KEY / ETORO_READ_USER_KEY (read, webapp)
+# There is no separate switch for either, by design: an eToro key is bound to
+# one environment when it is created, so the two can never be allowed to drift
+# apart.  Setting etoro.path_segment / etoro.api_key / etoro.user_key here is a
+# hard error, not a silent no-op.
+environment = "demo"
+base_url = "https://public-api.etoro.com"
+timeout_seconds = 30.0
+
+# ---------------------------------------------------------------------------
+# Instruments and their roles (DESIGN §1.4).
+# ---------------------------------------------------------------------------
+[symbols]
+signal = "SPY"    # signal only, never traded
+core   = "SCHG"   # the 1x core book; its prior-year mean value sets the budget
+risk   = "UPRO"   # the only traded risk asset
+
+# ---------------------------------------------------------------------------
+# Std Band Ladder Cash Recycle — live parameter set (DESIGN §1.4).
+#
+# Not present, and not settable, because they are inert in the source strategy
+# and were dropped: CASH_BAND_FRACTION, MARTINGALE_RATIO.  The six tier caps are
+# hardcoded in nightwatch/config.py as TIER_CAPS for the same reason: they were
+# baked in at import time, so config must not be able to lie about them.
+# ---------------------------------------------------------------------------
+[strategy]
+core_fraction          = 0.4    # CORE_FRACTION
+core_floor_pct         = 0.5    # CORE_FLOOR_PCT — SCHG never sold below this x equity
+order_divisor          = 60     # ORDER_DIVISOR — order_size = budget / 60
+min_order_size         = 10.0   # MIN_ORDER_SIZE — superseded by the per-instrument
+                                # minimum if that is higher; we block, never resize
+buy_threshold          = -2.0   # BUY_THRESHOLD  (cone_5_z)
+sell_threshold         = 3.0    # SELL_THRESHOLD (cone_5_z)
+max_lots               = 60     # MAX_LOTS
+# WARMUP_BARS: 0, changed from 280.  _bars is persisted in strategy_state, and
+# the cone indicator already returns None until it has 265 bars.  A nonzero
+# value here would strand a restarted app in warmup forever (DESIGN §1.4).
+warmup_bars            = 0
+cash_target_multiplier = 8.0    # CASH_TARGET_MULTIPLIER — cash_target = 8 x order_size
+cone_horizon           = 5      # CONE_HORIZON — the 5 in cone_5_z
+cone_center_mode       = "close" # CONE_CENTER_MODE
+exit_mode              = "fixed" # EXIT_MODE
+trailing_stop_pct      = 0.05   # TRAILING_STOP_PCT — inert while exit_mode = "fixed"
+dwell_bars             = 1      # DWELL_BARS
+# TIER_Z_THRESHOLDS: null means one flat threshold at every drawdown tier.
+# TOML has no null, so absent (or an empty list) means null here.  Supply a
+# 6-element list to give each drawdown tier its own z threshold.
+# tier_z_thresholds    = [-2.0, -2.0, -2.0, -2.0, -2.0, -2.0]
+reentry_tranches       = 3      # REENTRY_TRANCHES — functional after bug fix #1
+bucket_expiry_bars     = 20     # BUCKET_EXPIRY_BARS — functional after bug fix #1
+
+# Bars of SPY daily history the signal needs before it produces a value:
+# 260-bar rolling stdev + 5-bar shift.  Preflight gate 10 fails below this.
+required_history_bars  = 265
+
+# Budget override (DESIGN §4.5).  Leave commented out for the automatic annual
+# rule: budget = floor(0.4 x prior_year_mean_SCHG_value / 20) x 20.  Set a
+# number here and it wins immediately — order_size and cash_target recompute
+# from it and the change is written to budget_history with source = 'override'.
+# Comment it out again and the next session returns to auto.  No restart, no
+# state surgery.
+# budget_override_usd = 2000.0
+
+# ---------------------------------------------------------------------------
+# Telegram (DESIGN §7).  Token and chat id come from .secrets.env.
+# ---------------------------------------------------------------------------
+[telegram]
+enabled = true
+# Inbound commands are polled hourly by TelegramPollReceiver.  Commands may
+# therefore wait up to an hour; outbound alerts are instant and unaffected.
+# 3600s is far above the 9-minute floor for setExactAndAllowWhileIdle alarms.
+poll_interval_seconds = 3600
+# The daily heartbeat is not decoration: without it a killed app and a quiet
+# market look identical.  With it, silence is unambiguously a failure.
+send_heartbeat = true
+timeout_seconds = 15.0
+
+# ---------------------------------------------------------------------------
+# Embedded FastAPI dashboard (DESIGN §8).
+# ---------------------------------------------------------------------------
+[webapp]
+enabled = true
+host = "0.0.0.0"    # reachable from the LAN
+port = 8080         # must be above 1024: binding lower requires root on Android
+
+# ---------------------------------------------------------------------------
+# Risk caps — preflight gate 12 (DESIGN §5).
+# ---------------------------------------------------------------------------
+[risk]
+max_orders_per_session       = 10
+max_notional_per_session_usd = 5000.0
+# Daily loss guard; comment out to disable.
+# max_daily_loss_usd         = 500.0
+# Gate 2 aborts the session if the host is on battery below this level.
+min_battery_percent          = 40
