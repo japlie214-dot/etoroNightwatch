@@ -35,7 +35,13 @@ object CommandVerifier {
      * by WEB_READ_TOKEN / are the Worker's own scheduled trigger, per DESIGN §8.2 / §9.4.
      */
     @Synchronized
-    fun verify(context: Context, command: String, counterStr: String?, hmacHex: String?): Verdict {
+    fun verify(
+        context: Context,
+        command: String,
+        counterStr: String?,
+        hmacHex: String?,
+        arg: String? = null,
+    ): Verdict {
         val secret = BuildConfig.COMMAND_HMAC_SECRET
         if (secret.isBlank()) {
             return Verdict.Rejected("COMMAND_HMAC_SECRET not configured in local.properties")
@@ -50,7 +56,11 @@ object CommandVerifier {
         if (counter <= lastAccepted) {
             return Verdict.Rejected("replay: counter=$counter <= last_accepted=$lastAccepted")
         }
-        val expected = hmacHex(secret, "$command:$counter")
+        // Mirrors cloud/worker/src/commands.js hmacCommand() exactly: when an argument is
+        // present (e.g. schedule's ISO-8601 time) it is folded INTO the signed message, so a
+        // tampered arg fails verification even if the command name and counter are untouched.
+        val message = if (!arg.isNullOrEmpty()) "$command:$counter:$arg" else "$command:$counter"
+        val expected = hmacHex(secret, message)
         // Constant-time-ish compare (defense in depth; this is a local check, not a network
         // timing-attack surface, but there is no reason to compare the easy way).
         var diff = 0

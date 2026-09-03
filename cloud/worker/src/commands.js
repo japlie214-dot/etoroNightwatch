@@ -40,11 +40,20 @@ export function isAllowedCommand(raw) {
 }
 
 /**
- * HMAC-SHA256 over "<command>:<counter>", hex-encoded. The phone verifies
- * this the same way (DESIGN.md §8.2) and rejects a counter at or below the
- * last-accepted value as a replay.
+ * HMAC-SHA256 over "<command>:<counter>", or "<command>:<counter>:<arg>" when an
+ * argument is present (e.g. `schedule` carries an ISO-8601 time as `arg`), hex-encoded.
+ * The phone verifies this the same way (DESIGN.md §8.2) and rejects a counter at or
+ * below the last-accepted value as a replay.
+ *
+ * `arg` is folded into the signed message, not left alongside it unsigned — otherwise
+ * the command name and counter would be authenticated but the argument itself would not
+ * be, which would let an attacker who could reach the FCM data payload independently
+ * tamper with e.g. the scheduled time without invalidating the signature.
  */
-export async function hmacCommand(secret, command, counter) {
+export async function hmacCommand(secret, command, counter, arg) {
+  const message = arg !== undefined && arg !== null && arg !== ""
+    ? `${command}:${counter}:${arg}`
+    : `${command}:${counter}`;
   const key = await crypto.subtle.importKey(
     "raw",
     new TextEncoder().encode(secret),
@@ -52,6 +61,6 @@ export async function hmacCommand(secret, command, counter) {
     false,
     ["sign"]
   );
-  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(`${command}:${counter}`));
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(message));
   return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, "0")).join("");
 }

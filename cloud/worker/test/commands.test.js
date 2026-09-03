@@ -47,6 +47,20 @@ describe("hmacCommand", () => {
     expect(a).not.toBe(b);
   });
 
+  it("is backward compatible: no arg produces the same digest as before arg support existed", async () => {
+    const a = await hmacCommand("secret-1", "status", 1);
+    const b = await hmacCommand("secret-1", "status", 1, undefined);
+    expect(a).toBe(b);
+  });
+
+  it("changes when an arg is present, and changes again if the arg is tampered with", async () => {
+    const noArg = await hmacCommand("secret-1", "schedule", 1);
+    const withArg = await hmacCommand("secret-1", "schedule", 1, "2026-09-04T03:01:00Z");
+    const tamperedArg = await hmacCommand("secret-1", "schedule", 1, "2026-09-04T03:01:01Z");
+    expect(withArg).not.toBe(noArg);
+    expect(withArg).not.toBe(tamperedArg);
+  });
+
   it("changes when the secret changes", async () => {
     const a = await hmacCommand("secret-1", "status", 1);
     const b = await hmacCommand("secret-2", "status", 1);

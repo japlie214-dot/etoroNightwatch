@@ -102,6 +102,7 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
     private fun dispatchCommand(store: EventStore, command: String, data: Map<String, String>) {
         val counter = data["counter"]
         val hmac = data["hmac"]
+        val arg = data["arg"]
         // "refresh" (POST /refresh) and "run_session" (the redundant cron) are not per-message
         // HMAC'd by the Worker — they're already gated by WEB_READ_TOKEN / are the Worker's own
         // scheduled trigger (DESIGN §9.1/§9.4). Everything else must carry a valid, non-replayed
@@ -112,7 +113,7 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
             return
         }
 
-        val verdict = CommandVerifier.verify(this, command, counter, hmac)
+        val verdict = CommandVerifier.verify(this, command, counter, hmac, arg)
         when (verdict) {
             is CommandVerifier.Verdict.Accepted -> {
                 store.log(

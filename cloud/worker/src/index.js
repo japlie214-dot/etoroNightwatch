@@ -199,19 +199,34 @@ async function handleCommand(request, env) {
   }
   const command = normalizeCommand(rawCommand);
 
+  // Optional string argument (e.g. `schedule` needs an ISO-8601 time). Bounded length so
+  // an oversized value can't be used to pad the FCM payload past its own limits.
+  const rawArg = data?.arg;
+  const arg = typeof rawArg === "string" && rawArg.length > 0 && rawArg.length <= 256
+    ? rawArg
+    : undefined;
+  if (rawArg !== undefined && arg === undefined) {
+    return badRequest("arg must be a non-empty string of at most 256 characters");
+  }
+
   const kv = requireKv(env);
   const currentCounterRaw = await kv.get(KV_KEYS.commandCounter);
   const nextCounter = (currentCounterRaw ? parseInt(currentCounterRaw, 10) : 0) + 1;
-  const hmac = await hmacCommand(env.COMMAND_HMAC_SECRET, command, nextCounter);
+  const hmac = await hmacCommand(env.COMMAND_HMAC_SECRET, command, nextCounter, arg);
 
   const { token, error } = await getDeviceTokenOrError(kv);
   if (error) return error;
 
+  const pushData = { command, counter: String(nextCounter), hmac };
+  if (arg !== undefined) pushData.arg = arg;
+
   const { result, error: sendError } = await sendPushAndHandleStaleToken(env, kv, {
     token,
     title: `Nightwatch: /${command}`,
-    body: `Command "${command}" was sent from the web command channel.`,
-    data: { command, counter: String(nextCounter), hmac },
+    body: arg !== undefined
+      ? `Command "${command} ${arg}" was sent from the web command channel.`
+      : `Command "${command}" was sent from the web command channel.`,
+    data: pushData,
     priority: "high",
   });
   if (sendError) return sendError;
@@ -219,7 +234,7 @@ async function handleCommand(request, env) {
   // Only persist the incremented counter once the push actually went out,
   // so a failed send doesn't burn a counter value the phone never saw.
   await kv.put(KV_KEYS.commandCounter, String(nextCounter));
-  return json({ ok: true, command, counter: nextCounter, fcm: result });
+  return json({ ok: true, command, counter: nextCounter, arg: arg ?? null, fcm: result });
 }
 
 const ROUTES = {
