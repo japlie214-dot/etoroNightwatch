@@ -1,0 +1,17 @@
+{
+  "name": "etoro-nightwatch-pages",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Pages web app: static dashboard + server-side Pages Function proxy to the etoroNightwatch Worker (doc/DESIGN.md §9, §11 step 2).",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler pages dev public",
+    "deploy": "wrangler pages deploy public",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9",
+    "wrangler": "^4.128.0"
+  }
+}

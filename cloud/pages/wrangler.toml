@@ -1,0 +1,31 @@
+# Cloudflare Pages config for the etoroNightwatch web app (DESIGN.md §9,
+# §11 step 2; doc/RUNBOOK_INFRA.md Part F).
+# Docs: https://developers.cloudflare.com/pages/functions/wrangler-configuration/
+
+name = "etoro-nightwatch-pages"
+pages_build_output_dir = "public"
+compatibility_date = "2025-01-01"
+compatibility_flags = []
+
+# --- Vars (non-secret) ------------------------------------------------------
+# The deployed Worker's URL. Kept as a var (not hardcoded twice) so staging
+# vs prod, or a future Worker migration, is a one-line config change. The
+# proxy code (functions/_shared/proxy.js) falls back to this same value
+# as a last-resort default if the var is ever unset.
+[vars]
+WORKER_BASE_URL = "https://etoro-nightwatch-worker.japlie214.workers.dev"
+
+# --- Secrets (set via `npx wrangler pages secret put <NAME>`, never here) --
+#
+#   npx wrangler pages secret put WEB_READ_TOKEN --project-name etoro-nightwatch-pages
+#     -> paste the SAME value already set on the Worker as WEB_READ_TOKEN
+#        (see cloud/worker/wrangler.toml). This is what functions/api/*.js
+#        sends as the `x-web-read-token` header. It is never read by, or
+#        sent to, the browser.
+#
+# For local `wrangler pages dev`, secrets are NOT read from
+# `wrangler pages secret put` (that only affects the deployed project) --
+# instead create a `.dev.vars` file in this directory (gitignored) with:
+#   WEB_READ_TOKEN=<the same value as the Worker's WEB_READ_TOKEN>
+#   WORKER_BASE_URL=https://etoro-nightwatch-worker.japlie214.workers.dev
+# See https://developers.cloudflare.com/pages/functions/bindings/#environment-variables

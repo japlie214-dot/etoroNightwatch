@@ -1,0 +1,62 @@
+{
+  "_comment": "Hand-written stub for build-order step 2 (DESIGN.md §11 step 2). Shape derived from DESIGN.md §3 `portfolio_snapshots` and §4.5 (sleeve accounting). This is NOT pushed automatically anywhere -- it exists so a developer can PUT it into a local `wrangler pages dev` / worker KV to exercise the UI before real data exists. The live Worker KV currently holds a much smaller stub ({\"stub\":true,\"equity_usd\":0}) from manual testing; the UI must render both shapes without crashing.",
+  "environment": "demo",
+  "trading_date": "2026-09-02",
+  "session_id": "20260902-0230-WIB",
+  "account": {
+    "total_equity_usd": 15234.56,
+    "total_cash_usd": 2450.10,
+    "broker_available_cash_usd": 2210.00
+  },
+  "sleeve": {
+    "cash_allocation_usd": 2000.00,
+    "sleeve_cash_usd": 1180.32,
+    "sleeve_equity_usd": 3420.77,
+    "sleeve_unrealized_pnl_usd": 245.11,
+    "sleeve_realized_pnl_usd": 88.40,
+    "budget_usd": 1200.00,
+    "order_size_usd": 20.00,
+    "cash_target_usd": 160.00,
+    "recyclable_cash_usd": 40.00,
+    "cone_z": -1.42,
+    "spy_drawdown": -0.08,
+    "tier": 0
+  },
+  "positions": [
+    {
+      "symbol": "UPRO",
+      "is_managed": true,
+      "book": "catapult",
+      "position_id": "pos_upro_0001",
+      "units": 12.5,
+      "entry_price_usd": 68.20,
+      "market_value_usd": 950.40,
+      "unrealized_pnl_usd": 95.40,
+      "leverage": 1,
+      "open_date": "2026-08-11"
+    },
+    {
+      "symbol": "SCHG",
+      "is_managed": true,
+      "book": "core",
+      "position_id": "pos_schg_0001",
+      "units": 8.0,
+      "entry_price_usd": 28.75,
+      "market_value_usd": 245.60,
+      "unrealized_pnl_usd": 15.60,
+      "leverage": 1,
+      "open_date": "2026-05-02"
+    },
+    {
+      "symbol": "AAPL",
+      "is_managed": false,
+      "position_id": "pos_other_0001",
+      "units": 5,
+      "entry_price_usd": 210.00,
+      "market_value_usd": 1100.25,
+      "unrealized_pnl_usd": -20.50,
+      "leverage": 1,
+      "open_date": "2025-11-02"
+    }
+  ]
+}

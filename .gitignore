@@ -31,3 +31,11 @@ cloud/worker/.wrangler/
 cloud/worker/.dev.vars
 *service-account*.json
 google-services.json
+
+# --- cloud/pages (Cloudflare Pages web app) ---
+cloud/pages/node_modules/
+cloud/pages/.wrangler/
+cloud/pages/.dev.vars
+
+# wrangler local state/cache (any location) - contains account id
+.wrangler/

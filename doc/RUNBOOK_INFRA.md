@@ -218,14 +218,14 @@ secret never appears in shell history, `ps`, or your terminal scrollback the way
 Worker lives, once `cloud/worker/` exists) and paste the value when prompted:
 
 ```
-npx wrangler secret put FCM_SERVICE_ACCOUNT_JSON
+npx wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON
 ```
 Paste the **entire contents** of the service-account JSON from §A.4 (yes, the whole JSON blob,
 as one secret value — the Worker parses it at runtime to mint OAuth tokens). This is the
 highest-value secret in the whole system (§E).
 
 ```
-npx wrangler secret put PHONE_PUSH_SHARED_SECRET
+npx wrangler secret put PHONE_PUSH_SECRET
 ```
 A secret **you generate** — e.g. `openssl rand -hex 32` or PowerShell
 `-join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })`. Authenticates the
@@ -233,7 +233,7 @@ phone's snapshot push to the Worker (DESIGN §9.4). The same value must later be
 on-device (in `config/.secrets.env` or app-private storage — the phone side isn't built yet).
 
 ```
-npx wrangler secret put WEBAPP_READ_TOKEN
+npx wrangler secret put WEB_READ_TOKEN
 ```
 A second, **different** secret you generate the same way. Authenticates the static web app's
 reads from the Worker. Deliberately a separate credential from the push secret — different
@@ -249,9 +249,9 @@ and verify inbound commands over FCM and Telegram (DESIGN §8.2, §3 `commands` 
 
 | Secret name | Value origin | Consumed by |
 |---|---|---|
-| `FCM_SERVICE_ACCOUNT_JSON` | Downloaded in §A.4 | Worker, to mint OAuth tokens and call FCM HTTP v1 |
-| `PHONE_PUSH_SHARED_SECRET` | You generate | Worker, to authenticate the phone's snapshot push |
-| `WEBAPP_READ_TOKEN` | You generate | Worker, to authenticate the web app's snapshot read |
+| `FIREBASE_SERVICE_ACCOUNT_JSON` | Downloaded in §A.4 | Worker, to mint OAuth tokens and call FCM HTTP v1 |
+| `PHONE_PUSH_SECRET` | You generate | Worker, to authenticate the phone's snapshot push |
+| `WEB_READ_TOKEN` | You generate | Worker, to authenticate the web app's snapshot read |
 | `COMMAND_HMAC_SECRET` | You generate | Worker + (later) phone, to verify inbound command HMACs |
 
 Verify what's set (names only, never values) with:
@@ -414,7 +414,7 @@ FCM is a **pass**, not an inconclusive result, for the free-tier-viability gate 
 
 | Secret | Lives in | Never in | Why |
 |---|---|---|---|
-| FCM service-account JSON | Cloudflare Worker secret (`FCM_SERVICE_ACCOUNT_JSON`) | Repo, browser, APK, Kotlin/Python code | Can mint tokens that send push to your app as you — the single highest-value credential in this system (§A.5). Compromise = attacker can wake your phone, deliver arbitrary payloads to `NightwatchMessagingService`, at will. |
+| FCM service-account JSON | Cloudflare Worker secret (`FIREBASE_SERVICE_ACCOUNT_JSON`) | Repo, browser, APK, Kotlin/Python code | Can mint tokens that send push to your app as you — the single highest-value credential in this system (§A.5). Compromise = attacker can wake your phone, deliver arbitrary payloads to `NightwatchMessagingService`, at will. |
 | `google-services.json` | `app/google-services.json`, gitignored | Public repo/fork | Not secret, but project-identifying; no reason to publish it (§A.3) |
 | Phone push shared secret | Worker secret + on-device config (once it exists) | Repo, browser | Lets an attacker forge a fake snapshot push, poisoning what the web app displays |
 | Web-app read token | Worker secret + the static Pages site's client code | — | Read-only exposure by design; still not something to hand out casually since it gates portfolio data (see below) |
@@ -431,7 +431,7 @@ finer-grained scope available short of creating a narrower custom IAM role.
 
 - **FCM service-account key:** Google Cloud Console → IAM & Admin → Service Accounts → the
   account → Keys tab → **Add key** to create a new one, update the Worker secret
-  (`wrangler secret put FCM_SERVICE_ACCOUNT_JSON` again — it overwrites), confirm a send still
+  (`wrangler secret put FIREBASE_SERVICE_ACCOUNT_JSON` again — it overwrites), confirm a send still
   works, *then* delete the old key from the same Keys tab. Never delete the old key before
   confirming the new one works — that's the fast way to lock yourself out of sending.
 - **The three generated secrets** (push shared secret, read token, HMAC secret): rotate by
@@ -450,7 +450,7 @@ finer-grained scope available short of creating a narrower custom IAM role.
 
 The Worker's snapshot read route serves **portfolio data** — account and sleeve balances,
 positions, P&L (DESIGN §3 `portfolio_snapshots`, §9.4). It must require the
-`WEBAPP_READ_TOKEN` on every request, with no anonymous fallback path, no debug bypass left in
+`WEB_READ_TOKEN` on every request, with no anonymous fallback path, no debug bypass left in
 from testing, and no accidental `GET` served straight from KV without going through the
 Worker's auth check. When `cloud/worker/` code exists, this is worth a specific look during
 review: confirm there is no route that reads the KV namespace without checking the token first.
@@ -461,3 +461,119 @@ Restated from DESIGN §9.4 because it bears repeating here: no Telegram bot toke
 key, and no FCM service-account key ever reaches the browser (the static web app only holds the
 low-privilege read token) or the APK (the phone only *receives* FCM pushes; it never sends
 them, so it has no need for the service-account credential at all).
+
+---
+
+## Part F — Cloudflare Pages web app
+
+**Corrects a gap in the original DESIGN.md §9 wording.** §9 originally described the web app as
+a "static page" reading the Worker directly, and separately claimed "Secrets exposed to a
+browser: None." Read together those two statements don't hold: a purely static page calling
+`GET /snapshot` would have to embed the Worker's `x-web-read-token` value in client-side
+JavaScript, where anyone loading the page can read it — the same class of flaw §9.3 uses to
+reject the Telegram-bot-as-API idea. The web app built in `cloud/pages/` is therefore **static
+assets plus a server-side Cloudflare Pages Function proxy**: the Function holds the token as a
+Pages environment secret and injects it server-side; the browser only ever calls same-origin
+`/api/snapshot` and `/api/refresh`. DESIGN.md §9 has been updated to say this (see the diff
+alongside this runbook change). This Part covers the operational steps; `cloud/pages/README.md`
+covers local dev, tests, and the exact env vars/secrets — this Part doesn't repeat that.
+
+### F.1 Create the Pages project 🖱️ YOU + ⚙️ REPO
+
+Once `cloud/pages/` has code (already built as of this writing):
+
+```
+cd cloud/pages
+npx wrangler pages deploy public --project-name etoro-nightwatch-pages
+```
+
+The first run of this command creates the Pages project if it doesn't exist yet (wrangler
+prompts to confirm the project name) and uploads `public/` plus the `functions/` directory next
+to it. Confirm the printed `*.pages.dev` URL loads and shows the dashboard shell (it will report
+"not configured" on `/api/snapshot` until §F.2 is done — that's expected, not a bug).
+
+### F.2 Set the Pages secret 🖱️ YOU
+
+```
+npx wrangler pages secret put WEB_READ_TOKEN --project-name etoro-nightwatch-pages
+```
+
+Paste the **same value** already set on the Worker as `WEB_READ_TOKEN` (Part B.4 above — note
+that file currently documents this secret under the name `WEB_READ_TOKEN`; whichever name the
+deployed Worker actually uses, the *value* pasted here must match it exactly, since this is the
+credential sent as the `x-web-read-token` header on every proxied request). Re-run
+`npx wrangler pages deploy public --project-name etoro-nightwatch-pages` after setting it — a
+Pages secret takes effect on the next deployment, not instantly on `secret put` the way a Worker
+secret does.
+
+Verify with:
+
+```
+npx wrangler pages secret list --project-name etoro-nightwatch-pages
+```
+
+(names only, never values — same convention as the Worker's `wrangler secret list`).
+
+`WORKER_BASE_URL` is **not** a secret — it's a plain Pages variable, already set to the deployed
+Worker's URL as a default in `cloud/pages/wrangler.toml` `[vars]`. Only touch it if the Worker's
+URL ever changes.
+
+### F.3 Deploy 🖱️ YOU / ⚙️ REPO
+
+```
+npx wrangler pages deploy public --project-name etoro-nightwatch-pages
+```
+
+Confirm the printed `https://<project>.pages.dev` (or a custom domain, if one is later attached)
+loads the dashboard and that `GET /api/snapshot` returns real (or stub) data, not a "not
+configured" error.
+
+### F.4 Enable Cloudflare Access — REQUIRED, not optional 🖱️ YOU
+
+**Do this before telling anyone the URL, and ideally before the first real deploy is left
+sitting reachable.** Without it, `https://<project>.pages.dev` is a public, unauthenticated
+endpoint: `/api/snapshot` proxies to the Worker with the read token injected *for anyone who
+loads the page*, which means anyone who has or guesses the URL sees portfolio data (account and
+sleeve balances, positions), and anyone who finds it can also fire `/api/refresh` and wake the
+phone. The Pages Function proxy solves the browser-secret-exposure problem (§9.4) — it does
+**not** by itself solve "who is allowed to load this page at all." Cloudflare Access is the free
+answer to that second question.
+
+1. Cloudflare dashboard → **Zero Trust** (left nav — this may prompt you to "set up Zero Trust"
+   the first time; accept the free plan, no credit card required for the tier this app needs).
+2. **Access → Applications → Add an application → Self-hosted.**
+3. **Application domain**: the Pages project's `*.pages.dev` domain (or custom domain if
+   attached). Path: leave as `/` to protect the whole app, including every `/api/*` route —
+   don't protect only `public/` and leave `/api/*` unprotected, since that's exactly the
+   portfolio-data surface that must not be public.
+4. **Policy**: Allow, with an Include rule of **Emails** → your own email address (or a small
+   allowlist of specific emails if more than one person needs access). Do not use a broader rule
+   like "Everyone" or an email-domain wildcard unless you specifically intend that.
+5. Session duration: pick something reasonable for a personal dashboard (e.g. 24h or 1 week) —
+   Access re-prompts for a login code via email (or another configured identity provider) when
+   the session expires; there's no password to manage.
+6. Save. Reload the Pages URL in an incognito/private window to confirm it now redirects to a
+   Cloudflare Access login page (a one-time email code by default) before showing anything.
+
+**Free-tier user limit, stated plainly.** Cloudflare Access's free tier covers **up to 50 users**
+per account (verified against Cloudflare's own Zero Trust pricing page,
+https://www.cloudflare.com/plans/zero-trust-services/) — a single-user personal dashboard like
+this one is nowhere near that ceiling, but it's worth knowing before adding a family member,
+co-founder, or anyone else to the allowlist in F.4 step 4: the 50-user count is per Cloudflare
+account, shared across every Access-protected application on it, not per application.
+
+### F.5 Verification checklist
+
+- [ ] `npx wrangler pages deploy public --project-name etoro-nightwatch-pages` succeeds; URL
+      loads the dashboard shell
+- [ ] `WEB_READ_TOKEN` set via `wrangler pages secret put`, matching the Worker's value exactly
+- [ ] Re-deployed after setting the secret (Pages secrets apply on next deploy, not instantly)
+- [ ] `GET /api/snapshot` on the deployed URL returns real/stub data, not a "not configured" 500
+- [ ] `POST /api/refresh` on the deployed URL reaches the Worker (a `409`/FCM error is expected
+      and fine until a real phone is registered — a `500` "not configured" is not)
+- [ ] **Cloudflare Access enabled on the whole app (`/`), not just static assets** (§F.4) —
+      confirm an incognito window is challenged for login before it can reach `/api/snapshot`
+- [ ] Confirmed, by viewing page source and the browser's Network tab, that `WEB_READ_TOKEN`
+      never appears anywhere sent to the browser (see `cloud/pages/README.md` for how this was
+      verified locally with `curl` + `grep`; repeat the same check against the deployed URL once
+      Access is configured and you can authenticate through it)

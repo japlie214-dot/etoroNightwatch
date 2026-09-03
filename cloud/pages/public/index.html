@@ -1,0 +1,82 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>etoroNightwatch</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <h1>etoroNightwatch</h1>
+    <span id="env-badge" class="badge badge-unknown">UNKNOWN</span>
+  </header>
+
+  <main>
+    <section id="asof-row" class="asof-row">
+      <span id="asof-dot" class="dot dot-none"></span>
+      <span id="asof-text">Loading&hellip;</span>
+      <button id="refresh-btn" type="button">Refresh</button>
+      <span id="refresh-status" class="refresh-status" role="status" aria-live="polite"></span>
+    </section>
+
+    <section id="empty-state" class="panel" hidden>
+      <p>No snapshot has been pushed yet. The phone pushes one after every session, or on
+         demand via the Refresh button above.</p>
+    </section>
+
+    <section id="error-state" class="panel panel-error" hidden>
+      <p id="error-text"></p>
+    </section>
+
+    <div id="data" hidden>
+      <section class="panel-group">
+        <div class="panel">
+          <h2>Account</h2>
+          <p class="hint">All broker assets, including holdings outside etoroNightwatch's control.</p>
+          <dl class="kv">
+            <dt>Total equity</dt><dd id="acct-equity">&mdash;</dd>
+            <dt>Total cash</dt><dd id="acct-cash">&mdash;</dd>
+            <dt>Broker available cash</dt><dd id="acct-avail">&mdash;</dd>
+          </dl>
+        </div>
+
+        <div class="panel panel-sleeve">
+          <h2>etoroNightwatch sleeve</h2>
+          <p class="hint">Only the slice of the account this app manages (DESIGN §4.5).</p>
+          <dl class="kv">
+            <dt>Cash allocation</dt><dd id="sleeve-alloc">&mdash;</dd>
+            <dt>Sleeve cash</dt><dd id="sleeve-cash">&mdash;</dd>
+            <dt>Sleeve equity</dt><dd id="sleeve-equity">&mdash;</dd>
+            <dt>Unrealized P&amp;L</dt><dd id="sleeve-upnl">&mdash;</dd>
+            <dt>Realized P&amp;L</dt><dd id="sleeve-rpnl">&mdash;</dd>
+            <dt>Budget / order size</dt><dd id="sleeve-budget">&mdash;</dd>
+            <dt>cone_z / drawdown / tier</dt><dd id="sleeve-signal">&mdash;</dd>
+          </dl>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Positions</h2>
+        <p class="hint">
+          <span class="legend-dot legend-managed"></span> managed (UPRO / SCHG) &mdash;
+          <span class="legend-dot legend-other"></span> displayed only, never traded
+        </p>
+        <div class="table-scroll">
+          <table id="positions-table">
+            <thead>
+              <tr>
+                <th>Symbol</th><th>Managed</th><th>Units</th><th>Entry</th>
+                <th>Market value</th><th>Unrealized P&amp;L</th><th>Opened</th>
+              </tr>
+            </thead>
+            <tbody id="positions-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

@@ -863,9 +863,14 @@ phone.
   Cloudflare Worker already being built for the cloud-scheduled FCM trigger (§1.2, §7.2) — same
   infrastructure, one more job for it. The Worker stores the snapshot in Workers KV or D1 (both
   free tier at this scale).
-- **The web app is a static page**, served from Cloudflare Pages (free), that reads the
-  snapshot from the Worker over HTTPS. There is no server of our own to secure — Pages serves
-  static assets, and the Worker is the only thing holding state.
+- **The web app is static assets plus a server-side Cloudflare Pages Function proxy** (both free
+  on Pages), not a purely static page — a purely static page would have to embed the Worker's
+  read token in client-side JavaScript, which is a public secret the instant the page loads
+  (the same class of flaw §9.3 rejects the Telegram-bot-as-API idea for). The Pages Function
+  (`cloud/pages/functions/api/`) holds the read token as a Pages environment secret and injects
+  it server-side on the way to the Worker; the browser only ever calls same-origin
+  `/api/snapshot` and `/api/refresh`. There is still no server *of our own to run* — Pages hosts
+  both the static assets and the Function, and the Worker remains the only thing holding state.
 - **On-demand refresh.** The web app asks the Worker to fire a high-priority FCM push at the
   phone — the exact same push mechanism already designed for the redundant daily trigger. The
   phone wakes, pushes a fresh snapshot, the page updates. Latency: seconds, not "wait for the
@@ -878,7 +883,7 @@ phone.
 | Reachable from | Same Wi-Fi/LAN only | Anywhere |
 | While phone is in Doze | Unreachable | Snapshot is cached at the Worker — still reachable |
 | Inbound ports on the phone | None required, but the server itself listens on-device | **None** — the phone stays outbound-only; no dynamic DNS, no NAT traversal |
-| Secrets exposed to a browser | None (LAN only) | **Still none** — no Telegram bot token ever reaches a browser (§9.4) |
+| Secrets exposed to a browser | None (LAN only) | **Still none** — the Worker read token lives only in the Pages Function's server-side environment, never in client-side code; the browser calls same-origin `/api/...` and the Function injects the token on the way to the Worker. No Telegram bot token ever reaches a browser either (§9.4) |
 
 ### 9.3 Rejected alternative: the Telegram bot as the web app's API
 
@@ -981,7 +986,7 @@ step-by-step console/CLI instructions behind steps 0–2.
 |---|---|---|
 | 0 | **Telegram smoke test.** Create the bot, obtain a chat id, send one message end to end (`RUNBOOK_INFRA.md` Part C). No credential beyond a bot token — proves the one outbound channel that has no dependency on the phone, the Worker, or eToro (§8.1). | |
 | 1 | **Firebase project + Cloudflare Worker.** Mint a Google OAuth token from the service-account JSON, then call FCM HTTP v1 and get back either a message id or a "no such registration token" error — the latter is a **pass**, since no device is registered yet (`RUNBOOK_INFRA.md` Parts A, B, D). **Proves free-tier viability with no phone and no eToro keys.** | **GATE — the question asked first** |
-| 2 | Cloudflare Pages static web app reading a **stub** snapshot from the Worker (hand-written JSON, not a real portfolio). Proves the read path — Pages → Worker → KV → browser, with the read token enforced — end to end before any real data exists. | |
+| 2 | Cloudflare Pages web app (static assets + server-side Pages Function proxy, §9.1) reading a **stub** snapshot from the Worker (hand-written JSON, not a real portfolio). Proves the read path — Pages Function → Worker → KV → browser, with the read token enforced server-side and never exposed to the browser — end to end before any real data exists. Requires Cloudflare Access in front of the deployment (`RUNBOOK_INFRA.md` Part F) since the proxy is otherwise a public, unauthenticated endpoint. | |
 | 3 | **Android tooling install** — JDK + Android SDK + `adb`. Currently absent from this machine (§12) and explicitly a prerequisite, not assumed; deferred to here so it is only installed once step 1 has proven the cloud side is worth building against. | |
 | 4 | Minimal APK: FCM receive + `setAlarmClock()`, nothing else — the same shape as the old gate-zero `WakeProof.ps1` from the Windows design, now proving the Android platform instead of Task Scheduler. Grant `SCHEDULE_EXACT_ALARM` and the battery-optimization exemption, apply the vivo checklist (§7.4). | **GATE — the multi-night on-battery proof.** Fires on time *and* has network, unplugged, screen off, untouched, for **3+ hours**, on **several consecutive nights**, including once across a reboot. Additionally confirm `RemoteMessage.getPriority()` still reports `PRIORITY_HIGH` after a week of pushes (§8.2 demotion canary) — this is the check that catches Google's 7-day silent-send demotion before it ever costs a live session. |
 | 5 | eToro client: auth, rate limiting, retries, all read endpoints, typed models. **First step that needs any eToro key at all**, and only the **demo** pair. | Against **demo** |
