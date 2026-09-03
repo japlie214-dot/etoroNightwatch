@@ -2,7 +2,8 @@
 
 **Status:** design, pending approval. Nothing built yet.
 **Date:** 2026-09-02
-**Host:** vivo iQOO Z10, Android 15 / Funtouch OS, Jakarta (UTC+7). Native Android app with an
+**Host:** vivo iQOO Z10, Android 16 / OriginOS 6, Snapdragon 7 Gen 3 (arm64-v8a only), 12 GB RAM,
+Jakarta (UTC+7). Native Android app with an
 embedded CPython runtime via **Chaquopy**. Often on battery, not permanently charged. Doubles
 as a small always-reachable personal server, contacted over Telegram.
 
@@ -71,6 +72,8 @@ is precisely the condition this host runs in.
 | `setAlarmClock()` surfaces a **visible alarm icon in the status bar**. | Cosmetic. Accepted. |
 | **Chaquopy is free and open-source under MIT** (https://chaquo.com/chaquopy/, https://github.com/chaquo/chaquopy/blob/master/LICENSE.txt). It embeds a real CPython interpreter in the APK and ships prebuilt native wheels for NumPy, SciPy, pandas and scikit-learn. | The Python strategy, SQLite layer, eToro client and Telegram code port over largely unchanged. **We do not have to drop numpy/pandas.** |
 | Cost: a Gradle / Android Studio build pipeline, and sideloading a new APK on every code change. | Slower iteration than editing a `.py` on a laptop. Accepted. |
+| **Chaquopy 17.0.0** (2025-12-01) supports AGP 7.3–9.2, Python 3.10–3.14, min API 24. AGP 8.x–9.2 already supports `compileSdk 36` — nothing structurally blocks building against Android 16. But **no Chaquopy release note or changelog entry confirms Android 16 / API 36 has actually been tested.** *Unverified.* (https://chaquo.com/chaquopy/doc/current/versions.html, https://chaquo.com/chaquopy/doc/current/changelog.html) | **Decision:** `compileSdk 36`, `targetSdk 35`. Don't couple an unverified toolchain dependency (Chaquopy on API 36) to a target-SDK bump that buys nothing safety-wise — Android 16's JobScheduler quota changes (§1.2) apply to every app regardless of `targetSdk`, so staying on `targetSdk 35` sidesteps zero real restriction. A throwaway Chaquopy test build against `compileSdk`/`targetSdk 36` is an explicit prerequisite before ever committing to `targetSdk 36` (§11 step 4). |
+| The host's ABI is known and singular: Snapdragon 7 Gen 3 → **arm64-v8a only**. Chaquopy ships per-ABI native wheels. | Build for `arm64-v8a` only (`ndk.abiFilters`, §2) rather than bundling every architecture Chaquopy supports — a material APK size reduction, at zero cost since the device can never use the other ABIs anyway. |
 | `setAndAllowWhileIdle()` / `setExactAndAllowWhileIdle()` *"cannot fire alarms more than once per nine minutes, per app."* | Would have constrained a polling cadence. **Mostly moot** — inbound control is push-driven, not polled, in the normal case (§8.2). The daily safety-net alarm uses this family once a day; the escalation-only hourly Telegram poll (§8.2) also uses it, but only while escalated, at 1 hour — comfortably above the 9-minute floor. |
 | Doze names **FCM high-priority messages** as a wake mechanism: *"FCM high priority messages let you wake your app to engage the user. In Doze or App Standby mode, the system delivers the message and gives the app temporary access to network services and partial wakelocks, then returns the device or app to the idle state."* (https://developer.android.com/training/monitoring-device-state/doze-standby) | The inbound control channel and the redundant daily trigger (§8.2, §7.2). Note what is granted: **network + partial wakelock, temporarily**, at delivery time. |
 | AOSP names telephony as the *other* Doze-exempt wake path: *"MMS/SMS/telephony services function independently of Doze and always wake the client apps even while the device remains in Doze mode."* … *"Apps receiving SMS and MMS messages are put on a temporary whitelist so that they can complete their processing."* (https://source.android.com/docs/core/power/platform_mgmt) | Technically the strongest fallback — and **rejected on cost**, not on capability. Recorded with its reasoning in §8.2 so the trade-off is not silently re-litigated. |
@@ -100,6 +103,72 @@ and App Standby."*
 inert. It is therefore checked in preflight (gate 2) on every single run, and its loss is
 treated as a hard failure.
 
+#### Android 16 — what changed for this design (nothing, and that is the headline finding)
+
+The host's real OS version was corrected during research from Android 15 to **Android 16**.
+This mattered enough to check directly against Google's own migration pages, because the whole
+design leans on `setAlarmClock()`, Doze, App Standby and the battery-optimization exemption
+holding still. **They do.** Neither the "behavior changes: all apps" nor the "behavior changes:
+apps targeting 16" page mentions alarms, `setAlarmClock()`, `SCHEDULE_EXACT_ALARM`/
+`USE_EXACT_ALARM`, Doze, or App Standby at all.
+(https://developer.android.com/about/versions/16/behavior-changes-all,
+https://developer.android.com/about/versions/16/behavior-changes-16)
+
+This is genuinely good news and the single most load-bearing finding of this research pass: the
+mechanism this design leans on hardest — `setAlarmClock()` and the exemptions around it — is
+**unaffected by the OS version bump**. Everything in §1.2 written against "Android 12+" still
+holds verbatim on Android 16.
+
+A handful of Android 16 changes are real but tangential (§7.6 cross-references the relevant
+ones): JobScheduler quota enforcement now also applies to jobs started while the app was TOP or
+alongside a foreground service (previously exempt) — irrelevant to `AlarmManager` directly, but
+matters if any retry path is ever built on WorkManager/JobScheduler instead. Android 16 also
+adds better background-work diagnostics (`JobParameters.getStopReason()`,
+`JobScheduler#getPendingJobReasonsHistory()`, `STOP_REASON_TIMEOUT_ABANDONED`) that are useful
+if a session is ever missed and needs debugging. The Android 15 `dataSync` foreground-service
+6h/24h execution cap is unchanged in 16 and remains irrelevant at ~15 minutes per run.
+
+#### App hibernation — a new risk this design must actively defeat
+
+**This is not in the original design and is added here because it applies directly.** Android's
+App Hibernation (API 30+, unchanged in Android 16) force-stops an app that has gone **unused for
+several months** and **strips its runtime permissions** — including exactly the two permissions
+gate 2 depends on: `SCHEDULE_EXACT_ALARM` and the battery-optimization exemption.
+(https://developer.android.com/topic/performance/app-hibernation)
+
+The trigger is **lack of user interaction**, not lack of background activity. This app is
+*designed* to never be opened by the user after setup — that is the whole point of it running
+unattended every night. That puts it squarely in hibernation's target population, regardless of
+how reliably it has been running trades in the background.
+
+If hibernation fires, it silently revokes the two permissions preflight gate 2 exists to guard,
+and the entire system goes dark with no trade and, worse, no alert — because the code path that
+would send the alert depends on the very permissions just stripped. OriginOS ships its own
+per-app equivalent, a **"Pause app activity if unused"** toggle (§7.4), separate from and in
+addition to the stock Android mechanism.
+
+Mitigations:
+
+1. **Disable both switches** — the OriginOS "Pause app activity if unused" toggle (§7.4) and the
+   stock Android "remove permissions and free up space" / "unused apps" setting, at setup and
+   re-verified on the same schedule as the rest of §7.4.
+2. **Detection already exists, by construction.** Preflight gate 2 (§5) checks both
+   `SCHEDULE_EXACT_ALARM` and the battery-optimization exemption on *every single session*. If
+   hibernation revokes either, the very next scheduled wake — which, critically, does not itself
+   require user interaction to fire, only the alarm — will catch it and alert loudly. **Detection
+   is not prevention**, though: gate 2 tells you the day after it happened, not before, and if
+   the alarm itself was one of the casualties there may be no next wake to catch it on the normal
+   path (the daily safety-net alarm and boot receiver, §7.2, are the backstops for that specific
+   failure).
+3. **Unverified, both ways.** Whether a successful unattended background run (network activity,
+   a foreground service, a fired alarm) counts as "usage" that resets the hibernation clock on
+   stock AOSP is not documented either way — Google's own page is silent on what counts as
+   qualifying interaction. It is certainly unverified for OriginOS's own toggle, which is a vivo
+   mechanism with no public specification at all (§7.4). Do not assume either mechanism is reset
+   by the nightly run; treat mitigation (1) as the one you can actually rely on.
+
+Add to §12's risk table accordingly.
+
 #### vivo / iQOO — stated plainly
 
 This is the weakest link and the user chose it knowingly (§12).
@@ -109,13 +178,8 @@ This is the weakest link and the user chose it knowingly (§12).
 - Developers report alarms failing on vivo devices **even with autostart enabled, battery optimization disabled, and the app locked in Recents** (https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61). Alarmy maintains a dedicated vivo troubleshooting article.
 - Contrast, honestly: Samsung is **more aggressive by default** but **documents its off switch**. vivo is less aggressive on paper and documents nothing. Undocumented is worse than aggressive-but-known, because it cannot be verified — only observed.
 
-Required vivo settings (all of them, §7.4):
-
-1. Autostart enabled — Settings → More settings → Applications → Autostart, or i Manager → App manager → Autostart manager
-2. Battery usage → **Unrestricted**
-3. Allow high background power consumption
-4. Disable battery optimization (the `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` exemption)
-5. Lock the app in Recents
+Required OriginOS settings (all of them, §7.4) — the concrete steps moved to §7.4 since the
+Funtouch paths this section used to name no longer apply on OriginOS 6.
 
 **Support-life caveat.** The iQOO Z10 is early in its support window and **will receive major
 OS upgrades**, each of which can silently reset power-management settings. This is the
@@ -124,10 +188,12 @@ opposite of the usual "run it on an EOL phone" advice, and it is a real recurrin
 
 #### Battery health
 
-Funtouch OS exposes a charge limit under **Settings → Battery → Battery health and charging**
-(80% cap). *Community-sourced and unverified:* availability is uneven across Funtouch builds
-and some users report the toggle resetting after a restart. This is not vendor documentation
-and must be confirmed on the actual device.
+vivo's Funtouch OS exposed a charge limit under **Settings → Battery → Battery health and
+charging** (80% cap); whether OriginOS 6 keeps the same path is **unverified** — OriginOS
+replaced Funtouch on this device and settings screens have been reorganized (§7.4). *Community-
+sourced and unverified either way:* availability was uneven across Funtouch builds and some
+users reported the toggle resetting after a restart. This is not vendor documentation and must
+be confirmed on the actual device, on OriginOS 6.
 
 The Z10's cell is physically large (7300 mAh). Because the phone is often on battery and
 sometimes on charge continuously, adopt: use the 80% cap if present, inspect the phone
@@ -259,14 +325,17 @@ etoroNightwatch/
   settings.gradle.kts
   build.gradle.kts
   app/
-    build.gradle.kts             # Chaquopy plugin, python { pip { install(...) } }
+    build.gradle.kts             # Chaquopy plugin, python { pip { install(...) } };
+                                 # ndk.abiFilters = ["arm64-v8a"] only (§1.2, §7.1) — Chaquopy
+                                 # ships per-ABI native wheels and the host has a single,
+                                 # known ABI, so bundling the others is pure APK bloat
     src/main/AndroidManifest.xml # SCHEDULE_EXACT_ALARM, RECEIVE_BOOT_COMPLETED,
                                  # WAKE_LOCK, INTERNET, ACCESS_NETWORK_STATE,
                                  # POST_NOTIFICATIONS,
                                  # FOREGROUND_SERVICE(+_DATA_SYNC),
                                  # REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
     src/main/java/.../nightwatch/
-      MainActivity.kt            # setup/status UI, permission funnel, vivo checklist
+      MainActivity.kt            # setup/status UI, permission funnel, OriginOS checklist
       AlarmScheduler.kt          # setAlarmClock() for the session; daily safety-net alarm;
                                  # escalated hourly Telegram poll alarm (failure case only)
       SessionAlarmReceiver.kt    # fires → starts SessionService
@@ -655,13 +724,13 @@ against a real, multi-asset account.
 
 ---
 
-## 7. Host integration — Android (iQOO Z10)
+## 7. Host integration — Android (iQOO Z10, Android 16 / OriginOS 6)
 
 ### 7.1 App architecture
 
 | Component | Language | Responsibility |
 |---|---|---|
-| `MainActivity` | Kotlin | Setup and status UI. Permission funnel: `SCHEDULE_EXACT_ALARM`, battery-optimization exemption, notification permission. Renders the vivo settings checklist (§7.4) with a "verified on" date. |
+| `MainActivity` | Kotlin | Setup and status UI. Permission funnel: `SCHEDULE_EXACT_ALARM`, battery-optimization exemption, notification permission. Renders the OriginOS settings checklist (§7.4) with a "verified on" date. |
 | `AlarmScheduler` | Kotlin | Computes nothing itself — asks Python for the next fire instant, then calls `setAlarmClock()`. Owns the daily session alarm and the daily safety-net alarm unconditionally; registers the hourly Telegram poll alarm **only while the app is in the escalated state** (§8.2), and cancels it on de-escalation. |
 | `SessionAlarmReceiver` | Kotlin | Fires on the session alarm, immediately starts `SessionService`. Does no work in the receiver. |
 | `SessionService` | Kotlin | Foreground service (`dataSync`) with a persistent notification, so Android will not kill the ~15 minutes of run. Acquires the partial wake lock, invokes the Python entry point, releases in `finally`. |
@@ -717,22 +786,31 @@ unreliability. Alert to Telegram and surface it in the UI.
 
 Both user-granted items are re-verified in **preflight gate 2** on every run.
 
-### 7.4 vivo settings checklist
+### 7.4 OriginOS 6 settings checklist
 
-None of this is documented by vivo. It is community-derived and must be **verified by
-observation**, then re-verified after every OS update.
+**None of this is vivo documentation.** vivo publishes no developer-facing background-execution
+policy for OriginOS, full stop. dontkillmyapp.com/vivo — the closest thing to a community
+reference, rating vivo 3/5 — covers **Funtouch OS only** and has **not been updated for OriginOS
+6**; its guidance does not transfer automatically. The checklist below is
+**COMMUNITY-REPORTED, from a single blog source, not vivo documentation — it must be verified
+on the physical device**, then re-verified after every OS update.
+(https://cyberraiden.wordpress.com/2026/08/02/origin-os-6-apps-section-settings-explained/)
 
 | # | Setting | Path |
 |---|---|---|
-| 1 | Autostart **enabled** | Settings → More settings → Applications → Autostart, or i Manager → App manager → Autostart manager |
-| 2 | Battery usage **Unrestricted** | Settings → Battery → App battery usage |
-| 3 | **Allow high background power consumption** | same screen |
-| 4 | Battery optimization **disabled** for the app | the exemption dialog in §7.3 |
-| 5 | App **locked in Recents** | Recents → app card → lock |
+| 1 | Autostart / auto-launch **enabled** | Settings → Apps → [app] → Battery usage → enable auto-start. OriginOS folds this into the per-app "Battery usage" screen — unlike Funtouch, which had a separate standalone Autostart manager. |
+| 2 | Battery usage **Unrestricted** | Settings → Apps → [app] → Battery usage → set to **Unrestricted** (tri-state: Unrestricted / Optimized / Restricted — Unrestricted is the one that matters here). |
+| 3 | Allow background usage globally | Settings → Battery → Background power consumption management → allow background usage for the app. |
+| 4 | App **locked in Recents** | **No confirmed OriginOS 6 equivalent found.** Verify manually: long-press the app's card in Recents and look for a lock/pin icon. |
+| 5 | **"Pause app activity if unused" disabled** | This is the OriginOS hibernation analogue (§1.2) — a vivo-specific mechanism layered on top of, and separate from, stock Android App Hibernation. Disable it for this app explicitly. |
 
-Reports exist of alarms failing on vivo hardware **even with all five applied**
-(https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61). That is why §11 step 4 is an
-empirical multi-night proof and not a paperwork exercise.
+**Stated plainly: this is a genuine unknown, not confirmed-safe.** vivo documents none of it;
+no verified reports — positive or negative — exist for exact alarms or FCM delivery on OriginOS
+6 specifically (the closest prior evidence, alarms failing on vivo hardware even with every
+known Funtouch-era setting applied — https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61
+— predates OriginOS 6 and cannot be assumed to transfer either way). Item 4's absence of a
+confirmed equivalent is exactly why §11 step 4's empirical multi-night proof is what actually
+resolves this, not the checklist by itself.
 
 **After every OS update, re-verify all five and re-run a one-night proof before trusting the
 next live session.** The Z10 is early in its support life and will take major upgrades.
@@ -744,7 +822,7 @@ safety-net alarm unconditionally, and re-registers the escalation-only hourly Te
 **only if persisted state says the app is currently escalated** (§8.2) — a reboot must not
 itself turn on a poll that was not running before it. **This must be tested explicitly**:
 reboot the phone, then confirm the job actually fires afterwards, before any real money is
-involved. On vivo, autostart being disabled will silently prevent the receiver from running at
+involved. With autostart disabled on OriginOS, the receiver will silently fail to run at
 all — which is exactly the failure mode that looks like nothing happened.
 
 ### 7.6 Battery strategy and returning to Doze
@@ -754,7 +832,11 @@ all — which is exactly the failure mode that looks like nothing happened.
 - **In the normal case, no Telegram polling alarm is scheduled at all** — inbound control rides FCM push, which costs no dedicated alarm or standing connection of our own (§8.2). Only on escalation (FCM demoted, token invalid, or no FCM message for N days) does `AlarmScheduler` register a repeating `setExactAndAllowWhileIdle()` hourly poll, cancelled again the moment de-escalation is detected. This keeps the battery cost of inbound control at zero in the common case and bounded to one poll/hour only in the failure case. At 1 hour the cadence is comfortably above the documented 9-minutes-per-app floor for `*AndAllowWhileIdle` alarms.
 - On a clean finish: reschedule, release the wake lock, stop the foreground service, and **let the device return to Doze naturally**. Nothing is forced.
 - On an abort: hold the wake lock and stay out of Doze so the device is reachable.
-- Charging: use the Funtouch 80% charge cap if the build exposes it (*unverified*, §1.2), inspect the cell periodically, plan replacement at ~3 years.
+- Charging: use the 80% charge cap if OriginOS 6 exposes it (*unverified whether the Funtouch-era
+  path carries over*, §1.2), inspect the cell periodically, plan replacement at ~3 years.
+- FCM high-priority demotion after ~7 days of silent sends (§8.2) is unchanged on Android 16;
+  the visible-notification-per-command rule already mandated there exists specifically to
+  prevent it — not duplicated here.
 
 ---
 
@@ -938,7 +1020,7 @@ static web app, sourced from the pushed snapshot:
 - **Sessions & logs** — every session, its preflight verdict, and the day's log file (LAN debug
   view only — not pushed to the Worker).
 - **Host panel** — battery level, charging state, exemption status, `canScheduleExactAlarms()`,
-  next alarm, last boot, date the vivo checklist was last verified (LAN debug view only).
+  next alarm, last boot, date the OriginOS checklist was last verified (LAN debug view only).
 - **Snapshot freshness** — every view built from a pushed snapshot shows an explicit "as of"
   timestamp, so staleness is visible rather than assumed away.
 
@@ -988,7 +1070,7 @@ step-by-step console/CLI instructions behind steps 0–2.
 | 1 | **Firebase project + Cloudflare Worker.** Mint a Google OAuth token from the service-account JSON, then call FCM HTTP v1 and get back either a message id or a "no such registration token" error — the latter is a **pass**, since no device is registered yet (`RUNBOOK_INFRA.md` Parts A, B, D). **Proves free-tier viability with no phone and no eToro keys.** | **GATE — the question asked first** |
 | 2 | Cloudflare Pages web app (static assets + server-side Pages Function proxy, §9.1) reading a **stub** snapshot from the Worker (hand-written JSON, not a real portfolio). Proves the read path — Pages Function → Worker → KV → browser, with the read token enforced server-side and never exposed to the browser — end to end before any real data exists. Requires Cloudflare Access in front of the deployment (`RUNBOOK_INFRA.md` Part F) since the proxy is otherwise a public, unauthenticated endpoint. | |
 | 3 | **Android tooling install** — JDK + Android SDK + `adb`. Currently absent from this machine (§12) and explicitly a prerequisite, not assumed; deferred to here so it is only installed once step 1 has proven the cloud side is worth building against. | |
-| 4 | Minimal APK: FCM receive + `setAlarmClock()`, nothing else — the same shape as the old gate-zero `WakeProof.ps1` from the Windows design, now proving the Android platform instead of Task Scheduler. Grant `SCHEDULE_EXACT_ALARM` and the battery-optimization exemption, apply the vivo checklist (§7.4). | **GATE — the multi-night on-battery proof.** Fires on time *and* has network, unplugged, screen off, untouched, for **3+ hours**, on **several consecutive nights**, including once across a reboot. Additionally confirm `RemoteMessage.getPriority()` still reports `PRIORITY_HIGH` after a week of pushes (§8.2 demotion canary) — this is the check that catches Google's 7-day silent-send demotion before it ever costs a live session. |
+| 4 | Minimal APK: FCM receive + `setAlarmClock()`, nothing else — the same shape as the old gate-zero `WakeProof.ps1` from the Windows design, now proving the Android platform instead of Task Scheduler. Grant `SCHEDULE_EXACT_ALARM` and the battery-optimization exemption, apply the OriginOS checklist (§7.4), disable the OriginOS "Pause app activity if unused" toggle and the stock unused-app permission removal (§1.2). Before this step is called done, also run a **throwaway Chaquopy test build against `compileSdk`/`targetSdk 36`** (§1.2) — a prerequisite check, separate from the alarm proof, that the toolchain itself works on this Android 16 device before any real app code is built on top of it. | **GATE — the multi-night on-battery proof.** Fires on time *and* has network, unplugged, screen off, untouched, for **3+ hours**, on **several consecutive nights**, including once across a reboot. Additionally confirm `RemoteMessage.getPriority()` still reports `PRIORITY_HIGH` after a week of pushes (§8.2 demotion canary) — this is the check that catches Google's 7-day silent-send demotion before it ever costs a live session. |
 | 5 | eToro client: auth, rate limiting, retries, all read endpoints, typed models. **First step that needs any eToro key at all**, and only the **demo** pair. | Against **demo** |
 | 6 | Market calendar + bar store + seeding (400 daily bars) + provisional/settle | |
 | 7 | Strategy port with the four approved bug fixes (§1.4); unit tests against `etoro_trader` fixtures | |
@@ -1014,14 +1096,16 @@ recorded here as a standing risk, not re-argued.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| **vivo's undocumented background killing on battery** — dontkillmyapp rates vivo 3/5 and states restrictions *"have not been fully uncovered yet"*; developers report alarms failing even with every known setting applied | **High** | §11 step 4 multi-night proof on battery before anything else; all five vivo settings (§7.4); foreground service for the run; daily Telegram heartbeat so a silent kill is detected the same morning. **There is no way to make this risk go away — only to detect it fast.** |
-| **Battery-optimization exemption revoked** (by an OS update, a "battery saver" sweep, or the user) — silently removes network in the Rare/Restricted buckets | **High** | Preflight gate 2 checks it every run and fails loudly with the exact Settings path. Detected within one session. |
-| **OS upgrade resets power-management settings** — the Z10 is early in its support life and *will* take major upgrades | **High** | Runbook: re-verify all five vivo settings **and re-run a one-night proof** after every OS update. Host panel shows the last-verified date. |
+| **Chaquopy / API 36 compatibility is unverified.** Chaquopy 17.0.0 supports AGP 7.3-9.2 (which structurally covers `compileSdk 36`), but no release note or changelog entry confirms Android 16 / API 36 has been tested. An embedded-CPython failure would invalidate the core premise that the Python strategy ports over largely unchanged. | Medium | Ship `compileSdk 36` / `targetSdk 35` so an unverified toolchain dependency is not coupled to a target bump. A throwaway Chaquopy test build against `compileSdk`/`targetSdk 36` is an explicit prerequisite in §11 step 4. Fallback if it fails: stay on `compileSdk 35`. |
+| **vivo's undocumented background killing on battery** — dontkillmyapp rates vivo 3/5 and states restrictions *"have not been fully uncovered yet"*, and that coverage is Funtouch-only, not updated for the device's actual OriginOS 6; developers report alarms failing on vivo hardware even with every known Funtouch-era setting applied, and no verified reports exist either way for OriginOS 6 | **High** | §11 step 4 multi-night proof on battery before anything else; all five OriginOS settings (§7.4); foreground service for the run; daily Telegram heartbeat so a silent kill is detected the same morning. **There is no way to make this risk go away — only to detect it fast.** |
+| **Battery-optimization exemption revoked** (by an OS update, a "battery saver" sweep, App Hibernation, or the user) — silently removes network in the Rare/Restricted buckets | **High** | Preflight gate 2 checks it every run and fails loudly with the exact Settings path. Detected within one session. |
+| **App Hibernation force-stops the app and strips its permissions** after months of the user never opening it — the trigger is lack of *user interaction*, not lack of background activity, and this app is deliberately never opened by design (§1.2). OriginOS layers its own "Pause app activity if unused" toggle on top. Whether a successful unattended run counts as qualifying "usage" on stock AOSP is undocumented, and is certainly undocumented for the OriginOS toggle | **High** | Disable both the OriginOS toggle and the stock unused-app permission removal at setup (§7.4). Preflight gate 2 already checks both affected permissions every session and will detect revocation — **detection, not prevention**; the daily heartbeat surfaces it the same morning. |
+| **OS upgrade resets power-management settings** — the Z10 is early in its support life and *will* take major upgrades | **High** | Runbook: re-verify all five OriginOS settings **and re-run a one-night proof** after every OS update. Host panel shows the last-verified date. |
 | **`SCHEDULE_EXACT_ALARM` revoked** — *"your app stops, and all future exact alarms are canceled"* | **High** | `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` receiver + `canScheduleExactAlarms()` in preflight gate 2. Never silently downgrade to an inexact alarm. |
 | **Orders near the close may behave differently than documented** | **High** | Step 11 on demo settles it; status 11 handled either way. |
 | **No Android build tooling on the development machine** — no JDK, no Android SDK, no `adb` installed as of this writing | Medium | Recorded as an explicit prerequisite gap, not assumed away. §11 sequences the Firebase/Cloudflare infrastructure proof (steps 0–2) *before* this install (step 3) specifically so the tooling install is deferred until it's known to be worth doing. Installing it is mechanical (Android Studio or SDK Studio command-line tools + a JDK) but is real setup time, not yet spent. |
 | **Running on battery rather than mains** — a flat phone is a missed session with no alert | Medium | Preflight gate 2 aborts below 40% and says so; daily heartbeat makes a dead phone obvious; charge cap and periodic inspection for the opposite failure. |
-| **Battery swelling** from long periods on charge; 7300 mAh cell | Medium | Funtouch 80% charge cap if available (*unverified — community-sourced, confirm on device*); periodic physical inspection; replace at ~3 years. A swollen cell is a fire risk. |
+| **Battery swelling** from long periods on charge; 7300 mAh cell | Medium | 80% charge cap if available on OriginOS 6 (*unverified — whether the Funtouch-era path carries over is unconfirmed, community-sourced, confirm on device*); periodic physical inspection; replace at ~3 years. A swollen cell is a fire risk. |
 | UPRO may not be tradable on your eToro entity | Medium | Preflight gate 8 — `allowOpenPosition` is authoritative. |
 | Strategy is **unstudied** — no study results exist for this variant in `etoro_trader` | Medium | etoroNightwatch executes it faithfully; it does not validate the edge. Start with a small budget override. |
 | Inbound commands lag if FCM is demoted before the hourly escalation poll kicks in | Low | FCM push makes the common case near-instant; escalation (§8.2) bounds worst-case lag to an hour and de-escalates automatically. Outbound alerts are unaffected and instant. |
