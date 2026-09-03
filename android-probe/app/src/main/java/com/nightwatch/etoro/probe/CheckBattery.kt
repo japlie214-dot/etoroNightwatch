@@ -242,10 +242,19 @@ object CheckBattery {
         } else {
             val deltaPct = nowPct - lastPct
             val deltaHours = (nowTs - lastTs) / 3_600_000.0
+            // BUG FIXED 2026-09-03 (crashed on-device, java.util.UnknownFormatConversionException
+            // 'w'): String.format() re-scans its ENTIRE receiver for %-conversions, including
+            // text already produced by Kotlin interpolation. "battery=$nowPct%" and "$lastPct%,"
+            // leave literal '%' characters in the string before .format() ever runs; Java's
+            // Formatter treats each as the start of a new spec, and here it hunted through
+            // "...(was 87%, delta=0pts over..." until it hit the 'w' in "was" and threw. Fix:
+            // format only the one numeric value in isolation, then interpolate the result — never
+            // pipe an already-interpolated string through .format().
+            val deltaHoursStr = String.format(Locale.US, "%.2f", deltaHours)
             CheckResult(
                 "BATTERY_DELTA",
                 true,
-                "battery=$nowPct% (was $lastPct%, delta=${deltaPct}pts over %.2fh)".format(deltaHours)
+                "battery=$nowPct% (was $lastPct%, delta=${deltaPct}pts over ${deltaHoursStr}h)"
             )
         }
     }
