@@ -562,6 +562,46 @@ this one is nowhere near that ceiling, but it's worth knowing before adding a fa
 co-founder, or anyone else to the allowlist in F.4 step 4: the 50-user count is per Cloudflare
 account, shared across every Access-protected application on it, not per application.
 
+### F.4a Why Access demanded a credit card, and whether that risks a surprise charge 🖱️ YOU (read)
+
+Cloudflare's Zero Trust signup has required a payment method on file even to stay on the Free
+plan since at least 2022 — this is a longstanding, widely-reported quirk of that one product's
+signup flow, not something specific to this account and not a new 2025/2026 policy change (no
+official Cloudflare changelog entry was found announcing it; it is documented only through years
+of community reports, e.g. https://community.cloudflare.com/t/free-credit-card-required/399917).
+Entering a card there does **not** convert Workers, Pages, or KV to a billable/paid state —
+Cloudflare bills per product/service, not account-wide
+(https://developers.cloudflare.com/billing/understand/billing-policy/), so those three stay on
+whatever plan they are already on regardless of a card being on file for Access.
+
+**The guarantee that actually matters, verified against Cloudflare's own pricing docs:**
+Workers and KV on the **Free** plan cannot bill overage at all — they only fail. Verbatim from
+Cloudflare: *"If you exceed any one of these limits, further operations of that type will fail
+with an error"* (https://developers.cloudflare.com/workers/platform/pricing/,
+https://developers.cloudflare.com/kv/platform/pricing/). Workers returns **Error 1027** past
+100,000 requests/day (https://developers.cloudflare.com/workers/platform/limits/). Overage
+billing exists **only on the Paid plan** for each product — there is no mechanism to charge the
+card on file while a product remains on Free.
+
+**So the entire guarantee reduces to one rule: never click "Upgrade" on Workers, Pages, or KV.**
+Not a monitoring task, a single button you don't press. This app's real traffic (a handful of
+requests/day) sits roughly four orders of magnitude under the Workers Free limit, so hitting it
+by accident is not a realistic concern.
+
+**Two things worth knowing rather than assuming:**
+- Cloudflare's account-level **budget alerts** are explicitly documented as
+  *"informational only. They do not pause or cap usage"* and are only available to
+  **Pay-as-you-go accounts** (https://developers.cloudflare.com/billing/manage/budget-alerts/) —
+  not a hard stop, and not applicable to this account unless something is later moved to PAYG.
+- There is **no official documentation of an account-wide "hard cap spend at $0" setting**.
+  A Cloudflare community feature request asks for exactly this
+  (https://community.cloudflare.com/t/how-to-stay-100-within-free-plan-limits-and-never-get-charged/931687),
+  which is itself evidence the capability does not currently exist. Don't go looking for it.
+- Zero Trust/Access behavior at the 50-seat ceiling (block vs. bill) is reported as "blocks new
+  logins" in Cloudflare community threads, but this was **not confirmed against an official
+  developers.cloudflare.com page** in this pass — moderate confidence, not verified. Irrelevant
+  at one user, but don't treat it as settled if the allowlist ever grows.
+
 ### F.5 Verification checklist
 
 - [ ] `npx wrangler pages deploy public --project-name etoro-nightwatch-pages` succeeds; URL
