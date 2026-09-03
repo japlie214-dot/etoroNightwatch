@@ -782,3 +782,131 @@ parent host process's original environment snapshot.
   disable "Pause app activity if unused", the battery-optimization exemption, lock in Recents)
   are phone-side settings, not toolchain — still to be applied once the minimal APK exists to
   install.
+
+### G.7 The Chaquopy `compileSdk`/`targetSdk 36` throwaway probe — RESOLVED ⚙️ REPO (done, 2026-09-03)
+
+DESIGN §1.2 and §11 step 4 both flagged this as an explicit prerequisite before ever committing
+to `targetSdk 36`: no Chaquopy changelog entry confirms Android 16 / API 36 has actually been
+tested. This section resolves that unknown with a real build, not a documentation search.
+
+**Where:** a throwaway project at `chaquopy-probe/` — deliberately built *outside* this repo (a
+session-scoped temp scratchpad directory, not part of the repo and safe to delete once this
+runbook entry is trusted) and under a distinct `applicationId`
+(`com.nightwatch.probe`, not `com.nightwatch.etoro`) so it could never be confused with the real
+app. Nothing in `app/` exists yet; this section only unblocks the `compileSdk`/`targetSdk`
+decision.
+
+**Verdict — Chaquopy 17.0.0 builds successfully on `compileSdk 36` / `targetSdk 36`.**
+`./gradlew assembleDebug` succeeded on the risky configuration DESIGN §1.2 flagged as unverified:
+
+```
+BUILD SUCCESSFUL in 1m 24s
+44 actionable tasks: 44 executed
+```
+
+AGP prints its usual "tested up to compileSdk = 35" advisory warning (expected — AGP hasn't
+updated that hardcoded warning list yet) but this does **not** block the build; it is filtered
+noise, not an error. The APK installs cleanly per `aapt2 dump badging`:
+
+```
+package: name='com.nightwatch.probe' versionCode='1' versionName='1.0'
+platformBuildVersionName='16' platformBuildVersionCode='36'
+compileSdkVersion='36' compileSdkVersionCodename='16'
+minSdkVersion:'24'
+targetSdkVersion:'36'
+```
+
+The Python↔Kotlin bridge was exercised, not just assumed: a `probe.py` module (packaged inside
+`assets/chaquopy/app.imy` as `probe.pyc`, confirmed by unzipping the APK) returns `sys.version`
+plus a trivial computation, called from Kotlin via `Python.getInstance().getModule("probe")` —
+this proved the embedded CPython actually starts and executes on-device build tooling (the debug
+build doesn't run on a device in this probe — no phone was involved, per DESIGN §11 step 3's own
+scope split — but the identical Gradle/Chaquopy pipeline that packages and would launch it did
+run end-to-end).
+
+**Exact working version combination:**
+
+| Component | Version |
+|---|---|
+| Gradle | 8.11.1 (wrapper, self-downloaded — no preinstalled Gradle needed) |
+| Android Gradle Plugin (AGP) | 8.9.0 |
+| Kotlin Gradle plugin | 2.0.21 |
+| Chaquopy | 17.0.0 |
+| JDK | Temurin 17.0.20.1+1 (already installed, §G.1 — no change needed) |
+| `compileSdk` / `targetSdk` / `minSdk` | 36 / 36 / 24 |
+| `buildPython` (host, runs pip/build tooling) | `C:\Users\10102721\AppData\Local\Programs\Python\Python313\python.exe` (3.13) |
+| Embedded Python (`chaquopy { defaultConfig { version = ... } }`) | **3.13** — matches `buildPython`, inside Chaquopy 17.0's supported 3.10–3.14 range |
+| ABI | `arm64-v8a` only (`ndk.abiFilters`) |
+
+**One fixable local issue hit along the way — not a Chaquopy/API-36 incompatibility.** The first
+build attempt failed at `:app:extractDebugPythonBuildPackages` with a bare
+`Process ... finished with non-zero exit value 1` and no useful message in Gradle's own output.
+Root-caused by hand: the failing subprocess was Python's own `compileall` step, dying with
+`FileNotFoundError` on a `.pyc.<tmp-suffix>` rename — and the full path to that temp file was
+**268 characters**, over the classic Windows `MAX_PATH` (260) limit. The project's forced
+location (a deeply-nested session-scoped temp scratchpad path) was long enough on its own that
+Chaquopy's generated build-venv paths tipped over the limit. **Fix:** `subst X: <scratchpad
+path>` (no admin rights required, unlike enabling registry `LongPathsEnabled`) to give the
+project a short drive-letter path for the actual build; the project's real files never moved.
+Once built from `X:\chaquopy-probe`, the identical config built clean. **Filed here because the
+real app will eventually live in this repo at a normal, short path — this failure mode is
+specific to a long temp-scratchpad location and should not recur** — but if a future build ever
+lands under a long path again (a deeply-nested CI workspace, for example), this is the fix.
+
+**numpy/pandas DO resolve as prebuilt native wheels for arm64-v8a — DESIGN's "we do not have to
+drop numpy/pandas" claim (§1.2) holds.** Adding to `chaquopy { defaultConfig { pip { ... } } }`:
+
+```kotlin
+pip {
+    install("numpy")
+    install("pandas")
+}
+```
+
+resolved and packaged cleanly against Chaquopy's own package index
+(`https://chaquo.com/pypi-13.1`), no source builds, no failures:
+
+```
+Collecting numpy
+  Downloading .../numpy-1.26.2-0-cp313-cp313-android_24_arm64_v8a.whl (5.1 MB)
+Collecting pandas
+  Downloading .../pandas-2.1.3-1-cp313-cp313-android_24_arm64_v8a.whl (11.3 MB)
+Collecting chaquopy-openblas>=0.2.20 (from numpy)
+Collecting chaquopy-libcxx>=11000 (from numpy)
+Collecting chaquopy-libgfortran>=4.9 (from chaquopy-openblas>=0.2.20->numpy)
+Successfully installed chaquopy-libcxx-180000 chaquopy-libgfortran-4.9 chaquopy-openblas-0.2.20
+  numpy-1.26.2 pandas-2.1.3 python-dateutil-2.9.0.post0 pytz-2026.3.post1 six-1.17.0
+  tzdata-2026.3
+```
+
+Verified as actually *packaged*, not just resolved — unzipping the built APK's
+`assets/chaquopy/requirements-common.imy` shows real compiled arm64 extension modules, e.g.
+`numpy/core/_multiarray_umath.so`, `numpy/linalg/_umath_linalg.so`,
+`pandas/_libs/{algos,groupby,hashtable,interval}.so`, and OpenBLAS's own
+`chaquopy/lib/libopenblas.so` (8.8 MB on its own) — 65 native `.so` files in total across the two
+packages and their dependencies. This directly exercises the rolling-standard-deviation-style
+numeric workload DESIGN's Std Band Ladder strategy needs.
+
+**APK size, with and without numpy/pandas** (`ls -la`, single ABI `arm64-v8a`, debug build,
+unminified):
+
+| Build | Size |
+|---|---|
+| Baseline (Chaquopy + bridge only, no pip packages) | 22,393,101 bytes (≈ 21.4 MiB / 22.4 MB) |
+| + numpy 1.26.2 + pandas 2.1.3 (and their native deps) | 52,555,693 bytes (≈ 50.1 MiB / 52.6 MB) |
+| Delta | ≈ 30.16 MB |
+
+This is the real cost DESIGN §1.2 accepted implicitly when it decided to keep numpy/pandas
+rather than hand-roll the rolling 260-bar standard deviation in pure Python — confirmed here as
+~30 MB of native wheels, on top of Chaquopy's own ~22 MB baseline (CPython 3.13 itself, its
+stdlib, and the Java↔Python bridge). Single-ABI (`arm64-v8a` only, per §G.3) is what keeps this
+number this low; bundling all ABIs Chaquopy supports would multiply the native-library portion by
+roughly the number of additional ABIs.
+
+**Bottom line for the DESIGN §1.2 decision:** the throwaway build proves path (a) from the
+"if it fails" branch never had to be exercised — Chaquopy 17.0.0 is **not** incompatible with API
+36; the only failure encountered was the unrelated, fixable Windows path-length issue above.
+DESIGN's existing `compileSdk 36` / `targetSdk 35` choice remains sound and can now be upgraded
+to `targetSdk 36` as well if desired — nothing in the toolchain blocks it, though DESIGN's own
+reasoning (Android 16 behavior changes apply regardless of `targetSdk`) means there is still no
+functional *reason* to bump it, only newly-removed risk in doing so.
