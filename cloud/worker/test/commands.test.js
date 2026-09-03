@@ -6,7 +6,12 @@ describe("command allowlist", () => {
     expect([...ALLOWED_COMMANDS].sort()).toEqual(
       // Must stay in step with SUPPORTED_COMMANDS in
       // app/src/main/python/nightwatch/notify/commands.py and DESIGN.md §8.2.
-      ["halt", "help", "logs", "next", "pnl", "positions", "resume", "status", "today"].sort()
+      [
+        // Trading/reporting commands (DESIGN 8.2)
+        "halt", "help", "logs", "next", "pnl", "positions", "resume", "status", "today",
+        // Probe/diagnostic commands (android-probe v2)
+        "ping", "runchecks", "schedule", "selftest",
+      ].sort()
     );
   });
 

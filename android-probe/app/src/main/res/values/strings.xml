@@ -1,5 +1,11 @@
 <resources>
     <string name="app_name">Nightwatch Probe</string>
+    <!-- v2: two channels — routine events stay low-importance so they don't buzz all night;
+         failures use default importance so they actually surface (task Problem 1). The FCM
+         default_notification_channel_id meta-data below still points at the routine channel;
+         NightwatchProbeMessagingService explicitly posts failures on the failure channel. -->
     <string name="notification_channel_id">nightwatch_probe_events</string>
-    <string name="notification_channel_name">Nightwatch Probe Events</string>
+    <string name="notification_channel_name">Nightwatch Probe: routine events</string>
+    <string name="notification_channel_id_failure">nightwatch_probe_failures</string>
+    <string name="notification_channel_name_failure">Nightwatch Probe: FAILURES</string>
 </resources>

@@ -15,6 +15,16 @@ export const ALLOWED_COMMANDS = new Set([
   // app/src/main/python/nightwatch/notify/commands.py - a command allowed on the
   // phone but rejected here would look like a bug.
   "help",
+  // --- Probe/diagnostic commands (android-probe v2). ---------------------
+  // These drive the on-device proof APK: they exercise the wake path and push
+  // results back to /snapshot. They are read-only or scheduling-only - none of
+  // them can open, close or modify a position, which keeps the "a compromised
+  // control channel must never be able to move money" invariant (DESIGN 6.I).
+  // Must stay in step with the phone-side dispatch in android-probe.
+  "ping",
+  "runchecks",
+  "schedule",
+  "selftest",
 ]);
 
 /** Normalizes "/status", "STATUS", " status " etc. to "status". */

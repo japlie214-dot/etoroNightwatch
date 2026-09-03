@@ -16,6 +16,9 @@ if (localPropsFile.exists()) {
     localProps.load(FileInputStream(localPropsFile))
 }
 val phonePushSecret: String = localProps.getProperty("PHONE_PUSH_SECRET", "")
+val commandHmacSecret: String = localProps.getProperty("COMMAND_HMAC_SECRET", "")
+val telegramBotToken: String = localProps.getProperty("TELEGRAM_BOT_TOKEN", "")
+val telegramChatId: String = localProps.getProperty("TELEGRAM_CHAT_ID", "")
 
 android {
     namespace = "com.nightwatch.etoro.probe"
@@ -30,8 +33,10 @@ android {
         applicationId = "com.nightwatch.etoro"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1-probe"
+        // v2: upgrade over the v1 APK already installed on the phone (adb install -r).
+        // Same applicationId + signing config as v1 — only the version bumps.
+        versionCode = 2
+        versionName = "0.2-probe"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
@@ -47,6 +52,9 @@ android {
             "\"https://etoro-nightwatch-worker.japlie214.workers.dev\""
         )
         buildConfigField("String", "PHONE_PUSH_SECRET", "\"$phonePushSecret\"")
+        buildConfigField("String", "COMMAND_HMAC_SECRET", "\"$commandHmacSecret\"")
+        buildConfigField("String", "TELEGRAM_BOT_TOKEN", "\"$telegramBotToken\"")
+        buildConfigField("String", "TELEGRAM_CHAT_ID", "\"$telegramChatId\"")
     }
 
     signingConfigs {
@@ -89,9 +97,6 @@ chaquopy {
         // Matches the buildPython host interpreter proven in the chaquopy-probe throwaway build.
         buildPython("C:/Users/10102721/AppData/Local/Programs/Python/Python313/python.exe")
         pip {
-            // Deliberately NOT numpy/pandas here (proven separately in chaquopy-probe; 30 MB is
-            // pointless for this probe, per the task brief).
-            //
             // tzdata is included proactively: Python's zoneinfo on Android may not find the
             // system's APEX tzdata module the way it does on desktop Linux, and this is exactly
             // the kind of thing that silently produces a wrong trade time (DESIGN §1.3). Bundling
@@ -100,6 +105,13 @@ chaquopy {
             // whether Android's own system tzdata is reachable from Chaquopy's embedded
             // interpreter. See README.md and probe/checks.py for how this is verified/reported.
             install("tzdata")
+
+            // v2 check 4: numpy/pandas were deliberately omitted from v1 (proven only at BUILD
+            // time in the throwaway chaquopy-probe project, never at RUNTIME on this device, and
+            // never bundled in an APK actually installed on the phone). The real strategy needs
+            // both. Expect the APK to grow ~30 MB — that is fine and expected, not a regression.
+            install("numpy")
+            install("pandas")
         }
     }
 }

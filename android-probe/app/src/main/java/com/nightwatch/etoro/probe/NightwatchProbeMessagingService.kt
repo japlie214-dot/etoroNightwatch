@@ -16,11 +16,30 @@ import org.json.JSONObject
 import java.io.IOException
 
 /**
- * DESIGN §8.2 tier 1 (FCM high-priority push) and the demotion canary.
+ * DESIGN §8.2 tier 1 (FCM high-priority push), the demotion canary, and — v2 — the full inbound
+ * remote-command loop (task Problem 3, the headline feature).
  *
- * getPriority() is logged on every message — this is the required design element that catches
- * Google's 7-day silent-high-priority demotion before it ever costs a live session. Posting a
- * VISIBLE notification for every message is what prevents that demotion in the first place.
+ * **Design constraint, load-bearing, do not reintroduce a `notification` block:** the Worker
+ * (`cloud/worker/src/fcm.js`) sends DATA-ONLY FCM messages on purpose. A message that carries
+ * both `notification` and `data` is rendered by the FCM SDK itself while the app is backgrounded,
+ * and `onMessageReceived()` is **never invoked** in that case — confirmed empirically on the real
+ * device (three pushes displayed as system-tray notifications, zero `FCM_MESSAGE_RECEIVED` log
+ * entries). Because of this, `title`/`body` travel inside `data` here, `remoteMessage
+ * .notification` is always null and is never read, and this handler builds the visible
+ * notification itself from `data` on every call — this is what makes onMessageReceived fire
+ * reliably (foreground and background) AND what prevents the 7-day silent-send demotion.
+ *
+ * getPriority() is logged AND surfaced loudly in the UI on every message — the demotion canary
+ * that catches Google's 7-day silent-high-priority demotion before it ever costs a live session.
+ *
+ * Every inbound command's `data` payload is one of:
+ *  - {command, counter, hmac, title?, body?}  — from the Worker's POST /command (HMAC-verified,
+ *                                 replay-checked)
+ *  - {command: "refresh", title?, body?} — from the Worker's POST /refresh (already gated by
+ *                                 WEB_READ_TOKEN at the Worker; no per-message hmac by design,
+ *                                 DESIGN §9.1/§9.4)
+ *  - {command: "run_session", trading_date, title?, body?} — the redundant daily cron trigger
+ *                                 (DESIGN §7.2/§9.1)
  */
 class NightwatchProbeMessagingService : FirebaseMessagingService() {
 
@@ -31,27 +50,89 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
         val store = EventStore.get(this)
         val priorityStr = priorityToString(message.priority)
         val origPriorityStr = priorityToString(message.originalPriority)
+        FcmPriorityHolder.lastPriority = priorityStr
 
-        // The demotion canary (task requirement 2 / DESIGN §8.2): log getPriority() every time.
+        // IMPORTANT — data-only messages by design (coordinated with the Worker side,
+        // cloud/worker/src/fcm.js): the Worker sends NO `notification` block at all. Per
+        // Firebase's documented behaviour, a message carrying BOTH `notification` and `data`
+        // is rendered by the FCM SDK itself while the app is backgrounded, and
+        // onMessageReceived() is NEVER invoked in that case — this was confirmed empirically on
+        // the real device (three pushes displayed as system-tray notifications, zero
+        // FCM_MESSAGE_RECEIVED log entries, because the handler never ran). `remoteMessage
+        // .notification` is therefore ALWAYS null here by construction — never read it. Title
+        // and body travel inside `data` instead, and this handler builds the visible
+        // notification itself so it always fires, foreground or background.
+        val command = message.data["command"]
+        val title = message.data["title"] ?: "Nightwatch Probe"
+        val body = message.data["body"] ?: "command=$command data=${message.data}"
+
+        // The unmistakable event this bug exposed the absence of: log it BEFORE any dispatch
+        // logic, unconditionally, every single time onMessageReceived actually runs.
         store.log(
-            "FCM_RECEIVED",
-            "priority=$priorityStr originalPriority=$origPriorityStr " +
-                "data=${message.data} notification=${message.notification?.body}"
+            "FCM_MESSAGE_RECEIVED",
+            "priority=$priorityStr originalPriority=$origPriorityStr command=$command " +
+                "data_keys=${message.data.keys} data=${message.data}"
         )
 
-        // Required to avoid the 7-day silent-high-priority demotion.
-        NotificationHelper.post(
-            this,
-            "Nightwatch Probe: FCM received",
-            "priority=$priorityStr data=${message.data}"
-        )
+        if (priorityStr != "PRIORITY_HIGH") {
+            NotificationHelper.postFailure(
+                this,
+                "FCM priority demoted",
+                "getPriority()=$priorityStr — Google may be demoting our high-priority privilege " +
+                    "after silent sends (DESIGN §8.2). Escalation-path logic should trigger."
+            )
+        }
 
-        // Do the work inside onMessageReceived, inside the temporary network/wakelock grant
-        // FCM high-priority delivery provides (DESIGN §8.2) — start WakeService for the network
-        // check + Chaquopy smoke check + tzdata check, same as an alarm-triggered wake.
-        val serviceIntent = Intent(this, WakeService::class.java)
-            .putExtra(WakeService.EXTRA_TRIGGER, "fcm")
-        ContextCompat.startForegroundService(this, serviceIntent)
+        // The app posts its own notification, built from `data`, not from a `notification`
+        // block (which the Worker never sends) — required both to avoid the 7-day
+        // silent-high-priority demotion and to give the user visible confirmation.
+        NotificationHelper.post(this, title, body)
+
+        if (command != null) {
+            dispatchCommand(store, command, message.data)
+        } else {
+            // No recognized command — still run the standard wake-check battery so an
+            // unstructured/legacy push still proves the wake path end to end.
+            val serviceIntent = Intent(this, WakeService::class.java)
+                .putExtra(WakeService.EXTRA_TRIGGER, "fcm")
+            ContextCompat.startForegroundService(this, serviceIntent)
+        }
+    }
+
+    private fun dispatchCommand(store: EventStore, command: String, data: Map<String, String>) {
+        val counter = data["counter"]
+        val hmac = data["hmac"]
+        // "refresh" (POST /refresh) and "run_session" (the redundant cron) are not per-message
+        // HMAC'd by the Worker — they're already gated by WEB_READ_TOKEN / are the Worker's own
+        // scheduled trigger (DESIGN §9.1/§9.4). Everything else must carry a valid, non-replayed
+        // HMAC or it is rejected and audited, never silently ignored.
+        if (command == "refresh" || command == "run_session") {
+            store.log("COMMAND_RECEIVED", "command=$command channel=fcm verdict=accepted (unauthenticated-by-design)")
+            CommandHandler.handle(this, command, data)
+            return
+        }
+
+        val verdict = CommandVerifier.verify(this, command, counter, hmac)
+        when (verdict) {
+            is CommandVerifier.Verdict.Accepted -> {
+                store.log(
+                    "COMMAND_RECEIVED",
+                    "command=$command channel=fcm counter=${verdict.counter} verdict=accepted"
+                )
+                CommandHandler.handle(this, command, data)
+            }
+            is CommandVerifier.Verdict.Rejected -> {
+                store.log(
+                    "COMMAND_REJECTED",
+                    "command=$command channel=fcm counter=$counter verdict=rejected reason=${verdict.reason}"
+                )
+                NotificationHelper.postFailure(
+                    this,
+                    "Command rejected",
+                    "command=$command reason=${verdict.reason}"
+                )
+            }
+        }
     }
 
     override fun onNewToken(token: String) {
@@ -59,9 +140,9 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
         store.log("FCM_NEW_TOKEN", token)
         TokenHolder.set(token)
 
-        // Task requirement 2: POST the token to the Worker's /device-token endpoint so real
-        // pushes can be sent. PHONE_PUSH_SECRET comes from BuildConfig, injected from
-        // local.properties (gitignored) at build time — never hardcoded here.
+        // POST the token to the Worker's /device-token endpoint so real pushes can be sent.
+        // PHONE_PUSH_SECRET comes from BuildConfig, injected from local.properties (gitignored)
+        // at build time — never hardcoded here.
         scope.launch {
             postTokenToWorker(token, store)
         }
@@ -110,4 +191,10 @@ object TokenHolder {
     fun set(token: String) {
         lastToken = token
     }
+}
+
+/** Task requirement 9: make FCM priority demotion loudly visible in the UI, not just a log line. */
+object FcmPriorityHolder {
+    @Volatile
+    var lastPriority: String? = null
 }

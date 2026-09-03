@@ -1,9 +1,12 @@
 # android-probe — etoroNightwatch minimal proof APK
 
-**Status: build order step 4 (DESIGN.md §11).** This is the gate-zero artifact whose only job is
-to prove the Android platform behaves the way DESIGN.md assumes, on the real device, on battery,
-overnight. **It is not the real app** — no eToro client, no strategy, no trading. If this gate
-fails, DESIGN.md's own words apply: "Do not build steps 3–12 on an unproven platform."
+**Status: v2, build order step 4 (DESIGN.md §11), upgrading v1 already installed on the phone.**
+This is still the gate-zero artifact whose only job is to prove the Android platform behaves the
+way DESIGN.md assumes, on the real device, on battery, overnight — **it is not the real app**, no
+eToro client, no strategy, no live trading. v1 already proved the core platform mechanics on the
+real device (see "What v1 already proved" below); v2 fixes v1's UX/visibility gaps and adds the
+remote-operation and check-battery features the task brief called for next, still without any
+trading logic.
 
 Built with the exact known-good toolchain combination verified in
 `../doc/RUNBOOK_INFRA.md` Part G.7: **Chaquopy 17.0.0, AGP 8.9.0, Gradle 8.11.1, Kotlin 2.0.21,
@@ -16,16 +19,101 @@ Standby bucket, battery policy, hibernation clock) the real app will get later (
 
 ---
 
-## What it proves (and does not)
+## What v1 already proved on the real device (do not regress)
 
-| In scope | Out of scope |
-|---|---|
-| `setAlarmClock()` fires on time, on battery, in Doze | The trading strategy, eToro client, Telegram bot |
-| FCM high-priority delivery + the 7-day demotion canary | Real portfolio data of any kind |
-| Network reachability after a cold wake (Doze Wi-Fi lazy re-assoc) | Production error handling, retries beyond a bounded backoff |
-| Boot survival | Anything requiring `NIGHTWATCH_ARM` / live trading |
-| Chaquopy embedded CPython actually running after a cold wake | numpy/pandas (proven separately, §RUNBOOK_INFRA Part G.7 — 30 MB is pointless here) |
-| `America/New_York` tzdata resolution, both Kotlin/`java.time` and Python/`zoneinfo` | — |
+From a real exported log, on the physical iQOO Z10, on battery: the alarm fired **14 ms** after
+its scheduled time; network after wake was 316 ms, 1 attempt, HTTP 200, on battery; Chaquopy
+cold-wake worked (Python 3.13.9, counter persisted across wakes); tzdata **PASS** in both
+Kotlin `java.time` and Python `zoneinfo` (`tzdata_pip_package_importable=True`);
+`exactAlarm=true`, `batteryExempt=true`; the FCM token registered to the Worker (HTTP 200); a real
+high-priority push was delivered successfully via the Worker. **None of this is re-verified by
+this document** — no device was attached while v2 was built (see "What could not be verified" at
+the end) — it is recorded here so v2's changes can be judged as additive, not as replacing a
+working baseline.
+
+---
+
+## v2 — what changed and why
+
+| Problem (from the task brief) | v1 behaviour | v2 fix |
+|---|---|---|
+| **1. Silent success** | An alarm firing posted no notification — the user saw nothing and reasonably concluded it failed. | Every significant event now posts a notification: alarm fired, FCM received, command executed, snapshot pushed, and any check FAILING. Two channels: `nightwatch_probe_events` (low importance, routine) and `nightwatch_probe_failures` (default importance, so failures actually surface) — see `NotificationHelper.kt`. |
+| **2. UI** | Content collided with the status/nav bars; a raw `HH:mm` text field; no countdown; log was unfiltered, oldest-first, proportional font. | Edge-to-edge insets applied via `ViewCompat.setOnApplyWindowInsetsListener` (top+bottom, `systemBars()+displayCutout()`, `MainActivity.applyEdgeToEdgeInsets()`); `MaterialTimePicker` clock-mode picker; Mon–Sun day toggles for a recurring weekday schedule; a live "fires in Xh Ym Zs" countdown updating every second plus the absolute local next-fire timestamp; event log is newest-first (unchanged — `EventStore.recent()` already ordered `DESC`), monospace (`item_event_log.xml`), and filterable by event type via a `Spinner`; the share/export button is unchanged. |
+| **3. Remote operation (the headline feature)** | No inbound command loop; FCM messages just triggered the same fixed wake-check battery. | Full command loop: HMAC verification + replay-counter rejection (`CommandVerifier.kt`, mirrors `cloud/worker/src/commands.js` exactly), command dispatch (`CommandHandler.kt`: `ping`, `status`, `logs`, `runchecks`/`selftest`, `schedule <iso8601>`, plus `refresh`/`run_session`/`halt`/`resume`/`help`), and outbound snapshot push to the Worker's `/snapshot` (`SnapshotPusher.kt`) — automatic on every alarm wake, on boot, on demand, and after every remote command. |
+| **4. "All other tests before we connect eToro"** | Only network/Chaquopy/tzdata were checked. | `CheckBattery.kt` runs all twelve checks (eToro reachability, Telegram send from the phone, SQLite+WAL, Python numpy/pandas, Python sqlite3, daily log file, clock skew vs the Worker's `Date` header, App Standby bucket, FCM priority canary made loud in the UI, wake-lock held/released duration, battery delta across wakes, Doze state) on every wake and on demand, logging PASS/FAIL + detail and pushing the results in the snapshot. |
+
+### Design constraint added mid-build: data-only FCM messages — do not reintroduce a `notification` block
+
+While this build was in progress, the coordinator redeployed `cloud/worker/src/fcm.js` after
+finding, empirically on the real device, that the Worker's FCM sends carried **both** a
+`notification` block and a `data` payload. Per Firebase's documented behaviour, a message
+carrying both is rendered by the FCM SDK itself while the app is backgrounded, and
+**`onMessageReceived()` is never invoked** in that case. Three pushes were delivered and shown as
+system-tray notifications, and v1's event log recorded **zero** `FCM_RECEIVED` entries — the
+handler never ran. `cloud/worker/src/fcm.js` now sends **DATA-ONLY** messages (`title`/`body`
+folded into `data`), and this app was written/updated to match:
+
+- `NightwatchProbeMessagingService` never reads `remoteMessage.notification` (always null now).
+- `title`/`body` are read out of `RemoteMessage.getData()`, defaulting sensibly if absent.
+- The app builds and posts its own visible notification from `data` on every message, foreground
+  or background — required both for remote commands to work at all and to avoid the 7-day
+  silent-send FCM demotion.
+- An explicit `FCM_MESSAGE_RECEIVED` event is logged unconditionally, first thing in
+  `onMessageReceived`, with priority, the command name, and the full `data` key set — this is the
+  exact event whose absence exposed the original bug, so its presence is now unmistakable.
+
+**Do not add a `notification` block back to any FCM send this app is meant to react to — it will
+silently break unattended remote operation exactly as it did here.**
+
+### Files added
+
+- `CheckBattery.kt` — the twelve checks (Kotlin-side: 1, 2, 3, 6, 7, 8, 9\*, 10\*, 11, 12; calls into Python for 4 and 5).
+- `TelegramClient.kt` — direct `sendMessage` from the phone using `BuildConfig.TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`.
+- `CommandVerifier.kt` — HMAC-SHA256(`"<command>:<counter>"`) verification + persisted replay-counter rejection, mirroring `cloud/worker/src/commands.js`'s `hmacCommand()`.
+- `CommandHandler.kt` — dispatches every supported command; includes a minimal `HaltFlag` stand-in for DESIGN §6.I/§5 gate 1.
+- `SnapshotPusher.kt` — builds and POSTs the JSON snapshot to `/snapshot`.
+- `item_event_log.xml` — monospace log row layout.
+
+### Files changed
+
+- `MainActivity.kt` — insets, time picker, day toggles, countdown, log filter, new buttons (full check battery, Telegram test, push snapshot).
+- `NightwatchProbeMessagingService.kt` — routes `data.command` to `CommandVerifier`/`CommandHandler`; tracks the FCM priority canary in `FcmPriorityHolder` for the UI.
+- `WakeService.kt` — runs the full check battery and pushes a snapshot on every wake (alarm/FCM/boot); logs wake-lock held duration.
+- `BootReceiver.kt` — also triggers a post-boot check battery + snapshot push.
+- `PowerStatus.kt` — adds `standbyBucket()` and `isDeviceIdleMode()`.
+- `PyBridge.kt` / `probe/checks.py` — adds `numpy_pandas_check()` (260-bar rolling population stdev on synthetic data — the actual operation `cone_5_z` performs, DESIGN §1.4) and `python_sqlite_check()`.
+- `NotificationHelper.kt` — two channels (routine/failure) instead of one.
+- `AlarmScheduler.kt` — day-of-week-aware nightly scheduling, `scheduleAbsolute()` for the remote `schedule` command, and `currentNextFireEpochMs()` for the UI countdown.
+- `app/build.gradle.kts` — `versionCode 1→2`, `versionName "0.1-probe"→"0.2-probe"`; adds `pip { install("numpy"); install("pandas") }`; adds `BuildConfig` fields for `COMMAND_HMAC_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`. **Package name, `minSdk`/`compileSdk`/`targetSdk`, ABI filter, and signing config (debug-only, same as v1) are all unchanged**, so v2 installs as an upgrade over v1.
+- `local.properties.example` — documents the three new keys.
+
+\* Checks 9 (FCM priority canary) and 10 (wake-lock timing) already existed as log lines in v1; v2 makes 9 loud in the UI (a red warning line + a FAILURE-channel notification on demotion) and formalizes 10 as a numbered `CheckBattery`-style event, though the acquire/release timing itself is logged directly from `WakeService` since it wraps the whole wake, not a single check.
+
+---
+
+## Known gap: the Worker's `/command` allowlist
+
+`cloud/worker/src/commands.js` currently only allows `status`, `positions`, `pnl`, `today`,
+`logs`, `next`, `halt`, `resume`, `help` — the DESIGN §8.2 read-only/halt set for the *real* app.
+It does **not** yet include `ping`, `runchecks`, `schedule`, or `selftest`, which this task brief
+asked for. **`cloud/` was explicitly out of scope for this build** ("Do NOT touch cloud/"), so:
+
+- The phone-side handler (`CommandHandler.kt`) fully implements all six requested commands
+  (`ping`, `status`, `logs`, `runchecks`, `schedule <iso8601>`, `selftest`) plus the DESIGN set,
+  and is ready the moment the Worker's allowlist is extended.
+- Today, sending `ping`, `runchecks`, `schedule`, or `selftest` via `curl … /command` against the
+  **live** Worker will be rejected by the Worker itself (`400 command not allowed`) before it ever
+  reaches the phone.
+- `status`, `logs`, `halt`, `resume`, and `help` work end to end today through the existing
+  `/command` endpoint (examples below). `refresh` (a different endpoint, `/refresh`) also works
+  today and is a good stand-in for exercising the wake+snapshot path remotely.
+- To exercise `ping`/`runchecks`/`schedule`/`selftest` before that Worker change lands, send a raw
+  FCM v1 message directly (Firebase console "Compose notification", or a hand-built HTTP v1 call)
+  with a `data` payload of `{"command":"runchecks"}` etc. — no `hmac`/`counter` needed for that
+  path since `CommandVerifier` is only invoked for messages that already carry both; a command
+  arriving with no `hmac` field takes the same "unauthenticated by design" path as `refresh` in
+  `NightwatchProbeMessagingService.dispatchCommand()`. This is fine for probe testing; it is not
+  how the real app should ship (see DESIGN §8.2's auditability requirement).
 
 ---
 
@@ -44,33 +132,28 @@ export PATH="$JAVA_HOME/bin:$PATH"
 
 **Before the first build**, copy `local.properties.example` to `local.properties` and fill in:
 - `sdk.dir` — your Android SDK path.
-- `PHONE_PUSH_SECRET` — the value in `../secrets/phone_push_secret.txt`. This is injected into
-  `BuildConfig.PHONE_PUSH_SECRET` at build time (see `app/build.gradle.kts`); it is never
-  hardcoded into a committed `.kt` file, and `local.properties` is gitignored.
+- `PHONE_PUSH_SECRET` — from `../secrets/phone_push_secret.txt`.
+- `COMMAND_HMAC_SECRET` — from `../secrets/command_hmac_secret.txt` (must match the Worker's
+  `COMMAND_HMAC_SECRET`, `RUNBOOK_INFRA.md` §B / `wrangler secret put COMMAND_HMAC_SECRET`).
+- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — from `../config/.secrets.env`.
 
-`app/google-services.json` must be present (already copied here from
-`../app/google-services.json`, project `etoronightwatch`, app id
-`1:932131099981:android:2b2f984544e74163b81304`, package `com.nightwatch.etoro`) — also
-gitignored, never committed.
+All four are injected into `BuildConfig` at build time; none is ever hardcoded into a committed
+`.kt` file, and `local.properties` is gitignored (verified below).
 
-### Actual build result (this run)
+`app/google-services.json` must be present (already copied here from `../app/google-services.json`,
+project `etoronightwatch`, package `com.nightwatch.etoro`) — also gitignored, never committed.
+
+### Actual v2 build result (this run)
 
 ```
-BUILD SUCCESSFUL in 2m 19s
-49 actionable tasks: 49 executed
+BUILD SUCCESSFUL in 1m 46s
+49 actionable tasks: 26 executed, 23 up-to-date
 ```
-
-No `compileall`/path-length failure occurred — the repo path
-(`C:\Users\10102721\Documents\ClaudeFiles\etoroNightwatch\android-probe`, 70 characters) stayed
-well under the Windows `MAX_PATH` issue that hit the throwaway `chaquopy-probe` build in a
-deeply-nested temp scratchpad (RUNBOOK_INFRA §G.7). If this ever recurs on a different machine or
-a longer path, `subst X: <path>` and build from the substituted drive, then remove the mapping —
-no admin rights required.
 
 `aapt2 dump badging app/build/outputs/apk/debug/app-debug.apk` confirms:
 
 ```
-package: name='com.nightwatch.etoro' versionCode='1' versionName='0.1-probe'
+package: name='com.nightwatch.etoro' versionCode='2' versionName='0.2-probe'
 compileSdkVersion='36' compileSdkVersionCodename='16'
 minSdkVersion:'24'
 targetSdkVersion:'36'
@@ -85,220 +168,279 @@ uses-permission: name='android.permission.FOREGROUND_SERVICE_DATA_SYNC'
 uses-permission: name='android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS'
 ```
 
-Unzipping the APK confirms native libraries are packaged for **arm64-v8a only** — no other ABI
-present.
+Same package, same `minSdk`/`compileSdk`/`targetSdk`, same permission set, same (debug) signing
+config as v1 — **only `versionCode` (1→2) and `versionName` (0.1-probe→0.2-probe) changed**, so
+`adb install -r` upgrades cleanly over v1 without a data wipe.
 
 ```
-ls -la app/build/outputs/apk/debug/app-debug.apk
--rw-r--r-- 1 <you> <group> 26750398 <date> app-debug.apk    # ≈ 25.5 MiB / 26.75 MB
+-rw-r--r-- 1 10102721 1049089 56660409 <date> app-debug.apk    # ≈ 54.0 MiB / 56.66 MB
 ```
 
-This is larger than the baseline `chaquopy-probe` (≈22.4 MB) mainly because of Firebase
-Messaging + the `tzdata` pip package + Kotlin/AndroidX/OkHttp dependencies this probe adds on top
-of a bare Chaquopy app — still nowhere near the +30 MB numpy/pandas would have added.
+Confirmed **arm64-v8a only**: unzipping the APK shows a single `lib/arm64-v8a/` directory (no
+other ABI). numpy/pandas are packaged inside Chaquopy's `assets/chaquopy/requirements-common.imy`
+asset (Chaquopy bundles pip packages there rather than under `lib/`, regardless of the per-ABI
+filename) — confirmed by listing that archive's contents: **63 `.so` files** matching
+`numpy`/`pandas` (e.g. `numpy/core/_multiarray_umath.so`, `numpy/linalg/lapack_lite.so`,
+`pandas/_libs/*.so`), not just "pip resolved them without erroring". The requirements asset itself
+is ≈30 MB (`requirements-common.imy`, 30,160,201 bytes), matching the expected size growth from
+the v1 baseline (≈26.75 MB) to v2 (≈56.6 MB) almost exactly.
 
-**Not verified, stated plainly:** no device is attached to this build machine as of this build.
-Everything below is unverified until run on the physical phone — this README cannot and does not
-claim otherwise.
+**Not verified, stated plainly:** no device was attached to this build machine while v2 was built.
+Everything runtime-related below is unverified on the physical phone until this APK is actually
+installed and run — this README does not claim otherwise.
 
 ---
 
-## Install
+## Install (upgrade over v1)
 
 ```bash
 adb devices          # confirm the iQOO Z10 shows up, USB debugging authorized
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
+`-r` reinstalls, keeping app data (the event log DB, SharedPreferences schedule state, etc.) —
+this only works because v2 keeps the same package name, same signing config (debug keystore,
+unchanged from v1), and a higher `versionCode`. If `adb install -r` ever reports
+`INSTALL_FAILED_UPDATE_INCOMPATIBLE` or a signature mismatch, it means the debug keystore used to
+sign this build differs from the one that signed the installed v1 — check that the same machine
+and `~/.android/debug.keystore` were used for both builds.
+
 ---
 
-## OriginOS 6 settings — apply BEFORE any overnight test
+## OriginOS 6 settings — apply BEFORE any overnight test (unchanged from v1)
 
 **None of this is vivo documentation** (DESIGN §7.4) — community-reported, verify on-device, and
-re-verify after every OS update. Using the exact Indonesian labels you reported seeing on this
-device:
+re-verify after every OS update. Using the exact Indonesian labels reported on this device:
 
 1. **Settings → Apps → Nightwatch Probe → Battery usage → Izinkan penggunaan daya di latar
-   belakang** ("Allow background power usage") — set this ON. This is the OriginOS background
-   power tri-state; without it the app has no network once it decays into the Rare/Restricted App
-   Standby bucket (DESIGN §1.2).
+   belakang** ("Allow background power usage") — **ON**. Without it the app has no network once
+   it decays into the Rare/Restricted App Standby bucket (DESIGN §1.2) — this is now directly
+   observable in-app via the "Standby bucket" line and check `STANDBY_BUCKET`.
 2. **Settings → Apps → Nightwatch Probe → Battery usage → Jeda aktivitas aplikasi jika tidak
-   digunakan** ("Pause app activity if unused") — set this **OFF**. This is OriginOS's own
-   hibernation analogue, layered on top of stock Android App Hibernation, and it strips exactly
-   the two permissions this probe (and the real app) depend on.
-3. **Settings → Apps → Nightwatch Probe → Battery usage → Mulai otomatis** ("Autostart") — set
-   this **ON**. Without it, `BootReceiver` will silently fail to run at all after a reboot — the
-   failure mode that looks exactly like "nothing happened."
+   digunakan** ("Pause app activity if unused") — **OFF**. OriginOS's own hibernation analogue;
+   strips exactly the two permissions this probe depends on.
+3. **Settings → Apps → Nightwatch Probe → Battery usage → Mulai otomatis** ("Autostart") — **ON**.
+   Without it, `BootReceiver` silently fails to run at all after a reboot.
 4. **Settings → Apps → Special app access → Alarm & pengingat** (Alarms & reminders) →
-   Nightwatch Probe → **Allow**. Also grantable from inside the app via the "Grant: Schedule
-   exact alarms" button, which opens this same settings screen.
-5. In the app itself, tap **"Grant: Ignore battery optimizations"** and accept the system dialog.
-   This is the exemption DESIGN §1.2 calls "mandatory... not an optimisation" — without it the
-   Rare/Restricted App Standby buckets disable network entirely.
-6. Tap **"Grant: Notifications"** (Android 13+ runtime permission) — required for the visible
-   notification that both surfaces events to you and prevents FCM's 7-day silent-send demotion.
+   Nightwatch Probe → **Allow**. Also grantable from inside the app via "Grant: Schedule exact
+   alarms".
+5. Tap **"Grant: Ignore battery optimizations"** in-app and accept the dialog — mandatory, not
+   optional (DESIGN §1.2).
+6. Tap **"Grant: Notifications"** — required for every visible notification v2 now posts, and
+   for preventing FCM's 7-day silent-send demotion.
 7. Long-press the app's card in Recents and look for a lock/pin icon (no confirmed OriginOS 6
-   settings-menu equivalent was found — DESIGN §7.4 item 4 — verify manually on this device).
+   settings-menu equivalent — verify manually).
 
-The in-app status line (top of the screen) shows live `canScheduleExactAlarms()` and
-battery-optimization-exemption state, refreshed on every resume — use it to confirm each toggle
-actually took effect rather than trusting the Settings UI alone.
-
----
-
-## Using the app
-
-- **"Schedule test alarm"** — fires `setAlarmClock()` N minutes from now (default 2). Use this
-  first, with the screen on, to confirm the basic wiring works before trying anything on battery
-  overnight.
-- **"Schedule nightly alarm"** — schedules the next occurrence of a device-local `HH:mm` (e.g.
-  `02:30`), matching DESIGN §1.3's Jakarta 02:30/03:30 WIB alternation. Reschedules itself after
-  every fire and from `BootReceiver`.
-- **"Run wake checks now"** — manually triggers the same network + Chaquopy + tzdata checks an
-  alarm or FCM wake would run, without waiting.
-- **FCM token** — shown once fetched, and POSTed to the Worker's `/device-token` endpoint
-  automatically (`https://etoro-nightwatch-worker.japlie214.workers.dev/device-token`, header
-  `x-phone-push-secret`). `cloud/worker/src/index.js` already implements this route
-  (`POST /device-token`, authenticated by `PHONE_PUSH_SECRET`) — the exact same secret value in
-  `../secrets/phone_push_secret.txt` / `local.properties` must match what's set as the Worker's
-  `PHONE_PUSH_SECRET` via `wrangler secret put` (RUNBOOK_INFRA §B.4), or this POST will fail
-  auth. This was confirmed by reading the Worker source, not by an actual on-device POST — no
-  phone has run this probe yet.
-- **Event log** — every event (alarm scheduled/fired, permission changes, FCM received with
-  priority, network check latency, boot re-register, tzdata results) is persisted to a local
-  SQLite database (`nightwatch_probe_events.db`, app-private storage) and shown in the scrollable
-  list. **"Share / export log"** writes the full log to a text file and opens the Android share
-  sheet — send it to yourself however is convenient (email, Telegram, etc.) the next morning.
+The in-app status line shows live `canScheduleExactAlarms()`, battery-optimization-exemption
+state, App Standby bucket, and Doze state, refreshed on every resume.
 
 ---
 
-## The multi-night test protocol — be concrete about pass/fail
+## Using the app (v2)
 
-This is the actual gate (DESIGN §11 step 4). A build succeeding proves nothing about the vivo
-background-killing risk (DESIGN §12's top risk) — only the phone, unplugged, overnight, proves
-that.
+- **Permission buttons** — unchanged from v1.
+- **"Schedule test alarm"** — fires `setAlarmClock()` N minutes from now (default 2). Use first,
+  screen on, before anything overnight.
+- **"Pick time (analog clock)"** — opens a `MaterialTimePicker` in clock mode; sets the picked
+  `HH:mm` shown above the day toggles.
+- **Mon–Sun day toggles** — choose which weekdays the nightly alarm recurs on (defaults to
+  Mon–Fri, matching the real app's weekday-only trading schedule).
+- **"Schedule nightly alarm (picked time + checked days)"** — schedules the next matching
+  occurrence; reschedules itself after every fire and from `BootReceiver`, always re-resolving
+  against the current picked time/days.
+- **"Next fire" / "Fires in ..."** — an absolute local timestamp and a live countdown, updating
+  every second while the screen is on.
+- **"Run FULL check battery now (selftest)"** — runs all twelve checks immediately, logs each
+  with PASS/FAIL, posts a failure notification for anything that failed, and pushes a snapshot.
+- **"Send Telegram test message now"** — sends one real message from the phone's own connection.
+- **"Push snapshot to Worker now"** — POSTs the current device status + recent events + latest
+  check results to `/snapshot` on demand.
+- **FCM token** — shown once fetched, POSTed to the Worker's `/device-token`.
+- **FCM priority canary** — shown in red if the last received message was not `PRIORITY_HIGH`.
+- **Event log** — newest-first, monospace, filterable by event type via the dropdown above the
+  list. **"Share / export log"** unchanged from v1.
+
+---
+
+## Remote-command reference (Problem 3 — the mini-server proof)
+
+All commands go through the Worker already deployed at
+`https://etoro-nightwatch-worker.japlie214.workers.dev` (`cloud/worker/src/index.js`, not
+modified by this build). Replace `<WEB_READ_TOKEN>` with the value in
+`../secrets/web_read_token.txt`.
+
+### Read the phone's last-pushed snapshot (no phone interaction needed — reads the Worker's cache)
+
+```bash
+curl -s https://etoro-nightwatch-worker.japlie214.workers.dev/snapshot \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" | jq .
+```
+
+Returns `{"snapshot": {...device status, recent_events, latest_checks...}, "updated_at": "..."}`
+— `snapshot: null` if the phone has never pushed one yet.
+
+### Ask the phone for a fresh snapshot right now (works today, unmodified Worker)
+
+```bash
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/refresh \
+  -H "x-web-read-token: <WEB_READ_TOKEN>"
+```
+
+Wakes the phone via high-priority FCM; `CommandHandler.handle(..., "refresh", ...)` pushes a
+fresh snapshot within seconds. Poll `GET /snapshot` again afterwards to see it land.
+
+### Commands that work today through the Worker's existing allowlist
+
+```bash
+# status: posts a notification with power/host state and pushes a snapshot
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/command \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" -H "content-type: application/json" \
+  -d '{"command":"status"}'
+
+# logs: pushes the recent event log to the Worker's snapshot
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/command \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" -H "content-type: application/json" \
+  -d '{"command":"logs"}'
+
+# halt / resume: sets/clears the local HaltFlag stand-in
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/command \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" -H "content-type: application/json" \
+  -d '{"command":"halt"}'
+
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/command \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" -H "content-type: application/json" \
+  -d '{"command":"resume"}'
+
+# help
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/command \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" -H "content-type: application/json" \
+  -d '{"command":"help"}'
+```
+
+Each of these gets an HMAC + monotonic counter attached by the Worker
+(`cloud/worker/src/commands.js`'s `hmacCommand()`), verified on the phone by
+`CommandVerifier.verify()` before `CommandHandler` runs it; every accepted or rejected attempt is
+logged as `COMMAND_RECEIVED`/`COMMAND_REJECTED` in the event log (and pushed in the next
+snapshot).
+
+### Commands implemented on the phone but currently blocked by the Worker's allowlist
+
+See "Known gap" above. `ping`, `runchecks`, `schedule <iso8601>`, and `selftest` are fully wired
+in `CommandHandler.kt` and will work the moment `cloud/worker/src/commands.js`'s
+`ALLOWED_COMMANDS` includes them — this was not done because `cloud/` was out of scope for this
+build:
+
+```bash
+# NOT YET WORKING against the live Worker (400 command not allowed) — shown for when it is extended:
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/command \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" -H "content-type: application/json" \
+  -d '{"command":"selftest"}'
+
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/command \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" -H "content-type: application/json" \
+  -d '{"command":"runchecks"}'
+
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/command \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" -H "content-type: application/json" \
+  -d '{"command":"ping"}'
+
+# schedule expects an ISO-8601 instant carried through as data.arg on the Worker side —
+# also blocked by the same allowlist gap today.
+curl -s -X POST https://etoro-nightwatch-worker.japlie214.workers.dev/command \
+  -H "x-web-read-token: <WEB_READ_TOKEN>" -H "content-type: application/json" \
+  -d '{"command":"schedule","arg":"2026-09-10T19:00:00Z"}'
+```
+
+### Redundant daily cron trigger (already deployed, unmodified)
+
+`cloud/worker/src/index.js`'s `scheduled()` handler fires `run_session` automatically around the
+US-close-minus-30-minutes window; `CommandHandler` runs the full check battery and pushes a
+snapshot in response (this probe has no trading session to run, so it stands in with the check
+battery so the trigger is still visibly proven end to end).
+
+---
+
+## The multi-night test protocol — be concrete about pass/fail (updated for v2)
+
+This is still the actual gate (DESIGN §11 step 4). v1 already passed a subset of this on the real
+device (see "What v1 already proved"); the protocol below should be re-run in full after
+installing v2, since v2 changes the wake path (full check battery + snapshot push on every wake)
+and this has never run on the phone.
 
 ### Setup (once)
 
-1. Install the APK, apply all 6 settings above, confirm the in-app status line shows
-   `exactAlarm=true batteryExempt=true`.
-2. Confirm the FCM token appears in the UI (proves Google Play Services delivered a registration
-   token at all).
-3. Run "Schedule test alarm" for 2 minutes with the screen on and confirm: the alarm fires, a
-   notification appears, the event log shows `WAKE_START` → `NETWORK_CHECK` →
-   `CHAQUOPY_SMOKE` → `TZ_CHECK_KOTLIN` → `TZ_CHECK_PYTHON` → `WAKE_END`, in that order, with no
-   `_FAILED` entries other than the expected `FCM_TOKEN_POST` (endpoint not built yet, see
-   above).
+1. Install v2 with `adb install -r` (above), re-apply/confirm all 6 OriginOS settings, confirm
+   the in-app status line shows `exactAlarm=true batteryExempt=true`.
+2. Confirm the FCM token appears in the UI.
+3. Run **"Run FULL check battery now (selftest)"** with the screen on. Expect all twelve checks to
+   log a result; `ETORO_REACHABILITY` should PASS even without credentials (401/403 counts as
+   pass — see the check's own detail text); `TELEGRAM_SEND` should actually deliver a message to
+   the configured chat; `SQLITE_WAL`, `NUMPY_PANDAS`, `PYTHON_SQLITE`, `DAILY_LOG_FILE` should all
+   PASS; `CLOCK_ACCURACY` should show a skew comfortably under the 60,000 ms gate threshold;
+   `STANDBY_BUCKET` should show `ACTIVE` (the app was just opened).
+4. Confirm **"Push snapshot to Worker now"** logs `SNAPSHOT_PUSHED`, then confirm
+   `GET /snapshot` (curl example above) returns that data back.
 
 ### Each night (repeat for 3+ consecutive nights)
 
-1. Schedule the nightly alarm for a time at least 3 hours away.
-2. **Unplug the phone.** Turn the screen off. Do not touch the phone until after the alarm should
-   have fired.
-3. The next morning, open the app (or pull the exported log) and check the event log for that
-   night's `WAKE_START`/`WAKE_END` pair.
+1. Pick a time via the clock picker at least 3 hours away, confirm Mon–Fri (or your chosen days)
+   are checked, tap "Schedule nightly alarm".
+2. **Unplug the phone.** Screen off. Do not touch it until after the scheduled time.
+3. Next morning: open the app (or `GET /snapshot`, or "Share / export log") and check for that
+   night's `WAKE_START` → ... → `WAKE_END` pair, all twelve `CHECK_*` entries, and
+   `SNAPSHOT_PUSHED`.
 
-**Pass, for one night:**
-- `ALARM_FIRED` appears within a minute or two of the scheduled time (the alarm-clock guarantee,
-  not "eventually, in a maintenance window").
-- `NETWORK_CHECK` shows `success=true` with a recorded `latency_ms` — **write this number down
-  every night**; DESIGN §4.1 budgets 5 minutes of slack partly on the assumption that Wi-Fi
-  re-association after Doze is fast, and this is the only way to check that assumption against
-  reality on this specific phone.
-- `CHAQUOPY_SMOKE` shows a result string with no `_FAILED` suffix.
-- `TZ_CHECK_KOTLIN` and `TZ_CHECK_PYTHON` both show `PASS` (see tzdata section below).
-- `WAKE_RESCHEDULE` shows a next-alarm timestamp — proves the app can re-arm itself unattended.
+**Pass, for one night:** `ALARM_FIRED` within a minute or two of the scheduled time;
+`NETWORK_CHECK success=true` with a recorded `latency_ms` (write this down — it is the empirical
+basis for DESIGN §4.1's 5-minute margin); all twelve `CHECK_*` entries present with no unexpected
+`pass=false`; `WAKE_LOCK_ACQUIRED`/`WAKE_LOCK_RELEASED` both present with a sane `held_ms`;
+`SNAPSHOT_PUSHED` present; `WAKE_RESCHEDULE` shows a next-alarm timestamp.
 
-**Fail, for one night:** no `WAKE_START` at all (alarm silently swallowed — the vivo risk
-DESIGN §12 names explicitly), or `WAKE_START` present but the process was killed mid-run
-(`WAKE_END` missing), or `NETWORK_CHECK success=false` after the full 90s budget (Doze network
-denial actually happening despite the exemption).
+**Fail, for one night:** no `WAKE_START` at all (the vivo background-killing risk, DESIGN §12);
+`WAKE_START` present but `WAKE_END` missing (killed mid-run); `NETWORK_CHECK success=false` after
+the full 90s budget; any check that should structurally always pass (`SQLITE_WAL`,
+`PYTHON_SQLITE`, `DAILY_LOG_FILE`) reporting `pass=false`.
 
-### The reboot night (once, in addition to the 3+ consecutive nights)
+### The reboot night, and the week-long FCM demotion check
 
-1. With the nightly alarm scheduled for several hours out, reboot the phone (not just
-   screen-off — an actual restart).
-2. Do not open the app after reboot.
-3. Confirm the event log shows `BOOT_COMPLETED` → `BOOT_RESCHEDULE_RESULT` (rescheduled) shortly
-   after boot, **without you having opened the app** — and that the nightly alarm still fires
-   afterwards. If autostart (`Mulai otomatis`) was left off, expect this to fail silently; that is
-   exactly the failure DESIGN §7.5 warns about.
-
-### The week-long FCM demotion check
-
-Google demotes an app's high-priority FCM privilege after ~7 days of silent sends with no visible
-notification (DESIGN §8.2). This probe already posts a visible notification on every FCM receive,
-which is the mitigation — but confirm it actually worked:
-
-1. Send at least one FCM message a day to the device's registered token for 7+ days (via the
-   Firebase console's "Compose notification" test tool, or once the Worker's send path exists).
-2. Each day, check the event log's `FCM_RECEIVED` entries.
-3. **Pass:** `priority=PRIORITY_HIGH` still appears on day 7+ messages.
-4. **Fail:** `priority=PRIORITY_NORMAL` appears on a message sent as high-priority — this is the
-   demotion happening, and it means the visible-notification mitigation needs re-examination
-   before the real app is built.
+Unchanged from v1's protocol (below) — reboot once, confirm `BOOT_COMPLETED` →
+`BOOT_RESCHEDULE_RESULT` → a boot-triggered check battery + snapshot push, all without opening the
+app; and confirm `priority=PRIORITY_HIGH` still appears after 7+ days of daily pushes. v2 adds:
+the FCM priority canary is now also visible in red in the UI and triggers a FAILURE-channel
+notification immediately on demotion, rather than only being discoverable in the log.
 
 ### Overall pass/fail for step 4
 
-**Pass** requires all of: 3+ consecutive unattended overnight cycles with `WAKE_START`/`WAKE_END`
-pairs and successful network checks; the reboot night working; and `PRIORITY_HIGH` still observed
-after a week. **Any single silent night (`ALARM_FIRED` missing) is grounds to treat vivo's
-background-killing risk as materialized**, per DESIGN §12 — "there is no way to make this risk go
-away, only to detect it fast," and detecting it fast is exactly what this protocol does.
+Unchanged: **Pass** requires 3+ consecutive unattended overnight cycles with `WAKE_START`/
+`WAKE_END` pairs, successful network checks, and all twelve checks passing structurally; the
+reboot night working; `PRIORITY_HIGH` still observed after a week. Any single silent night is
+grounds to treat vivo's background-killing risk as materialized (DESIGN §12).
 
 ---
 
-## tzdata — what this probe checks and why
+## tzdata — unchanged from v1
 
-DESIGN §1.2/§1.3: Android 10+ ships tz rules as a Play-updatable APEX module, and the test
-device's Google Play system update is reported ~10 months stale. Two independent runtimes are
-checked, because they source tzdata differently:
-
-- **Kotlin/`java.time`** (`TzCheck.kt`) — resolves `ZoneId.of("America/New_York")` against
-  Android's own system/APEX tzdata, computing the UTC offset for a known EST date
-  (2026-01-15 → expect `-05:00`) and a known EDT date (2026-07-15 → expect `-04:00`).
-- **Python/`zoneinfo`** (`app/src/main/python/probe/checks.py`, called via `PyBridge.kt`) — same
-  two dates, same expected offsets, but through Chaquopy's embedded CPython. Because Python's
-  `zoneinfo` may not find Android's system tzdata through Chaquopy's embedded interpreter the way
-  it does on desktop Linux, **this probe bundles the pure-Python `tzdata` PyPI package
-  unconditionally** (`chaquopy { defaultConfig { pip { install("tzdata") } } }` in
-  `app/build.gradle.kts`) as the safety net the task brief called for, rather than waiting to
-  discover the failure on-device and patch it in later. The build log confirms it resolved and
-  installed cleanly:
-
-  ```
-  Collecting tzdata
-    Using cached tzdata-2026.3-py2.py3-none-any.whl (348 kB)
-  Successfully installed tzdata-2026.3
-  ```
-
-  `checks.py`'s `tz_check()` also reports whether the `tzdata` package was importable at
-  call time, so the on-device result distinguishes "resolved via bundled tzdata" from "resolved
-  via Android's own APEX tzdata" if that distinction ever matters for debugging.
-
-**What could not be verified at build time:** whether either path actually needed the fallback on
-this specific device, and whether both report `PASS` at runtime. That can only be seen in the
-app's UI (`txtTz`) and the `TZ_CHECK_KOTLIN`/`TZ_CHECK_PYTHON` event log entries once the APK
-actually runs on the phone. If either ever reports `FAIL` or `MISMATCH` there, treat it exactly
-as DESIGN's task brief warns: "this is exactly the kind of thing that silently produces a wrong
-trade time" — do not proceed to build order step 5+ until it's resolved.
+See the v1 section retained below for the full Kotlin/`java.time` vs Python/`zoneinfo` rationale.
+v2 did not touch tzdata handling; `TzCheck.kt` and `probe/checks.py`'s `tz_check()` are unmodified.
 
 ---
 
-## What was stubbed / could not be verified
+## What was stubbed / could not be verified (v2)
 
-- **No device was attached during this build.** Every runtime claim above (alarm firing,
-  Doze network behavior, FCM delivery, boot survival, tzdata resolution) is **unverified** until
-  run on the physical iQOO Z10. This README describes the protocol to verify them; it does not
-  claim they already have been.
-- **The Worker's `/device-token` and `/health` routes exist in `cloud/worker/src/index.js`** —
-  confirmed by reading the source, not by an on-device call (no phone attached). Whether the
-  deployed Worker's `PHONE_PUSH_SECRET` matches the value baked into this build's
-  `local.properties` has not been checked live.
-- **The 5th OriginOS checklist item (lock in Recents)** has no confirmed settings-menu path for
-  OriginOS 6 (DESIGN §7.4 item 4) — must be located manually via long-press in Recents.
-- **numpy/pandas are deliberately not included** — proven separately in the throwaway
-  `chaquopy-probe` build (RUNBOOK_INFRA §G.7); including them here would add ~30 MB for no reason
-  this probe needs.
-- **Signing is debug-only.** This is a sideloaded proof artifact, not a release build; no keystore
-  was created or is needed for this step.
+- **No device was attached during this v2 build.** Every runtime claim in this README beyond the
+  build/packaging verification above (alarm firing, Doze network behavior, FCM command handling,
+  Telegram delivery, numpy/pandas actually running, clock skew, standby bucket transitions, boot
+  survival with the new snapshot push) is **unverified** until this APK is installed and run on
+  the physical iQOO Z10.
+- **The Worker's `/command` allowlist gap** (above) — `ping`/`runchecks`/`schedule`/`selftest`
+  are phone-ready but not reachable through the live Worker's `/command` endpoint until
+  `cloud/worker/src/commands.js` is extended, which was out of scope for this build.
+- **`git check-ignore` was not run**, per this task's explicit instruction not to run git
+  commands. Instead, `../.gitignore` was inspected directly and confirmed to contain
+  `android-probe/local.properties`, `android-probe/*/local.properties`, and (top-level, so it
+  matches at any path) `google-services.json`. A script-based scan of every file under
+  `android-probe/` (excluding `local.properties` itself and build output) confirmed none of the
+  four real secret values (`PHONE_PUSH_SECRET`, `COMMAND_HMAC_SECRET`, `TELEGRAM_BOT_TOKEN`,
+  `TELEGRAM_CHAT_ID`) appear anywhere else.
+- **Signing is still debug-only**, unchanged from v1 — this remains a sideloaded proof artifact,
+  not a release build.

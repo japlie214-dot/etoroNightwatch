@@ -6,8 +6,11 @@ build documented in doc/RUNBOOK_INFRA.md Part G.7 — this probe only needs to p
 CPython runtime survives a cold wake and that America/New_York resolves correctly).
 """
 
+import os
 import sys
+import time
 import platform
+import sqlite3
 from datetime import datetime, timezone
 
 try:
@@ -92,3 +95,76 @@ def tz_check():
         )
     except Exception as e:
         return "FAIL: offset computation raised %r" % e
+
+
+def numpy_pandas_check():
+    """
+    v2 check 4: numpy/pandas were deliberately omitted from v1 (proven only at BUILD time in a
+    throwaway project, never at RUNTIME in an APK actually installed on the phone). The real
+    strategy's cone_5_z signal (DESIGN §1.4) needs a 260-bar rolling population standard
+    deviation — this computes exactly that operation on synthetic data and reports the result and
+    elapsed time, so it is a genuine runtime proof, not just "pip install didn't error".
+    """
+    try:
+        import numpy as np
+        import pandas as pd
+    except Exception as e:
+        return "FAIL: numpy/pandas import raised %r" % e
+
+    try:
+        t0 = time.monotonic()
+        rng = np.random.default_rng(seed=42)
+        # Synthetic daily-return-like series, same shape as the real cone_5_z input (DESIGN §1.4:
+        # 260 lookback + 5 shift = 265 minimum bars; use a generous 400 to mirror the real seed).
+        n = 400
+        series = pd.Series(rng.normal(loc=0.0004, scale=0.01, size=n))
+        rolling_std = series.rolling(window=260).std(ddof=0)  # population stdev, matches cone_5_z
+        last_value = rolling_std.iloc[-1]
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        if last_value is None or (hasattr(last_value, "__float__") and last_value != last_value):
+            return "FAIL: rolling std computation produced NaN/None on a full 400-bar series"
+        return (
+            "PASS: numpy=%s pandas=%s 260-bar rolling population stdev (last value)=%.8f "
+            "elapsed_ms=%.2f n_bars=%d"
+            % (np.__version__, pd.__version__, float(last_value), elapsed_ms, n)
+        )
+    except Exception as e:
+        return "FAIL: rolling std computation raised %r" % e
+
+
+def python_sqlite_check(cache_dir):
+    """
+    v2 check 5: the real app's DB layer is Python (DESIGN §2/§3, db/repo.py). Confirms Python's
+    stdlib sqlite3 works inside Chaquopy's embedded interpreter: create, write, read, WAL.
+    """
+    db_path = os.path.join(cache_dir, "probe_python_sqlite_check.db")
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(db_path + suffix)
+            except OSError:
+                pass
+
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, v TEXT)")
+            with conn:
+                conn.execute("INSERT INTO t (v) VALUES (?)", ("hello-from-python",))
+            row = conn.execute("SELECT v FROM t LIMIT 1").fetchone()
+            mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+            ok = row is not None and row[0] == "hello-from-python" and str(mode).lower() == "wal"
+            verdict = "PASS" if ok else "FAIL"
+            return "%s: sqlite3.version=%s journal_mode=%s read_back=%s" % (
+                verdict, sqlite3.sqlite_version, mode, row[0] if row else None
+            )
+        finally:
+            conn.close()
+    except Exception as e:
+        return "FAIL: %r" % e
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(db_path + suffix)
+            except OSError:
+                pass

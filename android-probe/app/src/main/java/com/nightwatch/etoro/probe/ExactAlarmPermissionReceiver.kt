@@ -16,11 +16,22 @@ class ExactAlarmPermissionReceiver : BroadcastReceiver() {
             "EXACT_ALARM_PERMISSION_STATE_CHANGED",
             "canScheduleExactAlarms()=$granted"
         )
-        NotificationHelper.post(
-            context,
-            "Nightwatch Probe: exact-alarm permission changed",
-            "canScheduleExactAlarms() is now $granted"
-        )
+        if (granted) {
+            NotificationHelper.post(
+                context,
+                "Nightwatch Probe: exact-alarm permission changed",
+                "canScheduleExactAlarms() is now $granted"
+            )
+        } else {
+            // DESIGN §5 gate 2 / §7.2: "your app stops, and all future exact alarms are
+            // canceled" — this must fail loudly, not just log quietly (task Problem 1).
+            NotificationHelper.postFailure(
+                context,
+                "Exact-alarm permission REVOKED",
+                "All future exact alarms are canceled until this is re-granted: " +
+                    "Settings -> Apps -> Special app access -> Alarms & reminders"
+            )
+        }
         if (granted) {
             // Mirrors DESIGN's "re-register alarms when the permission is granted back".
             AlarmScheduler.rescheduleFromSavedState(context)

@@ -7,3 +7,17 @@ sdk.dir=C\:\\Users\\10102721\\Android\\Sdk
 # Read from ../../secrets/phone_push_secret.txt — never hardcode this in a committed .kt/.java
 # file. build.gradle.kts injects it into BuildConfig.PHONE_PUSH_SECRET at build time.
 PHONE_PUSH_SECRET=paste-the-value-from-secrets/phone_push_secret.txt-here
+
+# v2: shared HMAC secret for verifying inbound remote commands (DESIGN §8.2).
+# Must match the Worker's COMMAND_HMAC_SECRET (RUNBOOK_INFRA §B / `wrangler secret put
+# COMMAND_HMAC_SECRET`), sourced from ../../secrets/command_hmac_secret.txt. Injected into
+# BuildConfig.COMMAND_HMAC_SECRET at build time — never hardcoded in a committed .kt file.
+COMMAND_HMAC_SECRET=paste-the-value-from-secrets/command_hmac_secret.txt-here
+
+# v2: Telegram bot token + chat id, so the probe can send a real test message FROM THE PHONE
+# (task requirement: "the real app alerts from the device, not the laptop"). Sourced from
+# ../../config/.secrets.env's TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID. Injected into
+# BuildConfig.TELEGRAM_BOT_TOKEN / BuildConfig.TELEGRAM_CHAT_ID at build time — never hardcoded
+# in a committed .kt file.
+TELEGRAM_BOT_TOKEN=paste-the-bot-token-from-config/.secrets.env-here
+TELEGRAM_CHAT_ID=paste-the-chat-id-from-config/.secrets.env-here

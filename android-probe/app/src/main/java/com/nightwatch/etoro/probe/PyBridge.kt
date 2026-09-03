@@ -39,4 +39,24 @@ object PyBridge {
         val module = py.getModule("probe.checks")
         return module.callAttr("tz_check").toString()
     }
+
+    /** v2 check 4: numpy/pandas — 260-bar rolling std on synthetic data, the actual operation the
+     * strategy performs (DESIGN §1.4 cone_5_z uses a 260-bar rolling stdev). */
+    @Synchronized
+    fun numpyPandasCheck(context: Context): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.checks")
+        return module.callAttr("numpy_pandas_check").toString()
+    }
+
+    /** v2 check 5: Python's own sqlite3 module works inside Chaquopy (the real app's DB layer is
+     * Python, DESIGN §2/§3). */
+    @Synchronized
+    fun pythonSqliteCheck(context: Context): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.checks")
+        return module.callAttr("python_sqlite_check", context.cacheDir.absolutePath).toString()
+    }
 }
