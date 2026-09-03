@@ -617,3 +617,168 @@ by accident is not a realistic concern.
       never appears anywhere sent to the browser (see `cloud/pages/README.md` for how this was
       verified locally with `curl` + `grep`; repeat the same check against the deployed URL once
       Access is configured and you can authenticate through it)
+
+---
+
+## Part G — Android build toolchain ⚙️ REPO (done on this machine, 2026-09-03)
+
+DESIGN §11 step 3: install the JDK, Android SDK command-line tools, and `adb` needed to build
+the Chaquopy-based APK. Nothing in `app/` exists yet — this is toolchain only, no project code.
+**Android Studio was deliberately not installed** — command-line tools only, per the user's
+choice — and nothing was installed with admin/elevated rights; everything below is a per-user
+install with **User**-scope environment variables.
+
+### G.1 What was installed, and where
+
+| Component | Version | Location |
+|---|---|---|
+| Eclipse Temurin JDK | **17.0.20.1+1** | `C:\Users\10102721\Android\jdk-17` |
+| Android SDK command-line tools | `commandlinetools-win-15859902` (current as of this install) | `C:\Users\10102721\Android\Sdk\cmdline-tools\latest` |
+| Android SDK Platform-Tools (`adb`) | 37.0.1 | `C:\Users\10102721\Android\Sdk\platform-tools` |
+| Android SDK Platform 36 (Android 16) | rev 2 | `C:\Users\10102721\Android\Sdk\platforms\android-36` |
+| Android SDK Platform 35 (Android 15) | rev 2 | `C:\Users\10102721\Android\Sdk\platforms\android-35` |
+| Android SDK Build-Tools | 36.0.0 | `C:\Users\10102721\Android\Sdk\build-tools\36.0.0` |
+
+Nothing was installed inside the git repo. `C:\Users\10102721\Android\` is a sibling of the
+repo, not inside it — confirmed clean with `git status --porcelain` returning nothing after
+every step in this part.
+
+**Download sources (official only):**
+
+- JDK: `https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_windows_hotspot_17.0.20.1_1.zip`
+  (190,817,615 bytes ≈ 182 MB). The Adoptium **MSI** installer (`winget install
+  EclipseAdoptium.Temurin.17.JDK`) was tried first and rejected — `winget` only offers that
+  package as a machine-scope WiX/MSI installer, and requesting `--scope user` on it fails with
+  "No applicable installer found." Fell back to Adoptium's official **zip** distribution instead
+  (same binaries, no installer, extract-and-set-env-vars — the correct shape for a non-admin
+  per-user install).
+- Android SDK command-line tools: `https://dl.google.com/android/repository/commandlinetools-win-15859902_latest.zip`
+  (155,655,386 bytes ≈ 148 MB), the current Windows command-line-tools-only package listed at
+  `https://developer.android.com/studio#command-line-tools-only` (Android Studio itself was not
+  touched).
+- SDK packages (`platform-tools`, `platforms;android-36`, `platforms;android-35`,
+  `build-tools;36.0.0`) were pulled by `sdkmanager` from Google's own SDK repository
+  (`dl.google.com`), licences accepted non-interactively by piping `y` through `cmd /c type
+  <file> | sdkmanager.bat --licenses` (PowerShell's own pipe-to-stdin on a `.bat` wrapper did not
+  work reliably — `cmd /c` did).
+
+### G.2 JDK / AGP / API-level reasoning — and the correction mid-install
+
+The device turned out to be **Android 16 / OriginOS 6** (Snapdragon 7 Gen 3, arm64-v8a), not the
+originally-briefed Android 15 / Funtouch OS — DESIGN.md §1.2 already carries the corrected
+research. Android 16 = **API level 36** (confirmed against
+`https://developer.android.com/tools/releases/platforms`).
+
+**Chaquopy compatibility, checked against
+`https://chaquo.com/chaquopy/doc/current/versions.html` and
+`https://chaquo.com/chaquopy/doc/current/changelog.html`:**
+
+- Current release **Chaquopy 17.0.0** (2025-12-01) supports **AGP 7.3–9.2**, Python 3.10–3.14,
+  and a **minimum** Android API level of 24 (that column is a floor on `minSdk`, not a ceiling on
+  `compileSdk`/`targetSdk`).
+- **No Chaquopy changelog entry explicitly confirms Android 16 / API 36 has been tested.** This
+  is stated plainly because it matters: nothing in Chaquopy's own documentation says API 36
+  works, only that nothing in AGP's compileSdk mechanism structurally blocks it. GitHub issues
+  #1448/#1456 (16 KB page-size alignment fixes for native wheels, closed/merged mid-2026) show
+  Chaquopy has been actively patching for exactly the kind of platform-version issue this
+  raises — evidence of active maintenance in the right direction, not proof of API 36 support.
+  **Treat compileSdk 36 against Chaquopy as unverified until a throwaway test build proves it**
+  (already flagged as a prerequisite in DESIGN §11 step 4, ahead of any real app code).
+- **JDK choice is unaffected by the Android-16 correction.** Android's own AGP release notes
+  (`https://developer.android.com/build/releases/gradle-plugin`,
+  `https://developer.android.com/build/jdks`) state AGP 8.x requires JDK 17, and the AGP 9.4
+  requirements table lists JDK 17 as both the minimum and default. Since Chaquopy 17.0's
+  supported AGP range (7.3–9.2) is entirely within "requires JDK 17," **Temurin 17 is correct
+  whether the project ends up on `compileSdk 35` or `compileSdk 36`.** Nothing needed to change
+  here when the device details were corrected.
+- Installed **both** `platforms;android-35` and `platforms;android-36`, and
+  `build-tools;36.0.0`, to match DESIGN.md's decision (§1.2): **`compileSdk 36`, `targetSdk
+  35`** — compile against the newest platform without committing to a `targetSdk` bump that
+  buys nothing (Android 16's behavior changes apply regardless of `targetSdk`, per DESIGN's own
+  research against Google's migration pages).
+
+### G.3 ABI — arm64-v8a only
+
+The device's chipset (Snapdragon 7 Gen 3) fixes the ABI as **arm64-v8a**, and it is the only ABI
+this specific phone can ever use. Chaquopy ships **per-ABI native wheels** (NumPy, SciPy, pandas,
+scikit-learn all have native code compiled per architecture). Because the target ABI is single
+and known in advance, the app's `build.gradle` should set `ndk.abiFilters = ["arm64-v8a"]`
+(already noted in DESIGN.md §1.2/§2/§7.1) so the APK bundles only one architecture's native
+libraries instead of all of them — a real APK-size reduction, at zero functional cost since no
+other ABI will ever run on this hardware.
+
+### G.4 Environment variables set (User scope — no admin required)
+
+| Variable | Value |
+|---|---|
+| `JAVA_HOME` | `C:\Users\10102721\Android\jdk-17` |
+| `ANDROID_HOME` | `C:\Users\10102721\Android\Sdk` |
+| `Path` (appended) | `C:\Users\10102721\Android\jdk-17\bin`, `C:\Users\10102721\Android\Sdk\platform-tools`, `C:\Users\10102721\Android\Sdk\cmdline-tools\latest\bin` |
+
+All three were set with `[Environment]::SetEnvironmentVariable(..., 'User')` — never `'Machine'`
+— since this account is not an administrator and a machine-level write would have required
+elevation this runbook was told not to attempt.
+
+### G.5 Verification 🖱️ YOU (one-time, and after any future re-open of a terminal)
+
+These env-var changes are stored in the registry (`HKCU\Environment`) immediately, but a
+**process that was already running before the change** keeps its old, inherited copy of the
+environment — that includes whatever terminal window you already have open. **Open a brand-new
+terminal window** (a new Windows Terminal / cmd / PowerShell tab launched fresh, not a reused
+one) and run:
+
+```
+java -version
+javac -version
+echo %JAVA_HOME%          (cmd)   or   $env:JAVA_HOME     (PowerShell)
+echo %ANDROID_HOME%        (cmd)   or   $env:ANDROID_HOME  (PowerShell)
+adb version
+sdkmanager --list_installed
+```
+
+Expected output (captured during this install, from a process whose environment was rebuilt
+purely from the registry — i.e. exactly what a fresh terminal inherits):
+
+```
+openjdk version "17.0.20.1" 2026-08-18
+OpenJDK Runtime Environment Temurin-17.0.20.1+1 (build 17.0.20.1+1)
+OpenJDK 64-Bit Server VM Temurin-17.0.20.1+1 (build 17.0.20.1+1, mixed mode, sharing)
+javac 17.0.20.1
+JAVA_HOME=C:\Users\10102721\Android\jdk-17
+ANDROID_HOME=C:\Users\10102721\Android\Sdk
+Android Debug Bridge version 1.0.41
+Version 37.0.1-15733141
+Installed as C:\Users\10102721\Android\Sdk\platform-tools\adb.exe
+
+Installed packages:
+  Path                 | Version | Description                | Location
+  -------              | ------- | -------                    | -------
+  build-tools;36.0.0   | 36.0.0  | Android SDK Build-Tools 36 | build-tools\36.0.0
+  platform-tools       | 37.0.1  | Android SDK Platform-Tools | platform-tools
+  platforms;android-35 | 2       | Android SDK Platform 35    | platforms\android-35
+  platforms;android-36 | 2       | Android SDK Platform 36    | platforms\android-36
+```
+
+If any of these come back "not recognized" in a genuinely new terminal, the most common cause on
+Windows is that the terminal app itself (e.g. an already-running Windows Terminal host process)
+needs a full restart, not just a new tab — new tabs in some terminal hosts still inherit the
+parent host process's original environment snapshot.
+
+### G.6 What is still missing before an APK can be built and installed on the phone
+
+- **No Android project exists yet.** This part only installs the toolchain (DESIGN §11 step 3).
+  The minimal APK itself (FCM receive + `setAlarmClock()`, DESIGN §11 step 4) is separate,
+  unstarted work.
+- **The throwaway Chaquopy `compileSdk`/`targetSdk 36` test build** (§G.2 above, DESIGN §11 step
+  4) has not been run — it needs an actual Gradle project, not just the SDK/JDK.
+- **USB debugging is not yet enabled on the phone.** 🖱️ **YOU**: on the iQOO Z10 (OriginOS 6),
+  go to **Settings → About phone → tap "Build number" 7 times** to unlock Developer Options,
+  then **Settings → More settings (or System) → Developer options → enable "USB debugging."**
+  Connect the phone by USB and confirm with `adb devices` (once a new terminal has picked up
+  the PATH changes above) that the device appears and that you accepted the
+  "Allow USB debugging?" prompt on the phone itself (check "Always allow from this computer" to
+  avoid re-confirming every session).
+- The five OriginOS 6 settings from DESIGN §7.4 (autostart, battery usage unrestricted,
+  disable "Pause app activity if unused", the battery-optimization exemption, lock in Recents)
+  are phone-side settings, not toolchain — still to be applied once the minimal APK exists to
+  install.
