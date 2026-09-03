@@ -120,8 +120,9 @@ function stringifyData(data) {
 }
 
 /**
- * Sends a high-priority (by default) FCM push carrying both a visible
- * notification and a data payload.
+ * Sends a high-priority (by default) DATA-ONLY FCM push. `title` and `body`
+ * are folded into the data payload; the receiving app is responsible for
+ * posting the visible notification. See the note in the body for why.
  *
  * @param {object} env
  * @param {object} opts
@@ -149,8 +150,20 @@ export async function sendPush(env, { token, title, body, data, priority = "high
       android: {
         priority: priority === "high" ? "high" : "normal",
       },
-      notification: { title, body },
-      data: stringifyData(data),
+      // DATA-ONLY, deliberately. If a `notification` block is present and the
+      // app is backgrounded, the FCM SDK renders it in the system tray itself
+      // and onMessageReceived() is NEVER called - the data payload only reaches
+      // the app if the user taps the notification. That is fatal here: the whole
+      // point of a push is that the phone does work UNATTENDED at 03:30 local.
+      // Verified empirically 2026-09-03: three notification+data pushes were
+      // displayed on the device while the app's handler never ran and logged
+      // nothing.
+      // With no `notification` key, onMessageReceived() always runs (foreground
+      // and background) and the APP posts its own notification - which also
+      // satisfies the anti-demotion requirement above, since the user still
+      // sees visible UI for every high-priority push.
+      // https://firebase.google.com/docs/cloud-messaging/android/receive
+      data: stringifyData({ ...(data || {}), title, body }),
     },
   };
 

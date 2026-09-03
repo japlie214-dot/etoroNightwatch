@@ -68,7 +68,7 @@ describe("getAccessToken", () => {
 describe("sendPush", () => {
   beforeEach(() => _resetTokenCacheForTests());
 
-  it("sends a high-priority push with a visible notification block", async () => {
+  it("sends a high-priority DATA-ONLY push so onMessageReceived always runs", async () => {
     const env = {
       FIREBASE_SERVICE_ACCOUNT_JSON: await makeServiceAccountJson(),
       FIREBASE_PROJECT_ID: "test-project",
@@ -97,8 +97,14 @@ describe("sendPush", () => {
     expect(sendCall.init.headers.authorization).toBe("Bearer tok-1");
     const payload = JSON.parse(sendCall.init.body);
     expect(payload.message.android.priority).toBe("high");
-    expect(payload.message.notification).toEqual({ title: "t", body: "b" });
-    expect(payload.message.data).toEqual({ command: "refresh" });
+    // DATA-ONLY is load-bearing, not a style choice. A `notification` block
+    // makes the FCM SDK render the push itself when the app is backgrounded,
+    // and onMessageReceived() is then never called - so the phone would show a
+    // notification and do no work. Verified on the real device 2026-09-03.
+    // https://firebase.google.com/docs/cloud-messaging/android/receive
+    expect(payload.message.notification).toBeUndefined();
+    // title/body are folded into data so the APP can post its own notification.
+    expect(payload.message.data).toEqual({ command: "refresh", title: "t", body: "b" });
   });
 
   it("surfaces UNREGISTERED as a recognizable stale-token error", async () => {
