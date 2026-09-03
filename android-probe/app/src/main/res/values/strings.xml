@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Nightwatch Probe</string>
+    <string name="notification_channel_id">nightwatch_probe_events</string>
+    <string name="notification_channel_name">Nightwatch Probe Events</string>
+</resources>

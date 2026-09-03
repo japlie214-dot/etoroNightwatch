@@ -1,0 +1,130 @@
+<?xml version="1.0" encoding="utf-8"?>
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:padding="16dp">
+
+        <TextView
+            android:id="@+id/txtStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:text="@string/app_name"
+            android:textStyle="bold"
+            android:textSize="16sp"
+            android:paddingBottom="8dp" />
+
+        <Button
+            android:id="@+id/btnRequestExactAlarm"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Grant: Schedule exact alarms" />
+
+        <Button
+            android:id="@+id/btnRequestBatteryExemption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Grant: Ignore battery optimizations" />
+
+        <Button
+            android:id="@+id/btnRequestNotifications"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Grant: Notifications" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#33000000"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="12dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Alarm test" />
+
+        <EditText
+            android:id="@+id/editFireMinutes"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Fire in N minutes (default 2)"
+            android:inputType="number" />
+
+        <Button
+            android:id="@+id/btnScheduleTest"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Schedule test alarm (setAlarmClock)" />
+
+        <Button
+            android:id="@+id/btnScheduleNightly"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Schedule nightly alarm (configured time below)" />
+
+        <EditText
+            android:id="@+id/editNightlyTime"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="HH:mm device-local, e.g. 02:30"
+            android:inputType="text" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#33000000"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="12dp" />
+
+        <TextView
+            android:id="@+id/txtFcmToken"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:text="FCM token: (not yet received)" />
+
+        <TextView
+            android:id="@+id/txtTz"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:text="tzdata: (not yet run)" />
+
+        <Button
+            android:id="@+id/btnRunChecksNow"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Run wake checks now (network + Chaquopy + tzdata)" />
+
+        <View
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:background="#33000000"
+            android:layout_marginTop="12dp"
+            android:layout_marginBottom="12dp" />
+
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Event log"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnShareLog"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Share / export log" />
+
+        <ListView
+            android:id="@+id/listEvents"
+            android:layout_width="match_parent"
+            android:layout_height="400dp" />
+
+    </LinearLayout>
+</ScrollView>

@@ -1,0 +1,9 @@
+# Copy this file to local.properties (gitignored, never committed) and fill in real values.
+
+# Android SDK location. On this machine: C:\\Users\\10102721\\Android\\Sdk
+sdk.dir=C\:\\Users\\10102721\\Android\\Sdk
+
+# Worker push secret (DESIGN §8.2 / RUNBOOK_INFRA §B.4 PHONE_PUSH_SECRET).
+# Read from ../../secrets/phone_push_secret.txt — never hardcode this in a committed .kt/.java
+# file. build.gradle.kts injects it into BuildConfig.PHONE_PUSH_SECRET at build time.
+PHONE_PUSH_SECRET=paste-the-value-from-secrets/phone_push_secret.txt-here

@@ -39,3 +39,18 @@ cloud/pages/.dev.vars
 
 # wrangler local state/cache (any location) - contains account id
 .wrangler/
+
+# --- android-probe / Android Gradle build (DESIGN §11 step 4) ---
+android-probe/local.properties
+android-probe/*/local.properties
+android-probe/.gradle/
+android-probe/**/.gradle/
+android-probe/**/build/
+android-probe/.idea/
+android-probe/*.iml
+android-probe/**/*.iml
+android-probe/captures/
+android-probe/.cxx/
+android-probe/**/.cxx/
+*.keystore
+*.jks
