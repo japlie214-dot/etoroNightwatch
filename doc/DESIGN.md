@@ -796,24 +796,61 @@ reference, rating vivo 3/5 — covers **Funtouch OS only** and has **not been up
 on the physical device**, then re-verified after every OS update.
 (https://cyberraiden.wordpress.com/2026/08/02/origin-os-6-apps-section-settings-explained/)
 
-| # | Setting | Path |
-|---|---|---|
-| 1 | Autostart / auto-launch **enabled** | Settings → Apps → [app] → Battery usage → enable auto-start. OriginOS folds this into the per-app "Battery usage" screen — unlike Funtouch, which had a separate standalone Autostart manager. |
-| 2 | Battery usage **Unrestricted** | Settings → Apps → [app] → Battery usage → set to **Unrestricted** (tri-state: Unrestricted / Optimized / Restricted — Unrestricted is the one that matters here). |
-| 3 | Allow background usage globally | Settings → Battery → Background power consumption management → allow background usage for the app. |
-| 4 | App **locked in Recents** | **No confirmed OriginOS 6 equivalent found.** Verify manually: long-press the app's card in Recents and look for a lock/pin icon. |
-| 5 | **"Pause app activity if unused" disabled** | This is the OriginOS hibernation analogue (§1.2) — a vivo-specific mechanism layered on top of, and separate from, stock Android App Hibernation. Disable it for this app explicitly. |
+| # | Setting | Path | Status on the real device |
+|---|---|---|---|
+| 1 | Autostart / auto-launch **enabled** | Settings → Apps → [app] → Battery usage → enable auto-start. OriginOS folds this into the per-app "Battery usage" screen — unlike Funtouch, which had a separate standalone Autostart manager. | **Confirmed present** — `Pengaturan → Aplikasi → Mulai otomatis` exists as its own screen (not folded into Battery usage as the community source predicted). |
+| 2 | Background power **"Izinkan penggunaan daya di latar belakang"** | Settings → Apps → [app] → Kontrol daya latar belakang → set to **Izinkan penggunaan daya di latar belakang** (tri-state: Kontrol pintar / Izinkan / Batasi — the default is Kontrol pintar, the vague vendor-managed mode most likely to silently kill a 3 AM alarm; Izinkan is the one that matters). | **Confirmed present and set** — screen exists exactly as predicted, with these three exact Indonesian labels. |
+| 3 | Battery optimization exemption | Settings → Apps → Special app access → Alarm & pengingat (grants `SCHEDULE_EXACT_ALARM`), and the standard `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` prompt. | **Confirmed present** — both `Alarm & pengingat` and the battery-optimization exemption prompt exist and were grantable; verified in-app via `canScheduleExactAlarms()==true` and `isIgnoringBatteryOptimizations()==true` on every wake. |
+| 4 | App **locked in Recents** | **No confirmed OriginOS 6 equivalent found.** Verify manually: long-press the app's card in Recents and look for a lock/pin icon. | Still unverified — not exercised during probe testing so far. |
+| 5 | **"Jeda aktivitas aplikasi jika tidak digunakan" disabled** | This is the OriginOS hibernation analogue (§1.2) — a vivo-specific mechanism layered on top of, and separate from, stock Android App Hibernation. Disable it for this app explicitly. | **Confirmed present and disabled** — toggle exists under app info exactly as predicted and was switched off. |
 
-**Stated plainly: this is a genuine unknown, not confirmed-safe.** vivo documents none of it;
-no verified reports — positive or negative — exist for exact alarms or FCM delivery on OriginOS
-6 specifically (the closest prior evidence, alarms failing on vivo hardware even with every
-known Funtouch-era setting applied — https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61
-— predates OriginOS 6 and cannot be assumed to transfer either way). Item 4's absence of a
-confirmed equivalent is exactly why §11 step 4's empirical multi-night proof is what actually
-resolves this, not the checklist by itself.
+Items 1–3 and 5 are no longer community-sourced guesses — they were located and set on the
+physical device (2026-09-03) using the exact Indonesian labels recorded above, which the reader
+should use verbatim rather than the earlier speculative English paraphrase. Item 4 remains
+unverified. **This is still not confirmed-safe** — vivo documents none of the *behaviour* behind
+these switches, only their existence is now confirmed; no verified reports, positive or
+negative, exist for whether OriginOS 6 actually *honours* them through a full night of deep
+Doze (the closest prior evidence, alarms failing on vivo hardware even with every known
+Funtouch-era setting applied — https://github.com/WrichikBasu/ShakeAlarmClock/discussions/61 —
+predates OriginOS 6 and cannot be assumed to transfer either way). That is exactly why §11
+step 4's empirical multi-night proof is what actually resolves this, not the checklist by
+itself.
 
 **After every OS update, re-verify all five and re-run a one-night proof before trusting the
 next live session.** The Z10 is early in its support life and will take major upgrades.
+
+### 7.4b Private DNS — required, discovered empirically, not anticipated in the original design
+
+**Finding (2026-09-03, on the physical device):** `public-api.etoro.com` did not resolve to
+eToro's real servers on either the corporate Wi-Fi *or* the phone's mobile data connection.
+Both networks returned a TLS certificate for `stopmalware.moratelindo.io` /
+`trustpositif.moratelindo.io` — Indonesia's Kominfo/Trust Positif internet-filtering system,
+applied at the ISP/carrier level. This is DNS-based hijacking (the resolver returns the
+block-page IP for a filtered hostname), not SNI/deep-packet inspection — confirmed by the fact
+that switching DNS alone fixed it, with no other network change. It reproduced on two
+independently-operated networks (a corporate uplink and a cellular carrier), which is strong
+evidence this is nationwide filtering-mandate behaviour rather than one operator's policy, and
+therefore very likely also present on the phone's home Wi-Fi ISP by default.
+
+**Required fix — set once, device-wide:** Settings → Connections → More connection settings →
+Private DNS → **Private DNS provider hostname** → `one.one.one.one` (Cloudflare, DNS-over-TLS).
+This is deliberately the **device-wide** setting, not a per-network DNS override in a single
+Wi-Fi's advanced settings — the device-wide form applies uniformly across every network the
+phone joins, Wi-Fi and mobile data alike, with no need to reapply it after a network change.
+Confirmed working: `public-api.etoro.com` resolved correctly and returned eToro's real
+`Unauthorized` response (the expected pass condition with no credentials configured, §1.1) once
+this was set.
+
+**Add to preflight (§5) and to the OriginOS checklist above** as item 6: verify Private DNS is
+still set to `one.one.one.one` (or equivalent) before trusting a session's network reachability
+result, since an OS update or a factory-reset-adjacent event could plausibly clear it the same
+way it can clear the permissions above. Add to §12 as a tracked risk: if this setting is ever
+lost, the failure mode is silent and specific — DNS still resolves to *something*, TLS still
+completes a handshake, and the failure surfaces only as a certificate-verification error on
+eToro's hostname specifically, not a generic connectivity failure. A future preflight check
+should distinguish this exact failure signature (`SSLPeerUnverifiedException` naming a
+`moratelindo.io` certificate) from an ordinary network outage in its Telegram alert text, so a
+recurrence is diagnosable from the phone at 3 AM without re-deriving this chain of reasoning.
 
 ### 7.5 Boot survival
 
@@ -928,6 +965,54 @@ Security:
 - **HMAC-of-(command, counter), with replay rejection by counter.** Every inbound command, on either channel, carries an HMAC over the command and a monotonic counter; a counter at or below the last-accepted value is rejected as a replay. Every attempt — accepted or rejected, and why — is written to the `commands` audit table (§3): command, channel (`fcm`\|`telegram`), sender/chat id, counter, verdict, timestamp. An inbound control channel must be auditable.
 - Commands are parsed as **data against a fixed table**. Nothing from a message is ever passed to a shell, a file path, or an eval.
 - **No inbound listener, no open port to the internet, on either channel.** FCM delivery is a push from Google's infrastructure to Google Play Services, not a socket we open; Telegram is `getUpdates` long-polling, never a webhook.
+
+### 8.3 Remote operability is a design requirement, not a convenience
+
+**The phone lives away from the user most of the time.** It stays at home; the user does not.
+So anything that can only be done by touching the phone is a real operational hurdle, not a
+minor inconvenience — a check that "should be quick, just open the app" may not be possible for
+days. The design principle, stated plainly: **every capability that does not move money must be
+reachable through the Worker, with the phone untouched.**
+
+This was proven, not just asserted, during the Android platform proof (§7, the multi-night
+gate): `ping`, `status`, `logs`, `runchecks`, `schedule`, and `selftest` were all driven from a
+laptop via `POST /command` → HMAC'd FCM push → phone executes → `POST /snapshot` → `GET
+/snapshot` read back the result, with the phone sitting untouched throughout an entire session.
+That loop is the template the real app's command surface should follow, not a probe-only
+convenience to be dropped when the real app is built. Concretely, carry forward into the real
+app everything already proven on the probe, beyond the read-only table in §8.2:
+- **`schedule`** — set or move the next session's trigger time remotely, HMAC-signed over
+  `command:counter:arg` so the argument itself cannot be tampered with independently of the
+  command name (§8.2's HMAC already covers `command:counter`; the argument extension is a
+  strict, backward-compatible superset — verified: a signature with no `arg` is unchanged, and
+  tampering with `arg` alone invalidates the signature).
+- **`runchecks`** — re-run preflight (§5) and the connectivity/tzdata/clock/standby-bucket
+  checks on demand, without waiting for the next scheduled session, and push the result.
+- **`selftest`** — the full check battery, for "is everything still healthy" at any time.
+- **`ping`** — cheapest possible liveness probe, for "is the phone even reachable right now"
+  before reaching for anything heavier.
+
+**The boundary that does NOT move, and is deliberately in tension with "make everything
+remote":** arming live trading, changing `cash_allocation_usd` or any other config, and
+anything that could originate a trade remain **local-only** (§6.E) — set in `config.toml` and
+the `NIGHTWATCH_ARM` environment variable on the device itself, never reachable from Telegram or
+an FCM command. This is not an oversight; it is the same invariant §8.2 already states — *a
+compromised control channel must never be able to move money* — extended to cover the Worker
+and the laptop-side `/command` caller too, since those are now also remote and therefore also a
+compromise surface. If read-only remote diagnostics, `schedule`, and `HALT`/`RESUME` do not
+cover the real operational need, that is a decision to revisit explicitly with the user — not
+one to silently expand.
+
+**The one hurdle remote operability genuinely cannot remove: one-time, in-person device setup.**
+Android does not expose `SCHEDULE_EXACT_ALARM`, the battery-optimization exemption, the
+notification permission, or any OriginOS setting (autostart, background power, the hibernation
+toggle) as remotely grantable — each requires a physical tap through a system permission dialog
+or settings screen (§7.3, §7.4). Private DNS (§1.2, §7.6 — see the Kominfo finding below) is the
+same: a device-wide setting with no remote API. **All of this must be done once, before the
+phone is left unattended, and re-verified after any OS update that resets it** (§12 already
+tracks the update-reset risk) — because after that point there is no remote path to fix a
+revoked permission or a reset setting; the phone would need to come home, or the user would need
+someone physically present with it.
 
 ---
 
