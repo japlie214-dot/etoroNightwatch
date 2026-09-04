@@ -119,17 +119,30 @@ class Credentials:
         return {"x-api-key": self.api_key, "x-user-key": self.user_key}
 
 
-# Which secrets back which environment.  The demo environment has a single pair
-# (per config/.secrets.env.example); the real environment splits write and read
-# by privilege (DESIGN §5, "separate credentials by privilege").
+# Which secrets back which environment.  There is now a single shared public
+# (application) key across every environment and role -- ETORO_PUBLIC_KEY --
+# paired with a role/environment-specific per-user key.  The demo environment
+# has one per-user key for both roles; the real environment splits write and
+# read by privilege (DESIGN §5, "separate credentials by privilege").
+#
+# Corrected 2026-09-04 against a live call: this tuple is (x-api-key secret
+# name, x-user-key secret name).  It previously read
+# ("ETORO_DEMO_PRIVATE_KEY", "ETORO_PUBLIC_KEY") -- i.e. api_key
+# came from the long, JWT-shaped per-user secret and user_key came from the
+# short public one.  eToro's own docs (api-portal.etoro.com) say the
+# opposite: x-api-key "identifies the application" (the short key) and
+# x-user-key "identifies your user account" (the long one, generated via
+# Settings > Trading > API Key Management). A live GET /api/v1/balances
+# proved it: the old order 401'd, this order returns 200 with real demo
+# balance data. See DESIGN §1.1 fact table for the corrected header mapping.
 _CREDENTIAL_KEYS: Final[dict[EtoroEnvironment, dict[str, tuple[str, str]]]] = {
     EtoroEnvironment.DEMO: {
-        "write": ("ETORO_DEMO_API_KEY", "ETORO_DEMO_USER_KEY"),
-        "read": ("ETORO_DEMO_API_KEY", "ETORO_DEMO_USER_KEY"),
+        "write": ("ETORO_PUBLIC_KEY", "ETORO_DEMO_PRIVATE_KEY"),
+        "read": ("ETORO_PUBLIC_KEY", "ETORO_DEMO_PRIVATE_KEY"),
     },
     EtoroEnvironment.REAL: {
-        "write": ("ETORO_API_KEY", "ETORO_USER_KEY"),
-        "read": ("ETORO_READ_API_KEY", "ETORO_READ_USER_KEY"),
+        "write": ("ETORO_PUBLIC_KEY", "ETORO_PRIVATE_KEY"),
+        "read": ("ETORO_PUBLIC_KEY", "ETORO_READ_PRIVATE_KEY"),
     },
 }
 
@@ -219,7 +232,11 @@ class StrategyConfig:
     core_fraction: float = 0.4
     core_floor_pct: float = 0.5
     order_divisor: int = 60
-    min_order_size: float = 10.0
+    #: Raised 10.0 -> 50.0 on 2026-09-04 against the live eligibility endpoint:
+    #: SCHG's ``minPositionExposure`` is 50.0 and UPRO's is 10.0, so 50 is the
+    #: smallest floor at which both managed symbols are always orderable.  The
+    #: per-instrument minimum remains authoritative when it is higher.
+    min_order_size: float = 50.0
     buy_threshold: float = -2.0
     sell_threshold: float = 3.0
     max_lots: int = 60
@@ -243,6 +260,17 @@ class StrategyConfig:
     #: Bars of history the cone indicator needs before it returns a value:
     #: 260-bar lookback + 5-bar shift (DESIGN §1.4).
     required_history_bars: int = 265
+    #: The sleeve, by **exclusion** (DESIGN §4.5, product decision superseding
+    #: the earlier inclusion model): the USD the operator withholds from the
+    #: app for their own use, outside etoroNightwatch. ``sleeve_cash =
+    #: max(0, broker_available_cash - cash_reserve_usd)`` is computed at
+    #: runtime by the engine (step 9) -- this field is only the reserve input.
+    #: ``0`` (also what ``None``/absent collapses to) means "use all available
+    #: cash." This is a **product decision, not a safety rail**: if the
+    #: resulting sleeve is too small to trade, the app warns on the UI and
+    #: keeps running -- it never blocks a session or refuses to start over
+    #: this (``strategy.min_allocation``).
+    cash_reserve_usd: float = 0.0
 
     def __post_init__(self) -> None:
         if self.order_divisor <= 0:
@@ -267,6 +295,10 @@ class StrategyConfig:
             raise ConfigError("strategy.exit_mode must be 'fixed' or 'trailing'")
         if self.budget_override_usd is not None and self.budget_override_usd <= 0:
             raise ConfigError("strategy.budget_override_usd must be positive or null")
+        if self.cash_reserve_usd < 0:
+            raise ConfigError("strategy.cash_reserve_usd must not be negative")
+        if self.min_order_size <= 0:
+            raise ConfigError("strategy.min_order_size must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -557,7 +589,7 @@ def load_config(
         core_fraction=float(st.get("core_fraction", 0.4)),
         core_floor_pct=float(st.get("core_floor_pct", 0.5)),
         order_divisor=int(st.get("order_divisor", 60)),
-        min_order_size=float(st.get("min_order_size", 10.0)),
+        min_order_size=float(st.get("min_order_size", 50.0)),
         buy_threshold=float(st.get("buy_threshold", -2.0)),
         sell_threshold=float(st.get("sell_threshold", 3.0)),
         max_lots=int(st.get("max_lots", 60)),
@@ -577,6 +609,11 @@ def load_config(
             else float(st["budget_override_usd"])
         ),
         required_history_bars=int(st.get("required_history_bars", 265)),
+        cash_reserve_usd=(
+            0.0
+            if st.get("cash_reserve_usd") in (None, "")
+            else float(st["cash_reserve_usd"])
+        ),
     )
 
     symbols_table = _table(data, "symbols")

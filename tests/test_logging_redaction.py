@@ -46,7 +46,7 @@ def test_redaction_filter_scrubs_known_secret_shapes() -> None:
     github_pat = "github_pat_" + "a" * 60
     telegram_token = "123456789:AA" + "b" * 33
     generic_hex = "f" * 40
-    api_key_kv = "ETORO_API_KEY=abcdef0123456789ABCDEF0123456789"
+    api_key_kv = "ETORO_PRIVATE_KEY=abcdef0123456789ABCDEF0123456789"
 
     text = (
         f"leaked pat={github_pat} token={telegram_token} "
@@ -59,6 +59,28 @@ def test_redaction_filter_scrubs_known_secret_shapes() -> None:
     assert generic_hex not in redacted
     assert "abcdef0123456789ABCDEF0123456789" not in redacted
     assert "***REDACTED***" in redacted
+
+
+def test_redaction_filter_scrubs_the_new_consolidated_credential_names() -> None:
+    """The eToro credential env vars were renamed from *_API_KEY/*_USER_KEY to
+    ETORO_PRIVATE_KEY / ETORO_READ_PRIVATE_KEY / ETORO_DEMO_PRIVATE_KEY /
+    ETORO_PUBLIC_KEY. Prove the redaction filter still catches them under the
+    new names -- and at the real shapes: a ~260-char base64url-ish private key
+    ending in a literal "__", and a ~63-char alphanumeric public key."""
+    private_key = ("aB3" * 86) + "__"  # ~260 chars, base64url-ish, ends in "__"
+    public_key = "p" + "Q7" * 31  # 63 chars, alphanumeric
+
+    text = (
+        f"ETORO_PRIVATE_KEY={private_key} "
+        f"ETORO_READ_PRIVATE_KEY={private_key} "
+        f"ETORO_DEMO_PRIVATE_KEY={private_key} "
+        f"ETORO_PUBLIC_KEY={public_key}"
+    )
+    redacted = RedactionFilter.redact(text)
+
+    assert private_key not in redacted
+    assert public_key not in redacted
+    assert redacted.count("***REDACTED***") == 4
 
 
 def test_redaction_filter_leaves_ordinary_text_alone() -> None:

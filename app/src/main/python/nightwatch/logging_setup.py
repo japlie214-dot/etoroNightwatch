@@ -53,11 +53,11 @@ _NOISY_HTTP_LOGGERS: Final[tuple[str, ...]] = ("httpx", "httpcore", "urllib3")
 REDACTED: Final = "***REDACTED***"
 
 #: Config/env field-name fragments whose *value* is always redacted, wherever
-#: it appears in a formatted message (e.g. "ETORO_API_KEY=abcd..." or a repr
+#: it appears in a formatted message (e.g. "ETORO_PRIVATE_KEY=abcd..." or a repr
 #: that leaked one despite the dataclasses' repr=False fields).
 _SENSITIVE_NAME_FRAGMENTS: Final[tuple[str, ...]] = ("key", "token", "secret", "pat")
 
-# One name=value pair, e.g. "ETORO_API_KEY=abc123" or "x-api-key: abc123".
+# One name=value pair, e.g. "ETORO_PRIVATE_KEY=abc123" or "x-api-key: abc123".
 # Matches common separators (=, :, "=>") with optional quoting.
 _NAME_VALUE_RE = re.compile(
     r"""(?P<name>[A-Za-z0-9_\-]*(?:key|token|secret|pat)[A-Za-z0-9_\-]*)

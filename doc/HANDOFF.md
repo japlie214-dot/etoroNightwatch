@@ -54,16 +54,27 @@ naming `moratelindo.io` on eToro's hostname specifically — not a generic netwo
 and the Telegram alert text should distinguish this exact signature from an ordinary outage; see
 §7.4b for the precise ask.
 
+### 2a. A second Kominfo DNS block, found doing steps 5–6
+
+Steps 5 and 6 (§4 table) ran live against the eToro demo API on 2026-09-04. One new finding
+along the way, same family as above: `builders.etoro.com` is DNS-blocked by Kominfo the same way
+`public-api.etoro.com` was — the in-session `WebFetch` tool failed with `ECONNREFUSED` against
+it, but server-side `WebSearch` worked fine, since it doesn't route through the blocked
+resolver. If a future session needs to consult eToro's builder docs and `WebFetch` refuses to
+connect, that's this block, not a broken URL — reach for `WebSearch` instead of concluding the
+page doesn't exist.
+
 ---
 
-## 3. Assumption to verify at kickoff, not to build around
+## 3. Assumption from kickoff — now settled
 
-The user says the eToro **demo** credentials will be in `config/.secrets.env`
-(`ETORO_DEMO_API_KEY`, `ETORO_DEMO_USER_KEY`) by the time this handoff is picked up. As of this
-session those variable names exist in the file but were **blank**. **First action of the build:
-confirm they're populated.** If they're still blank, stop and say so plainly rather than building
-speculatively against an API you can't call — that was exactly the kind of unverified assumption
-this whole session was about eliminating.
+The user said the eToro **demo** credentials would be in `config/.secrets.env`
+(`ETORO_DEMO_PRIVATE_KEY`, `ETORO_PUBLIC_KEY`) by the time this handoff was picked up; as of the
+design session those variable names existed in the file but were **blank**. **This is now
+resolved**: the credentials were populated and steps 5–6 ran live against them successfully
+(§2a). Auth is trivial once the naming is right (DESIGN §1.1): the "private key" in the brief is
+the **user key**, sent as `x-user-key`; the short public key is sent as `x-api-key`. No signing,
+no nonce, no JWT — secret handling, not auth mechanics, was ever the hard part here.
 
 ---
 
@@ -73,14 +84,14 @@ this whole session was about eliminating.
 
 | Step | What | Notes |
 |---|---|---|
-| **5** | eToro client: auth, rate limiting, retries, all read endpoints, typed models | Against **demo** only. First step needing any eToro key. |
-| 6 | Market calendar + bar store + seeding (400 daily bars) + provisional/settle | §4.2's provisional-close mechanism is subtle — read it twice |
-| 7 | Strategy port with the four approved bug fixes | See §5 below — do not skip the bug analysis |
+| **5** | eToro client: auth, rate limiting, retries, all read endpoints, typed models | **Done, live-verified 2026-09-04** against the demo API. Auth confirmed: `x-user-key` = the "private key" in the brief, `x-api-key` = the short public key. See §2a below. |
+| 6 | Market calendar + bar store + seeding (400 daily bars) + provisional/settle | **Done, live-verified 2026-09-04.** §4.2's provisional-close mechanism is subtle — read it twice. `market/bars.py`'s live-rate staleness check is still a stub pending step 9's preflight (DESIGN §5 gate 10, §12) — do not read its absence as a step-6 gap. |
+| 7 | Strategy port with the four approved bug fixes | See §5 below — do not skip the bug analysis. **`strategy/cone.py` must read bars with `settled_only=True`.** If it ever reads a provisional bar as settled, the ≥265-bar SPY history the cone signal depends on is silently poisoned — not yet verifiable since the module is still a stub, but this is a required check before step 7 is called done. |
 | **8** | Forward-test harness + fake eToro broker | See §6 below — this is the user's explicit new ask |
 | 9 | Session engine: preflight, executor, idempotency, reconciliation, sleeve accounting | §5 (preflight), §4.5 (sleeve) |
 | 10 | Full integration: Telegram inbound, snapshot push, live web app | Reuses the exact plumbing already proven on the probe |
 | 11 | Demo end-to-end **on the phone** | Multiple consecutive sessions, on battery |
-| 12 | Go live | Real keys, `NIGHTWATCH_ARM`, small `cash_allocation_usd` |
+| 12 | Go live | Real keys, `NIGHTWATCH_ARM`, a generous `cash_reserve_usd` so only a small sleeve is initially exposed |
 
 **No real-money credential is used before step 12. This is non-negotiable and is stated in the
 design as a hard boundary, not a suggestion.**
@@ -124,11 +135,16 @@ will run in production — not a simplified version to be rewritten later. Concr
   ≥265 SPY daily bars must be seeded, or the cone signal is `None` forever. This is explained at
   length in DESIGN §1.4 — it trips people up because the naive fix (just set warmup to 0) creates
   a worse bug (permanent warmup) if `_bars` isn't also persisted.
-- **Sleeve, not account.** `cash_allocation_usd` is an absolute figure in config; `sleeve_cash`
-  is clamped to eToro's documented available-cash formula (`credit − Σ pending order amounts`,
-  never `totalBalance`); `sleeve_equity` counts only the app's own UPRO/SCHG lots. Every strategy
-  read of cash or equity means the sleeve. Getting this wrong computes the SCHG core floor
-  against a far larger number than the app actually manages and permanently blocks buys.
+- **Sleeve, not account -- and, since 2026-09-04, by exclusion, not inclusion (operator
+  decision, DESIGN §4.5).** `cash_reserve_usd` is an absolute figure in config -- the cash the
+  operator withholds for their own use. `sleeve_cash = max(0, broker_available_cash -
+  cash_reserve_usd)`, where `broker_available_cash` keeps eToro's documented formula
+  (`credit − Σ pending order amounts`, never `totalBalance`); `sleeve_equity` counts only the
+  app's own UPRO/SCHG lots. Every strategy read of cash or equity means the sleeve. Getting this
+  wrong computes the SCHG core floor against a far larger number than the app actually manages
+  and permanently blocks buys. The trade-off exclusion buys: the sleeve now grows with the
+  account instead of being pinned to a fixed figure, but any deposit above the reserve is
+  immediately tradable -- see DESIGN §12.
 
 ---
 
@@ -211,7 +227,7 @@ result.
 4. **Never widen the remote command surface to include anything that can move money.** §8.3 (new
    this session) makes "everything should be remotely operable" an explicit design principle,
    because the phone lives away from the user most of the time — but arming live trading,
-   changing `cash_allocation_usd`, or any other config write stay local-only by design (§6.E).
+   changing `cash_reserve_usd`, or any other config write stay local-only by design (§6.E).
    This tension is intentional and stated in the design; do not silently resolve it by expanding
    what Telegram or the Worker's `/command` route can do.
 5. **Verify claims about delivery, not just acceptance.** An FCM message ID or an HTTP 200 from

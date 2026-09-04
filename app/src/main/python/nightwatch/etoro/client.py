@@ -318,9 +318,17 @@ class EtoroClient:
 
         Computes ``available_cash`` with eToro's documented formula, never
         ``totalBalance``.
+
+        Corrected 2026-09-04: this endpoint has **no** demo/real path
+        segment at all -- ``/api/v1/balances`` always, for both
+        environments. Which account it reads is determined entirely by
+        which credential pair authenticates the call. The old code called
+        ``/api/v1/demo/balances`` (a path that does not exist in eToro's
+        docs) and got a 401 that looked like an auth failure but was really
+        a routing non-issue masked by an auth-before-routing gateway.
         """
         response = self._request(
-            "GET", f"/api/v1/{self._demo()}balances", request_class="read"
+            "GET", "/api/v1/balances", request_class="read"
         )
         data = response.json()
         credit = float(data.get("credit", 0.0))
@@ -368,7 +376,7 @@ class EtoroClient:
         into `EtoroAuthError`).
         """
         response = self._request(
-            "GET", f"/api/v1/{self._demo()}balances", request_class="read"
+            "GET", "/api/v1/balances", request_class="read"
         )
         data = response.json()
         detected = self._detect_environment(data)
@@ -402,11 +410,22 @@ class EtoroClient:
     # -- gate 8, portfolio, pnl ------------------------------------------------
 
     def get_portfolio(self) -> list[Position]:
-        """``GET /trading/info/portfolio`` (or the `/demo/` variant)."""
+        """``GET /trading/info/portfolio`` (or the `/demo/` variant).
+
+        Corrected 2026-09-04: a live response (0 positions on this demo
+        account) nests everything under a ``clientPortfolio`` object --
+        ``{"clientPortfolio": {"positions": [...], ...}}`` -- not a bare
+        top-level ``positions`` key. With zero positions this bug was
+        invisible (both the old and the fixed parsing return ``[]``), which
+        is exactly the "didn't error, not a pass" trap; this has not been
+        confirmed against a *non-empty* portfolio.
+        """
         response = self._request(
             "GET", f"/api/v1/trading/info/{self._demo()}portfolio", request_class="read"
         )
         data = response.json()
+        if isinstance(data, dict) and "clientPortfolio" in data:
+            data = data["clientPortfolio"]
         positions_raw = data.get("positions", data if isinstance(data, list) else [])
         return [self._parse_position(p) for p in positions_raw]
 
@@ -449,11 +468,16 @@ class EtoroClient:
         page_size: int = 200,
         max_pages: int = 50,
     ) -> list[TradeHistoryEntry]:
-        """``GET /trading/info/trade/history``, paged, <1yr lookback enforced.
+        """``GET /trading/info/trade/history`` (or ``/trade/demo/history``),
+        paged, <1yr lookback enforced.
 
         Args:
             start_date: ``YYYY-MM-DD``, inclusive.
             end_date: ``YYYY-MM-DD``, inclusive.
+
+        Corrected 2026-09-04: needs the demo/real segment, same issue as
+        :meth:`get_eligibility`. Note the segment sits between ``trade/`` and
+        ``history``, not before ``trade``.
         """
         start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
         end = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
@@ -468,7 +492,7 @@ class EtoroClient:
         while page < max_pages:
             response = self._request(
                 "GET",
-                "/api/v1/trading/info/trade/history",
+                f"/api/v1/trading/info/trade/{self._demo()}history",
                 request_class="read",
                 params={
                     "startDate": start_date,
@@ -508,23 +532,50 @@ class EtoroClient:
     # -- instrument resolution + caching (immutable ids, cache via DB) --------
 
     def search_instrument(self, symbol: str) -> InstrumentSearchResult:
-        """``GET /market-data/instruments/search`` for one ticker (uncached)."""
+        """``GET /market-data/search`` for one ticker (uncached).
+
+        Corrected 2026-09-04 against live behaviour: the endpoint is
+        ``/api/v1/market-data/search`` -- **not**
+        ``/api/v1/market-data/instruments/search``, which 404s
+        (``RouteNotFound``). The response's top-level key is ``items``, not
+        ``instruments``, and each row's fields are the ``internal``-prefixed
+        names (``internalInstrumentDisplayName``, ``internalExchangeName``)
+        rather than the unprefixed names DESIGN assumed; ``instrumentId`` and
+        ``internalSymbolFull`` are unprefixed and match. No ``currency`` (or
+        ``instrumentCurrency``) field came back under any name tried, so
+        :attr:`InstrumentSearchResult.currency` is ``None`` in practice for
+        every symbol checked (UPRO/SCHG/SPY).
+
+        A plain ``internalSymbolFull`` query is **not** an exact match --
+        querying ``"SPY"`` also returns ``SPY.RTH``, ``SPY4.DE``, ``SPY5.L``,
+        ``SPYD``, etc (10 rows for a 20-row page), so this filters to the row
+        whose ``internalSymbolFull`` equals ``symbol`` exactly rather than
+        trusting the first row returned.
+        """
         response = self._request(
             "GET",
-            "/api/v1/market-data/instruments/search",
+            "/api/v1/market-data/search",
             request_class="market_data",
-            params={"internalSymbolFull": symbol},
+            params={
+                "internalSymbolFull": symbol,
+                "fields": "instrumentId,internalSymbolFull,internalInstrumentDisplayName,internalExchangeName",
+            },
         )
         data = response.json()
-        rows = data.get("instruments", data if isinstance(data, list) else [data])
-        if not rows:
+        # "items" is the real key; "instruments" is tolerated too (a
+        # concurrent test suite this module must not edit -- see
+        # tests/test_market_bars.py -- mocks the pre-correction shape).
+        rows = data.get("items", data.get("instruments", data if isinstance(data, list) else [data]))
+        exact = [r for r in rows if r.get("internalSymbolFull") == symbol]
+        matches = exact or rows
+        if not matches:
             raise EtoroValidationError(f"no instrument found for symbol {symbol!r}")
-        row = rows[0]
+        row = matches[0]
         return InstrumentSearchResult(
-            instrument_id=int(row.get("instrumentId", row.get("instrumentID"))),
+            instrument_id=int(row.get("instrumentId", row.get("internalInstrumentId"))),
             symbol=symbol,
-            name=row.get("instrumentDisplayName") or row.get("name"),
-            exchange=row.get("exchangeName") or row.get("exchange"),
+            name=row.get("internalInstrumentDisplayName") or row.get("name"),
+            exchange=row.get("internalExchangeName") or row.get("exchange"),
             currency=row.get("instrumentCurrency") or row.get("currency"),
             raw=dict(row),
         )
@@ -554,7 +605,13 @@ class EtoroClient:
         return result.instrument_id
 
     def get_instruments(self, instrument_ids: Sequence[int]) -> list[dict[str, Any]]:
-        """``GET /market-data/instruments`` metadata for a set of ids."""
+        """``GET /market-data/instruments`` metadata for a set of ids.
+
+        Corrected 2026-09-04: the path returns 200, but the response's
+        top-level key is ``instrumentDisplayDatas``, not ``instruments`` --
+        the old key silently returned an empty list on every real call, a
+        "didn't error" pass that was not actually a pass.
+        """
         response = self._request(
             "GET",
             "/api/v1/market-data/instruments",
@@ -562,12 +619,27 @@ class EtoroClient:
             params={"instrumentIds": ",".join(str(i) for i in instrument_ids)},
         )
         data = response.json()
-        return list(data.get("instruments", data if isinstance(data, list) else []))
+        return list(
+            data.get("instrumentDisplayDatas", data if isinstance(data, list) else [])
+        )
 
     # -- rates + candles ---------------------------------------------------
 
     def get_rates(self, instrument_ids: Sequence[int]) -> dict[int, Rate]:
-        """``GET /market-data/instruments/rates`` -- live quotes, no market-open flag."""
+        """``GET /market-data/instruments/rates`` -- live quotes, no market-open flag.
+
+        This path was already correct (unlike search/candles) and returns
+        200 with real quotes. Corrected 2026-09-04, from a live response for
+        UPRO/SCHG/SPY: the instrument-id field is ``instrumentID`` (lowercase
+        ``i``, capitalised ``ID``) -- a *third* casing distinct from both
+        alternatives the old code checked (``instrumentId``,
+        ``InstrumentID``), so every row silently matched neither and this
+        method always returned an empty dict on real data despite the HTTP
+        call itself succeeding -- exactly the "didn't error but not a pass"
+        trap. ``bid``/``ask``/``lastExecution`` were already right. There is
+        no ``timestamp``/``dateTime`` field; the quote's timestamp comes back
+        as ``date``.
+        """
         response = self._request(
             "GET",
             "/api/v1/market-data/instruments/rates",
@@ -578,7 +650,9 @@ class EtoroClient:
         rows = data.get("rates", data if isinstance(data, list) else [])
         result: dict[int, Rate] = {}
         for row in rows:
-            instrument_id = int(row.get("instrumentId", row.get("InstrumentID", 0)))
+            instrument_id = int(
+                row.get("instrumentID", row.get("instrumentId", row.get("InstrumentID", 0)))
+            )
             result[instrument_id] = Rate(
                 instrument_id=instrument_id,
                 bid=float(row.get("bid", row.get("Bid", 0.0))),
@@ -586,19 +660,40 @@ class EtoroClient:
                 last_execution=(
                     float(row["lastExecution"]) if row.get("lastExecution") is not None else None
                 ),
-                timestamp=row.get("timestamp") or row.get("dateTime"),
+                timestamp=row.get("date") or row.get("timestamp") or row.get("dateTime"),
             )
         return result
+
+    #: Wire values for the ``{direction}`` path segment eToro actually
+    #: accepts. DESIGN's own vocabulary (``"backward"``/``"forward"``) is
+    #: kept as this method's public parameter -- unchanged so existing call
+    #: sites (``market/bars.py``) need no edit -- and translated here.
+    _CANDLE_DIRECTION_WIRE: Final[dict[str, str]] = {"backward": "desc", "forward": "asc"}
 
     def get_candles(
         self, instrument_id: int, *, direction: str = "backward", interval: str = "OneDay",
         count: int = 400,
     ) -> list[Candle]:
-        """``GET .../instruments/{id}/history/candles/{direction}/{interval}/{count}``."""
+        """``GET .../instruments/{id}/history/candles/{direction}/{interval}/{count}``.
+
+        Corrected 2026-09-04 against live behaviour: DESIGN's path-segment
+        shape (as opposed to the query-parameter shape found in eToro's own
+        docs, which 404s live -- ``GET
+        /market-data/instruments/history/candles?instrumentId=...`` does
+        **not** work) is actually the right one; a hand probe confirmed a
+        limit=1000 request genuinely returns 1000 rows (the documented cap
+        is real). The one thing DESIGN got wrong is the ``{direction}``
+        segment's wire vocabulary -- it must be ``asc``/``desc``, not
+        ``backward``/``forward`` (which 404 identically to every other wrong
+        path tried). This method's own ``direction`` parameter keeps
+        ``backward``/``forward`` and translates below, so callers are
+        unaffected.
+        """
+        wire_direction = self._CANDLE_DIRECTION_WIRE.get(direction, direction)
         response = self._request(
             "GET",
             f"/api/v1/market-data/instruments/{instrument_id}/history/candles/"
-            f"{direction}/{interval}/{count}",
+            f"{wire_direction}/{interval}/{count}",
             request_class="market_data",
         )
         data = response.json()
@@ -628,19 +723,41 @@ class EtoroClient:
     # -- eligibility, batched ≤100 ---------------------------------------------
 
     def get_eligibility(self, instrument_ids: Sequence[int]) -> EligibilityBatchResult:
-        """``POST /trading/info/eligibility``, batched at ≤100 ids per call."""
+        """``POST /trading/info/eligibility`` (or ``/demo/eligibility``), batched
+        at ≤100 ids per call.
+
+        Corrected 2026-09-04: this path needs the demo/real segment like most
+        trading/info endpoints -- it was previously hardcoded without one,
+        which happened to work for ``real`` (no segment) but silently called
+        the real-account eligibility endpoint even in demo.
+
+        Also corrected the same day, from a live response body for
+        UPRO/SCHG: the top-level key is ``eligibilities``, not
+        ``eligibility`` -- the old key silently returned zero rows on every
+        real call. ``allowPartialClose`` is actually named
+        ``allowPartialClosePosition``. And ``minPositionAmount`` is **not**
+        a top-level field alongside ``minPositionExposure`` at all -- it
+        lives one level down, once per ``(settlementType, direction)``
+        combination the instrument supports, inside ``leverageConfigs``
+        (e.g. real/long, cfd/short, cfd/long each have their own
+        ``minPositionAmount``, all ``10.0`` for UPRO/SCHG in practice). See
+        :meth:`_min_position_amount_for_real_long`, which picks the one
+        combination this app can ever actually place an order as.
+        """
         results: dict[int, Eligibility] = {}
         ids = list(instrument_ids)
         for start in range(0, len(ids), MAX_ELIGIBILITY_BATCH):
             batch = ids[start : start + MAX_ELIGIBILITY_BATCH]
             response = self._request(
                 "POST",
-                "/api/v2/trading/info/eligibility",
+                f"/api/v2/trading/info/{self._demo()}eligibility",
                 request_class="eligibility",
                 json_body={"instrumentIds": batch},
             )
             data = response.json()
-            rows = data.get("eligibility", data if isinstance(data, list) else [])
+            rows = data.get(
+                "eligibilities", data.get("eligibility", data if isinstance(data, list) else [])
+            )
             for row in rows:
                 instrument_id = int(row.get("instrumentId", row.get("instrumentID", 0)))
                 results[instrument_id] = Eligibility(
@@ -651,19 +768,45 @@ class EtoroClient:
                         if row.get("minPositionExposure") is not None
                         else None
                     ),
-                    min_position_amount=(
-                        float(row["minPositionAmount"])
-                        if row.get("minPositionAmount") is not None
-                        else None
-                    ),
+                    min_position_amount=self._min_position_amount_for_real_long(row),
                     allow_partial_close=(
-                        bool(row["allowPartialClose"])
-                        if row.get("allowPartialClose") is not None
-                        else None
+                        bool(row["allowPartialClosePosition"])
+                        if row.get("allowPartialClosePosition") is not None
+                        else (
+                            bool(row["allowPartialClose"])
+                            if row.get("allowPartialClose") is not None
+                            else None
+                        )
                     ),
                     raw=dict(row),
                 )
         return EligibilityBatchResult(results=results)
+
+    @staticmethod
+    def _min_position_amount_for_real_long(row: Mapping[str, Any]) -> float | None:
+        """Pick ``minPositionAmount`` for this app's one possible order shape.
+
+        A live eligibility row nests ``minPositionAmount`` per
+        ``leverageConfigs`` entry, one per ``(settlementType, direction)``
+        pair the instrument supports (observed for UPRO/SCHG: real/long,
+        cfd/short, cfd/long). This app can only ever place a
+        ``settlementType="real"``, direction ``"long"`` order (see
+        :data:`SETTLEMENT_TYPE`/:data:`TRANSACTION`/:data:`MAX_LEVERAGE`),
+        so this returns that one row's value, or ``None`` if the instrument
+        does not offer that combination at all (also tolerates a
+        flat/top-level ``minPositionAmount``, in case a future response
+        shape or a hand-built test fixture puts it there directly).
+        """
+        if row.get("minPositionAmount") is not None:
+            return float(row["minPositionAmount"])
+        for leverage_config in row.get("leverageConfigs", []) or []:
+            if (
+                leverage_config.get("settlementType") == SETTLEMENT_TYPE
+                and leverage_config.get("direction") == "long"
+            ):
+                value = leverage_config.get("minPositionAmount")
+                return float(value) if value is not None else None
+        return None
 
     def check_eligibility_for_order(
         self, instrument_id: int, order_size: float
@@ -696,12 +839,26 @@ class EtoroClient:
     # -- costs -----------------------------------------------------------------
 
     def get_costs(self, instrument_id: int, amount: float) -> dict[str, Any]:
-        """``POST /trading/info/costs``."""
+        """``POST /trading/info/costs`` (or ``/demo/costs``).
+
+        Corrected 2026-09-04: needs the demo/real segment, same issue as
+        :meth:`get_eligibility`. Also corrected the same day: the body
+        requires a ``transaction`` field -- without it eToro 400s with
+        ``"Transaction must be a valid transaction type (Buy, Sell,
+        SellShort, BuyToCover)"``. Confirmed live that eToro accepts the
+        lowercase :data:`TRANSACTION` constant (``"buy"``) directly, no case
+        conversion needed.
+        """
         response = self._request(
             "POST",
-            "/api/v2/trading/info/costs",
+            f"/api/v2/trading/info/{self._demo()}costs",
             request_class="read",
-            json_body={"instrumentId": instrument_id, "amount": amount, "leverage": MAX_LEVERAGE},
+            json_body={
+                "instrumentId": instrument_id,
+                "amount": amount,
+                "leverage": MAX_LEVERAGE,
+                "transaction": TRANSACTION,
+            },
         )
         return dict(response.json())
 
@@ -761,12 +918,16 @@ class EtoroClient:
     def lookup_order(
         self, *, order_id: str | None = None, reference_id: str | None = None
     ) -> OrderResult:
-        """``GET /v2/trading/info/orders:lookup`` for one order.
+        """``GET /v2/trading/info/orders:lookup`` (or ``/demo/orders:lookup``)
+        for one order.
 
         Exactly one of ``order_id``/``reference_id`` should normally be given;
         ``reference_id`` is what a crash-recovery path uses (DESIGN §6.H) when
         the original response was lost and the local ``x-request-id`` is the
         only handle left.
+
+        Corrected 2026-09-04: needs the demo/real segment, same issue as
+        :meth:`get_eligibility`.
         """
         if order_id is None and reference_id is None:
             raise ValueError("lookup_order requires order_id or reference_id")
@@ -777,7 +938,7 @@ class EtoroClient:
             params["referenceId"] = reference_id
         response = self._request(
             "GET",
-            "/api/v2/trading/info/orders:lookup",
+            f"/api/v2/trading/info/{self._demo()}orders:lookup",
             request_class="read",
             params=params,
         )

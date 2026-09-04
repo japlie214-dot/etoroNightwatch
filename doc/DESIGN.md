@@ -36,11 +36,15 @@ original brief it is called out.
 | **There is no SELL order.** `action` supports only `open`; `transaction` only `buy`/`sellShort`. Reducing a holding = closing a specific `positionId`. | Maps cleanly onto the ladder: one lot = one eToro position. |
 | Opens are **USD-denominated** (`amount`); closes are **unit-denominated** (`UnitsToDeduct`, `null` = full close). | Lot bookkeeping must bridge the asymmetry. We always full-close a lot, so `UnitsToDeduct: null`. |
 | **HTTP 200 means accepted, not filled.** Must poll `GET /api/v2/trading/info/orders:lookup`. Status 3=Filled, 4=Rejected, 5=PartiallyFilled, **11=WaitingForMarket**. | Every order needs a poll-to-terminal loop and a persisted reference id for crash recovery. |
-| Minimum trade size is **per-instrument**, from `POST /api/v2/trading/info/eligibility` (`minPositionExposure`, `minPositionAmount`). Not a constant. | Query at preflight. Never hardcode $10. |
+| Minimum trade size is **per-instrument**, from `POST /api/v2/trading/info/eligibility` (`minPositionExposure` top-level; `minPositionAmount` **per `leverageConfigs` entry**, keyed by `(settlementType, direction)` — this app reads the `real`/`long` one). Not a constant. **Verified live 2026-09-04**: for UPRO, `minPositionExposure=10.0`, real/long `minPositionAmount=10.0`; for SCHG, `minPositionExposure=50.0`, real/long `minPositionAmount=10.0`. The response's top-level key is `eligibilities` (not `eligibility`, which the code wrongly used until this date and got zero rows back from every real call), and the partial-close flag is `allowPartialClosePosition` (not `allowPartialClose`). | Query at preflight. Never hardcode $10. |
 | Rate limits per user key, 1-min window: reads 60/min, writes 20/min, market-data 120/min, eligibility 20/min dedicated. | Ample for a session. Throttle the webapp during the trading window. |
-| Candles: `GET /api/v1/market-data/instruments/{id}/history/candles/{dir}/{interval}/{count}`, `OneDay`, up to 1000. | Our history source. Self-contained — no Snowflake dependency. |
-| Live prices: `GET /api/v1/market-data/instruments/rates?instrumentIds=…` → `bid`/`ask`/`lastExecution`. **No market-open flag.** | Source of today's provisional close. Market-open comes from our own calendar. |
-| Instrument ids are **immutable**. | Resolve once via `market-data/search?internalSymbolFull=UPRO`, cache forever. |
+| Candles: `GET /api/v1/market-data/instruments/{id}/history/candles/{dir}/{interval}/{count}`, `OneDay`, up to 1000. **Verified live 2026-09-04**: this path-segment shape is correct (the query-parameter shape found in eToro's own docs, `GET /market-data/instruments/history/candles?instrumentId=…`, 404s live and does not exist) — but `{dir}` must be `asc`/`desc`, not `backward`/`forward` as this table previously said (that also 404s). `limit=1000` genuinely returns 1000 rows; the response nests candles as `{"candles":[{"instrumentId":…,"candles":[{...OHLCV rows...}]}]}`. | Our history source. Self-contained — no Snowflake dependency. |
+| Live prices: `GET /api/v1/market-data/instruments/rates?instrumentIds=…` → `bid`/`ask`/`lastExecution`. **No market-open flag.** **Verified live 2026-09-04**: this path and these three field names were already correct. The instrument-id field in each row is `instrumentID` (lowercase `i`, capitalised `ID`) — a third casing distinct from `instrumentId`/`InstrumentID`, which the code checked for until this date and so silently matched zero rows despite the HTTP call succeeding. The quote timestamp field is `date`, not `timestamp`/`dateTime`. | Source of today's provisional close. Market-open comes from our own calendar. |
+| Instrument ids are **immutable**. Resolve via `GET /api/v1/market-data/search?internalSymbolFull=UPRO` — **not** `market-data/instruments/search` as this table previously said (404s, `RouteNotFound`). **Verified live 2026-09-04**: UPRO→3244, SCHG→1084, SPY→3000. The response's top-level key is `items` (not `instruments`), and display fields are `internal`-prefixed (`internalInstrumentDisplayName`, `internalExchangeName`) rather than the unprefixed names this table previously assumed. A bare `internalSymbolFull=SPY` query is **not** an exact match — it also returns `SPY.RTH`, `SPY4.DE`, `SPY5.L`, `SPYD`, etc, so the exact-symbol row must be picked out of the page, not assumed to be first. No `currency`/`instrumentCurrency` field was returned under any name tried. | Resolve once via `market-data/search?internalSymbolFull=UPRO`, cache forever. |
+| `GET /api/v1/market-data/instruments?instrumentIds=…` (bulk instrument metadata). **Verified live 2026-09-04**: the response's top-level key is `instrumentDisplayDatas`, not `instruments` as this table previously assumed — the wrong key silently returned an empty list on every real call. | Bulk metadata lookups must read the right key or get nothing, silently. |
+| `POST /api/v2/trading/info/{demo/}costs` requires a `transaction` field in the body (`"buy"`/`"sell"`/`"sellShort"`/`"buyToCover"`, case-insensitive) — without it eToro 400s. **Verified live 2026-09-04.** | Always send `transaction: TRANSACTION` (the module's own hardcoded `"buy"` constant) alongside `instrumentId`/`amount`/`leverage`. |
+| `GET /trading/info/{demo/}portfolio` and `GET /trading/info/{demo/}pnl` both return 200 for the demo credential and **nest their payload under a `clientPortfolio` object** (`{"clientPortfolio": {"positions": [...], "unrealizedPnL": ..., "credit": ..., ...}}`), not at the response's top level as previously coded. **Verified live 2026-09-04**, but only against a zero-position demo account, so the bug was invisible before this correction (both the old top-level read and the fix return `[]` when there are no positions) — not yet confirmed against a *non-empty* portfolio. | A "didn't error" empty-list result is not proof the parsing is right; re-verify once a demo position actually exists. |
+| `GET /api/v1/balances` has **no** demo/real path segment at all — same URL for both environments; which account it reads is decided entirely by which credential pair authenticates. `POST /api/v2/trading/info/{demo/}eligibility` and `.../{demo/}costs`, and `GET /api/v2/trading/info/{demo/}orders:lookup`, all take the segment **between** `info/` and the final path component. `GET /api/v1/trading/info/trade/{demo/}history` takes it **between** `trade/` and `history`, not before `trade`. `POST /api/v2/trading/execution/{demo/}orders` and the market-close-orders path take it right after `execution/`. Market-data endpoints (`search`, `instruments`, `instruments/rates`, `instruments/{id}/history/candles/...`) take **no** demo/real segment at all — market data is account-agnostic. **All verified live 2026-09-04.** | Every trading/info and execution path needs its segment placement checked individually, per-family — there is no single consistent rule across the whole API surface. |
 
 **Unverified — must be proven in demo before going live:**
 
@@ -363,7 +367,7 @@ etoroNightwatch/
       cli.py                     # run | seed | webapp | status | halt  (desktop dev + tests)
   config/
     config.toml                  # strategy params, symbols, budget override, mode,
-                                 # cash_allocation_usd (§4.5)
+                                 # cash_reserve_usd (§4.5)
     .secrets.env                 # API keys — gitignored, never logged
                                  # on-device: app-private storage, not external
   data/nightwatch.db             # SQLite, WAL — app-private filesDir on device
@@ -401,7 +405,7 @@ development, unit tests and the forward test. Only `host.py` differs in what cal
 | `strategy_state` | singleton: `bars`, `ath`, `below_streak`, `recyclable_cash`, `budget_year`, `budget`, `order_size`, `cash_target`, `sale_batch_sequence`, `sale_batch_date` |
 | `schg_daily_values` | `(date, value)` — feeds next year's budget |
 | `budget_history` | `(year, budget, order_size, cash_target, source: auto\|override)` |
-| `portfolio_snapshots` | per-session **account-level** totals (all-asset equity, total cash, `broker_available_cash`) **and sleeve** totals (`cash_allocation_usd`, `sleeve_cash`, `sleeve_equity`, sleeve unrealized/realized P&L, §4.5), plus per-position rows for every broker position with an `is_managed` flag — non-managed holdings are recorded for display only (§1.4, §9). This is also the row pushed to the Cloudflare Worker (§9) |
+| `portfolio_snapshots` | per-session **account-level** totals (all-asset equity, total cash, `broker_available_cash`) **and sleeve** totals (`cash_reserve_usd`, `sleeve_cash`, `sleeve_equity`, sleeve unrealized/realized P&L, §4.5), plus per-position rows for every broker position with an `is_managed` flag — non-managed holdings are recorded for display only (§1.4, §9). This is also the row pushed to the Cloudflare Worker (§9) |
 | `notifications` | Telegram send log with delivery status |
 | `commands` | inbound control audit: command text, `channel` (`fcm`\|`telegram`), sender/chat id, HMAC counter (replay rejection), verdict (accepted/rejected + reason), timestamp — an inbound control channel must be auditable |
 
@@ -494,42 +498,87 @@ mandate a `stopLossRate`.
 **Minimum size guard.** `order_size = budget / 60` can fall below the instrument's
 `minPositionExposure`. etoroNightwatch **blocks and alerts loudly** rather than silently
 resizing — a silent bump would break the tier-cap arithmetic the whole strategy rests on.
+**Verified live 2026-09-04 (§1.1): SCHG's `minPositionExposure` is $50.00, UPRO's is $10.00** —
+not the same number, and `minPositionAmount` is nested per `leverageConfigs` entry keyed by
+`(settlementType, direction)`, not a top-level field; this app reads the `real`/`long` entry.
+This is a **step-12 sizing constraint, not just a preflight check**: SCHG's core buys are sized
+off `core_floor_pct × sleeve_equity` / the surplus-sweep calculation (§4.5), not directly off
+`order_size`, so `sleeve_cash` must be large enough that SCHG's computed core fraction clears
+$50 — a sleeve sized only against UPRO's $10 floor can pass gate 8 for UPRO while every SCHG
+core order it computes is rejected. Under the exclusion model, `sleeve_cash` is a runtime
+quantity (`broker_available_cash − cash_reserve_usd`, §4.5), so this is now a live-cash
+condition rather than a static config comparison — see the two-tier warning in
+`nightwatch.strategy.min_allocation`.
 
 See §6.A for why `leverage: 1` and `settlementType: real` are enforced structurally, not just
 in this payload.
 
 ### 4.4 Extra deposits
 
-**Revised by the sleeve model (§4.5).** With `cash_allocation_usd` an absolute figure in
-config, a deposit no longer moves automatically. This is deliberate, not a regression: the app
-manages a fixed slice of the account, so a deposit sitting in the wider account does **not**
-raise `sleeve_cash`, does **not** raise `sleeve_equity`, and cannot be swept into SCHG by
-surprise. To make new money available to the strategy, raise `cash_allocation_usd` in config —
-an explicit, auditable act, not an automatic one.
+**Revised again by the move to the exclusion sleeve model (§4.5, operator decision
+2026-09-04).** Under the earlier inclusion model, a deposit sitting in the wider account did not
+raise `sleeve_cash` — the sleeve was a fixed config figure, immune to deposits by construction.
+That protection is **gone under exclusion, deliberately**: `sleeve_cash = max(0,
+broker_available_cash − cash_reserve_usd)`, so any deposit that lands in `broker_available_cash`
+above the reserve **immediately** raises `sleeve_cash`, and therefore the budget and order sizes,
+with no explicit act required. This is the direct trade-off for a sleeve that grows with the
+account instead of staying pinned — see §12 for this tracked as a standing risk, and for the
+`max_sleeve_cash_usd` ceiling that was put to the operator on 2026-09-04 and **declined** in
+favour of reserve-only. Not an open question; do not re-propose it.
+
+To keep a deposit out of the strategy's reach, raise `cash_reserve_usd` by the deposited amount
+**before** the deposit lands, or as soon as practical after — an explicit, auditable config edit,
+same as before, just aimed at the opposite lever (withholding cash, not allocating it).
 
 The **annual budget rule is unchanged**: `budget = floor(0.4 × prior_year_mean_SCHG_value / 20)
 × 20`, struck once a year from the sleeve's own SCHG history, and unaffected either way by a
 mid-year deposit.
 
-Think of this as more control than the original design, not less: previously any deposit —
-intended for the strategy or not — was liable to be swept into SCHG on the next new-ATH bar.
-Now nothing moves until you say so.
-
 ### 4.5 The sleeve: what `cash` and `equity` mean
 
-The user allocates a fixed slice of the eToro account to this app; the rest of the account is
-the user's to use freely, entirely outside etoroNightwatch's view. So the strategy must never
+The user carves out a slice of the eToro account for this app to manage; the rest of the account
+is the user's to use freely, entirely outside etoroNightwatch's view. So the strategy must never
 reason about **whole-account** cash or equity — only about the slice it was given. Call that
 slice the **sleeve**.
 
+**Operator decision, 2026-09-04 — exclusion, not inclusion.** The sleeve was originally defined
+by *inclusion*: `cash_allocation_usd`, a fixed absolute figure in config, was the app's entire
+cash. The operator rejected that model:
+
+> "I don't want inclusion because it has negative impacts to the strategy. I want exclusion to
+> better manage my cash for things outside nightwatch."
+
+The reasoning is concrete, not just a preference. A fixed inclusion figure pins the strategy to
+whatever number was set once — it cannot grow as the account grows without an explicit,
+manual edit every time. At the live config (`core_fraction=0.4`, `order_divisor=60`,
+`min_order_size=50`, `max_lots=60`), `order_size` stays clamped to the `$50` floor until the
+sleeve reaches `min_order_size × order_divisor / core_fraction` = **$7,500** (§4.3's
+minimum-viable-allocation calculator, tier 2 — `nightwatch.strategy.min_allocation`). A $2,000
+inclusion allocation funds only **16 of 60** ladder rungs, and the six `TIER_CAPS` — cumulative
+fractions of budget across SPY drawdown tiers (§1.4) — can never reach their deep-drawdown tiers
+on that budget. **Exclusion** fixes this: the sleeve is *whatever the account has, minus a
+reserve the operator withholds*, so it grows with the account automatically, no manual edit
+required.
+
 | Term | Definition |
 |---|---|
-| `cash_allocation_usd` | An **absolute USD figure in config** (e.g. `2000`) — the app's cash. Nullable/absent means "all available cash"; the shipped default in `config.toml` is an explicit number, not `null`. |
-| `sleeve_cash` | `min(cash_allocation_usd, broker_available_cash)`. If the configured allocation exceeds what is actually available, **clamp to available cash and send a loud Telegram warning** — never fail the session for this, but never let the sleeve claim more cash than exists. |
-| `broker_available_cash` | Computed with eToro's documented formula (§1.1, §9), **not** `totalBalance` (which is portfolio value, not cash): `available = credit − (Σ ordersForOpen[i].amount where mirrorID = 0 + Σ orders[i].amount)`. |
-| `sleeve_equity` | `sleeve_cash + market value of our UPRO lots + market value of our SCHG lots`. Explicitly **not** account equity — non-managed holdings never enter this number. |
+| `cash_reserve_usd` | An **absolute USD figure in config** (`nightwatch.config.StrategyConfig.cash_reserve_usd`) — the cash the operator withholds from the app for their own use, outside etoroNightwatch. `0` (also what `None`/absent collapses to) means "use all available cash"; the shipped `config.toml` default is `0.0`. Replaces `cash_allocation_usd` outright — the two models are not run side by side. |
+| `sleeve_cash` | `max(0.0, broker_available_cash − cash_reserve_usd)`. A reserve larger than what is actually available **clamps to zero, never negative** — the app then simply has nothing to trade, which is a warning condition (§4.3's calculator, tier 1), never a crash. |
+| `broker_available_cash` | Unchanged. Computed with eToro's documented formula (§1.1, §9), **not** `totalBalance` (which is portfolio value, not cash): `available = credit − (Σ ordersForOpen[i].amount where mirrorID = 0 + Σ orders[i].amount)`. |
+| `sleeve_equity` | Unchanged in shape: `sleeve_cash + market value of our UPRO lots + market value of our SCHG lots`. Explicitly **not** account equity — non-managed holdings never enter this number, under either model. |
 
-**Every place the strategy reads cash or equity now means the sleeve, not the account:**
+**Implementation line drawn here, deliberately.** This document specifies the runtime clamp
+(`sleeve_cash = max(0.0, broker_available_cash − cash_reserve_usd)`); the config field
+(`cash_reserve_usd`, with `>= 0` validation and `None → 0.0`) is implemented now in `config.py`
+and `config/config.toml`. The runtime computation itself — reading `broker_available_cash` from
+the broker and applying the formula — belongs to step 9's session engine, which is still a stub
+(`engine/preflight.py`, `engine/session.py` not yet built). Building that arithmetic into engine
+code that doesn't exist yet would be scaffolding with nothing to call it; the spec above is what
+step 9 must implement, verbatim, when it exists.
+
+**Every place the strategy reads cash or equity means the sleeve, not the account — unchanged by
+the move to exclusion**, because `sleeve_cash` and `sleeve_equity` keep the same downstream shape
+regardless of how `sleeve_cash` itself is computed:
 
 - the G-B cash gate in `_buy_if_allowed`
 - `cash_target = 8 × order_size`
@@ -543,7 +592,16 @@ controls only a slice, the arithmetic is wrong in both directions, and not symme
 worst case is the core floor computed against an account equity figure far larger than what the
 app actually manages, which **permanently blocks buys** the sleeve could otherwise afford.
 Getting this half-right — reading the sleeve in some places and the account in others — is
-worse than not doing it at all, because the failure is silent arithmetic, not a crash.
+worse than not doing it at all, because the failure is silent arithmetic, not a crash. This risk
+is unaffected by exclusion vs. inclusion; only the *size* of the sleeve changed, not what reads
+it or how.
+
+**A new risk exclusion introduces — tracked in §12.** Under inclusion, cash deposited for
+purposes unrelated to the strategy was invisible to the app by construction. Under exclusion, any
+deposit above the reserve is **immediately tradable** — it silently enlarges the sleeve, and
+therefore the budget and order sizes, with no explicit act by the operator. See §12 for the full
+entry, including the `max_sleeve_cash_usd` safety ceiling the operator considered and **declined**
+on 2026-09-04 — reserve-only is the deliberate choice, not an unfinished one.
 
 ### 4.6 Budget: auto with override
 
@@ -585,6 +643,26 @@ network in the Rare/Restricted buckets; losing `SCHEDULE_EXACT_ALARM` **stops th
 cancels every future exact alarm**. Both are checked on every run and both fail **loudly** to
 Telegram, naming the exact Settings path to restore them. A quiet degradation here would look
 identical to "the market was closed."
+
+**Gate 10 is spec'd but not yet built — do not assume it exists because it's in this table.**
+"Stale/zero live rate" above is currently unimplemented: `Rate` carries the timestamp eToro
+actually returns (the live field is `date`, mapped to `Rate.timestamp` in
+`etoro/client.py::get_rates`), but `market/bars.py` never reads it. This was deferred twice on
+the same reasoning both times — a staleness check needs a "now" reference and a configured
+limit, and neither belongs in `market/bars.py` itself; they belong in preflight, which isn't
+built yet (steps 6 vs. 9, §11). This is not hypothetical: a live probe on 2026-09-04 with the
+market closed showed SCHG's `lastExecution` timestamped to the *prior* session's close while
+SPY's was current pre-market — two managed-set instruments, same moment, different staleness,
+proving a stale rate is a real state this app will see. Tracked as a risk in §12.
+
+Gate 10 also has no answer yet for a **bar-history gap** (a missing trading day in the middle of
+the 260-bar window, not just a stale tip) — see the bad-tick guard note in §6.G and the tracked
+risk in §12; `market/bars.py::missing_trading_days()` already exists as the diagnostic a future
+gate would call.
+
+**Gate 9 has an unhandled failure mode above it, not within it.** `market/calendar.py` runs
+`EASTERN = ZoneInfo("America/New_York")` at module import time, before gate 9 or any other gate
+runs. See the tracked risk in §12.
 
 Beyond the twelve gates above: an aborted run **never returns to Doze** — the wake lock is
 held so the device stays reachable for diagnosis in the morning. Everything else that used to
@@ -644,6 +722,14 @@ kinds are listed together below, grouped by what they protect against.
 | `max_open_lots` | Independent backstop; the strategy's own `MAX_LOTS = 60` (§1.4) is a strategy-level bound — this is a second, separate one. |
 | daily loss guard | If sleeve P&L for the day is worse than a configured threshold, halt and notify (feeds preflight gate 12 and auto-halt, §6.I). |
 
+**Not yet in this table, but should be.** `MAX_TICK_DEVIATION_PCT`, `LEVERAGED_TICK_DEVIATION_PCT`,
+`MIN_PLAUSIBLE_PRICE`, `LEVERAGED_SYMBOLS`, and `STALE_REFERENCE_TRADING_DAYS` (§6.G) are
+currently module-level constants in `market/bars.py`, not `RiskConfig` fields — so tuning the
+crash-guard today means a code change, not a config edit. They are risk knobs by every
+definition this table uses for the others; two independent build sessions reached this same
+conclusion and left them in place only because `config.py` was outside that step's scope. Move
+them into `RiskConfig` (`config.py`) the next time either file is touched.
+
 ### D. Symbol allowlist
 
 The **managed set** (§1.4) = {UPRO, SCHG}, hardcoded, plus SPY as signal-only. Two enforcement
@@ -686,11 +772,24 @@ against a real, multi-asset account.
 
 ### G. Bad-data safety
 
-- Reject a live rate whose timestamp is older than a configured staleness limit.
+- Reject a live rate whose timestamp is older than a configured staleness limit. **Not yet
+  implemented** — see the gate 10 note in §5 and the tracked risk in §12.
 - **Bad-tick guard:** reject a live price that deviates from the previous settled close by more
   than a configured percentage. The entry signal fires when `cone_5_z < −2`, so a single bad
   tick on the downside could manufacture a spurious buy signal — this is a real failure mode for
-  a system that trades on one live price point (§4.2), not a theoretical one.
+  a system that trades on one live price point (§4.2), not a theoretical one. `market/bars.py`
+  widens this tolerance multiplicatively with the number of elapsed NYSE sessions since the
+  last settled bar, capped at 10x the base per-session tolerance (200% for SPY/SCHG, 600% for
+  UPRO — see `compounded_deviation_pct()`), and logs at `ERROR` once the gap exceeds
+  `STALE_REFERENCE_TRADING_DAYS = 10`. That widening is a deliberate tradeoff so a genuine
+  multi-week drawdown doesn't get misread as a bad tick, but past roughly a week's gap only an
+  order-of-magnitude error still trips it — a real gap should be caught as a gap, not squeezed
+  through an ever-wider tolerance band. The structurally correct fix is a **preflight gate that
+  detects the gap directly** (`missing_trading_days()` already exists as the diagnostic) and
+  halts the session, alerts, and forces a re-seed, rather than trusting a stretched tolerance to
+  keep catching real errors indefinitely. An `ERROR` log alone is not sufficient here — this
+  runs on a phone that lives away from the user; it must alert over the Telegram path (§8) the
+  same as every other preflight failure. Tracked as a risk in §12.
 - Sanity-bound the signal itself: an implausible `|cone_5_z|` (say, > 10) **aborts** rather than
   trades on it.
 - Refuse to trade with fewer than 265 settled SPY bars (§1.4), or with any unsettled provisional
@@ -993,7 +1092,7 @@ app everything already proven on the probe, beyond the read-only table in §8.2:
   before reaching for anything heavier.
 
 **The boundary that does NOT move, and is deliberately in tension with "make everything
-remote":** arming live trading, changing `cash_allocation_usd` or any other config, and
+remote":** arming live trading, changing `cash_reserve_usd` or any other config, and
 anything that could originate a trade remain **local-only** (§6.E) — set in `config.toml` and
 the `NIGHTWATCH_ARM` environment variable on the device itself, never reachable from Telegram or
 an FCM command. This is not an oversight; it is the same invariant §8.2 already states — *a
@@ -1089,7 +1188,7 @@ static web app, sourced from the pushed snapshot:
 
 - **Account panel** — total cash, total equity, all broker positions (managed and non-managed),
   clearly labelled which is which.
-- **Sleeve panel**, visually separated from the account panel — `cash_allocation_usd`,
+- **Sleeve panel**, visually separated from the account panel — `cash_reserve_usd`,
   `sleeve_cash`, `sleeve_equity` (§4.5), sleeve unrealized and realized P&L, budget,
   `order_size`, `cash_target`, `recyclable_cash`, and today's `cone_z` / drawdown / tier.
 - **Positions table** — every field the API exposes: entry price, units, invested, leverage,
@@ -1179,7 +1278,7 @@ step-by-step console/CLI instructions behind steps 0–2.
 | 9 | Session engine: preflight (§5), executor, idempotency, reconciliation, sleeve accounting (§4.5) | |
 | 10 | Full app integration: Telegram inbound with escalation-only hourly poll and the allowlist (§8.2), snapshot push to the Worker, the web app now reading live data instead of the step-2 stub; embedded FastAPI demoted to LAN-only debug view (§9.5) | |
 | 11 | Demo end-to-end **on the phone, on battery**: scheduled wake → real demo orders → back to Doze, several consecutive sessions | **Gate** |
-| 12 | Go live: real keys, `NIGHTWATCH_ARM`, small `cash_allocation_usd`, watch closely | Your call |
+| 12 | Go live: real keys, `NIGHTWATCH_ARM`, a generous `cash_reserve_usd` so only a small sleeve is initially exposed, watch closely | Your call |
 
 **Do not build steps 3–12 on an unproven platform.** If the minimal APK (step 4) cannot reliably
 fire with network on battery on this specific handset, no amount of application code fixes it —
@@ -1204,6 +1303,10 @@ recorded here as a standing risk, not re-argued.
 | **OS upgrade resets power-management settings** — the Z10 is early in its support life and *will* take major upgrades | **High** | Runbook: re-verify all five OriginOS settings **and re-run a one-night proof** after every OS update. Host panel shows the last-verified date. |
 | **`SCHEDULE_EXACT_ALARM` revoked** — *"your app stops, and all future exact alarms are canceled"* | **High** | `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` receiver + `canScheduleExactAlarms()` in preflight gate 2. Never silently downgrade to an inexact alarm. |
 | **Orders near the close may behave differently than documented** | **High** | Step 11 on demo settles it; status 11 handled either way. |
+| **Live-rate staleness check is unimplemented** — `Rate.timestamp` (the live `date` field, §1.1) exists but `market/bars.py` never reads it, deferred twice pending preflight (§5 gate 10 note, §6.G). A live probe with the market closed caught SCHG timestamped to the prior session's close while SPY's was current — the same moment, two managed-set instruments, different staleness: a real condition, not a hypothetical one. | **High** | Build the check into preflight gate 10 before step 9 is considered done; it needs the "now" reference and the configured limit that only preflight has. |
+| **A bar-history gap is currently caught only by a stretched tolerance, not detected as a gap** — `market/bars.py`'s bad-tick guard (§6.G) widens multiplicatively with elapsed sessions, capped at 10x base (200% SPY/SCHG, 600% UPRO), past which only an order-of-magnitude error still trips it. `missing_trading_days()` exists as the diagnostic but nothing calls it to halt+reseed. | **High** | Build a preflight gate that calls `missing_trading_days()` directly and halts + re-seeds on a real gap, rather than relying on the tolerance band to keep catching errors indefinitely (§5 gate 10 note, §6.G). An `ERROR` log alone is insufficient — this must alert over Telegram (§8), the same as every other preflight failure, since the phone lives away from the user. |
+| **`get_portfolio()`'s `clientPortfolio` envelope handling is unverified against a genuinely non-empty portfolio** — every live probe so far ran against a demo account with 0 positions, which passes regardless of whether the envelope is unwrapped correctly. Step 9's reconciliation (§5 gate 11) treats an unmatched managed-symbol position as a hard preflight failure, so a wrong envelope read there is not a cosmetic bug. | Medium | Re-verify against a non-empty demo portfolio before trusting step 9. A 0-position pass is exactly the "check that passes because nothing happened" pattern (`doc/HANDOFF.md` §7 rule 1) — treat it as unverified, not as a pass. |
+| **A missing tz database makes `market/calendar.py` unimportable** — `EASTERN = ZoneInfo("America/New_York")` runs at module scope, so a missing tz database raises before `main()` and before any preflight gate runs, producing a bare traceback instead of the abort-hold-wakelock-notify behavior §5 promises for every other failure. Preflight gate 9 covers "not a trading day," not "the calendar module failed to import." | Medium | `tzdata` is pinned in `requirements.txt` for desktop CPython (Windows ships no system tz database; Android resolves `ZoneInfo` via the APEX mainline module, so this is a desktop-only exposure). Wrap the import at the app's entry point so an import failure still produces the graceful abort path, not a bare traceback. |
 | **No Android build tooling on the development machine** — no JDK, no Android SDK, no `adb` installed as of this writing | Medium | Recorded as an explicit prerequisite gap, not assumed away. §11 sequences the Firebase/Cloudflare infrastructure proof (steps 0–2) *before* this install (step 3) specifically so the tooling install is deferred until it's known to be worth doing. Installing it is mechanical (Android Studio or SDK Studio command-line tools + a JDK) but is real setup time, not yet spent. |
 | **Running on battery rather than mains** — a flat phone is a missed session with no alert | Medium | Preflight gate 2 aborts below 40% and says so; daily heartbeat makes a dead phone obvious; charge cap and periodic inspection for the opposite failure. |
 | **Battery swelling** from long periods on charge; 7300 mAh cell | Medium | 80% charge cap if available on OriginOS 6 (*unverified — whether the Funtouch-era path carries over is unconfirmed, community-sourced, confirm on device*); periodic physical inspection; replace at ~3 years. A swollen cell is a fire risk. |
@@ -1213,3 +1316,4 @@ recorded here as a standing risk, not re-argued.
 | Live signal uses a provisional close; backtest used the official one | Low–Medium | Inherent to trading before the close. Quantified by the forward test. |
 | **Cloudflare Worker outage, or the phone's push failing to reach it** | Low–Medium | The on-device `setAlarmClock()` trigger and the daily session (§7.2) are independent of the Worker — trading is unaffected. Telegram remains the reliable away-channel (§8). Only the on-demand web view is degraded; the LAN debug FastAPI view (§9.5) is a fallback if on the same Wi-Fi. |
 | **Stale snapshot on the web app** — the phone was unreachable when a refresh was requested | Low | The web app shows an explicit "as of" timestamp (§9.5) so staleness is visible, never assumed away; on-demand refresh (§9.1) retries via the same FCM path already relied on for inbound commands. |
+| **A deposit above the reserve silently enlarges the sleeve** — the mirror-image risk to the one exclusion (§4.5, operator decision 2026-09-04) just fixed. Under the old inclusion model, cash deposited for purposes unrelated to the strategy was invisible to the app by construction. Under exclusion, `sleeve_cash = max(0, broker_available_cash − cash_reserve_usd)`, so **any deposit above the reserve is immediately tradable** — it enlarges the sleeve, and therefore the budget and order sizes, with no explicit act by the operator. Real for an app that trades unattended on a phone, once a day, with no human in the loop to notice before the next session acts on it. | Medium–High | **Accepted, deliberately unmitigated in code.** A `max_sleeve_cash_usd` ceiling (`sleeve_cash = min(max_sleeve_cash_usd, max(0, broker_available_cash − cash_reserve_usd))`) was put to the operator on 2026-09-04 and **declined**: reserve-only is the chosen model, because a ceiling has a failure mode of its own — it must be raised by hand as the account grows, and if it isn't, the strategy silently stops scaling, which is the same class of quiet degradation exclusion was adopted to escape. Do not re-propose it unless the operator reopens the question. The mitigation is therefore operational, not structural: raise `cash_reserve_usd` by a deposit's amount before or immediately after it lands, same as any other config edit (§4.4), and treat every unexpected snapshot/status jump in `sleeve_cash` as a signal to check the account for an unplanned deposit. The sleeve figure and its reserve are on the status/snapshot panel (§9) precisely so this is visible without asking. |

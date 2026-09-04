@@ -34,17 +34,25 @@ def test_environment_selects_path_segment_and_credentials(
     config_path: Path, secrets_path: Path, host: DesktopHost
 ) -> None:
     """One config value drives both the URL path and the credential set
-    (DESIGN §1.1) -- there is no way to make them disagree."""
+    (DESIGN §1.1) -- there is no way to make them disagree.
+
+    Header mapping corrected 2026-09-04 against a live call: ``x-api-key``
+    (``api_key``) is the short, application-identifying key
+    (``ETORO_PUBLIC_KEY``); ``x-user-key`` (``user_key``) is the long,
+    per-user key (``ETORO_DEMO_PRIVATE_KEY``) -- the reverse of what this
+    test asserted before. See DESIGN §1.1 and ``config.py``'s
+    ``_CREDENTIAL_KEYS`` comment.
+    """
     secrets_path.write_text(
-        "ETORO_DEMO_API_KEY=demo-api\nETORO_DEMO_USER_KEY=demo-user\n",
+        "ETORO_DEMO_PRIVATE_KEY=demo-private\nETORO_PUBLIC_KEY=demo-public\n",
         encoding="utf-8",
     )
     config = load_config(config_path=config_path, secrets_path=secrets_path, env={}, host=host)
     assert config.etoro.path_segment == "demo/"
     assert config.etoro.orders_path() == "/api/v2/trading/execution/demo/orders"
     creds = config.etoro.write_credentials
-    assert creds.api_key == "demo-api"
-    assert creds.user_key == "demo-user"
+    assert creds.api_key == "demo-public"
+    assert creds.user_key == "demo-private"
 
 
 def test_forbidden_manual_override_of_derived_fields(

@@ -30,6 +30,17 @@ jinja2==3.1.4
 # --- dev / test only, not shipped in the APK --------------------------------
 pytest==8.3.4
 # Test runner (already installed in .venv per the task brief).
+tzdata==2025.2
+# market/calendar.py does `ZoneInfo("America/New_York")` at import time.
+# Desktop CPython on Windows ships no system tz database at all, so without
+# this package that import raises ZoneInfoNotFoundError before a single test
+# can even be collected. On-device this is a non-issue: Android 10+ ships
+# time zone rules as an APEX mainline module that zoneinfo resolves through
+# independently of any OS image (DESIGN.md §1.2, citing
+# https://source.android.com/docs/core/permissions/timezone-rules), so this
+# entry exists only for the desktop/forward-test venv and must NOT be added
+# to the Chaquopy `python { pip { install(...) } }` block once the app's own
+# build.gradle.kts exists.
 
 # --- explicitly NOT a dependency -------------------------------------------
 # numpy / pandas / scipy: the strategy module (DESIGN §1.4) is a small,
