@@ -1,26 +1,861 @@
-"""The eToro HTTP client (DESIGN §1.1, §4.3). Built in step 2, against demo.
+"""The eToro HTTP client (DESIGN §1.1, §4.3, §5, §6). Built in step 5, against demo.
 
-# TODO(step 2): Implement a client wrapping every endpoint this design uses:
-#   - GET  /balances                                   (gate 6 auth probe)
-#   - POST /api/v2/trading/info/eligibility             (gate 8)
-#   - GET  /api/v1/market-data/instruments/search        (resolve instrument ids)
-#   - GET  /api/v1/market-data/instruments/{id}/history/candles/{dir}/{interval}/{count}
-#   - GET  /api/v1/market-data/instruments/rates?instrumentIds=...
-#   - POST /api/v2/trading/execution/orders  and  .../demo/orders   (DESIGN §4.3)
-#   - POST /api/v1/trading/execution/market-close-orders/positions/{positionId}
-#   - GET  /api/v2/trading/info/orders:lookup            (poll to terminal status)
-#   - GET  /trading/info/trade/history                   (webapp trade history,
-#          capped at just under 1 year per request per DESIGN §8 — page + cache)
-# Requirements carried over from config.py's design:
-#   - Never build a URL by hand-concatenating "demo"; use
-#     EtoroConfig.orders_path() / .path_segment so demo/real cannot drift from
-#     the bound credential set (DESIGN §1.1).
-#   - Attach headers via etoro/auth.py; rate-limit via etoro/ratelimit.py;
-#     raise only etoro/errors.py exceptions.
-#   - HTTP 200 means accepted, not filled — every order call needs a
-#     poll-to-terminal helper backed by orders:lookup (DESIGN §1.1).
-#   - Compare the response's Date header against local time for preflight
-#     gate 4 (clock skew > 60s).
-# Prefer stdlib urllib or a single pinned dependency (see requirements.txt) —
-# whatever is chosen must run unmodified under Chaquopy.
+Structural safety, restated from DESIGN §6.A because it belongs in code, not
+just in a comment: every order this client can possibly send carries
+``leverage=1``, ``transaction="buy"``, ``settlementType="real"``. These are
+module-level constants, never read from ``config.toml`` and never accepted as
+call parameters with a different value — see :data:`MAX_LEVERAGE`,
+:data:`TRANSACTION`, :data:`SETTLEMENT_TYPE`, and
+:class:`~nightwatch.etoro.models.OrderRequest`, which independently refuses
+to construct with anything else.
+
+Environment/credential structural safety (DESIGN §1.1, §6.F): this client
+takes a whole :class:`~nightwatch.config.EtoroConfig`, never a bare
+``(base_url, api_key, user_key)`` tuple. The URL path segment
+(``.../demo/...`` vs ``.../...``) and the credential pair are both derived,
+inside :class:`EtoroConfig`, from the single ``environment`` value — so there
+is no constructor parameter through which a caller could hand this client a
+real-money URL and a demo key, or vice versa. :meth:`EtoroClient.__init__`
+additionally asserts the derived credentials' label agrees with the
+configured environment as a defense-in-depth belt-and-braces check (DESIGN
+§7's "should be unreachable is not the same guarantee as is checked").
+Preflight gate 7 goes further and probes the *live API* for the credential's
+actual bound environment via :meth:`EtoroClient.verify_environment`, because
+a config value can be wrong in a way no amount of local type-checking catches.
 """
+
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any, Callable, Final, Iterable, Mapping, Sequence
+
+import httpx
+
+from ..config import Credentials, EtoroConfig
+from ..db.repo import Instrument, Repo
+from . import auth
+from .errors import (
+    EtoroAuthError,
+    EtoroEligibilityError,
+    EtoroEnvironmentMismatchError,
+    EtoroError,
+    EtoroNetworkError,
+    EtoroRateLimitError,
+    EtoroServerError,
+    EtoroTimeoutError,
+    EtoroValidationError,
+)
+from .models import (
+    Balance,
+    Candle,
+    CloseRequest,
+    Eligibility,
+    EligibilityBatchResult,
+    InstrumentSearchResult,
+    OrderRequest,
+    OrderResult,
+    OrderStatus,
+    Position,
+    Rate,
+    TradeHistoryEntry,
+    compute_available_cash,
+)
+from .ratelimit import RateLimiter, RequestClass
+
+__all__ = [
+    "MAX_LEVERAGE",
+    "TRANSACTION",
+    "SETTLEMENT_TYPE",
+    "MAX_ELIGIBILITY_BATCH",
+    "MAX_TRADE_HISTORY_DAYS",
+    "PollResult",
+    "EtoroClient",
+]
+
+_logger = logging.getLogger("nightwatch.etoro.client")
+
+# ---------------------------------------------------------------------------
+# Structural safety constants (DESIGN §6.A). These are read by
+# nightwatch.etoro.models.OrderRequest too; kept here as the module callers
+# reach for, and re-exported, so there is exactly one place in the codebase
+# that could ever be edited to change them -- and doing so still would not
+# help, because every call site that builds an OrderRequest passes these
+# constants explicitly rather than accepting a caller override.
+# ---------------------------------------------------------------------------
+
+#: Hardcoded. Never a config.toml value. UPRO's own 3x leverage is achieved by
+#: buying the ETF unleveraged; our order's leverage is always exactly 1.
+MAX_LEVERAGE: Final[int] = 1
+
+#: Hardcoded. There is no code path in this client that can send "sellShort"
+#: or "buyToCover" -- reducing a holding always closes a position instead.
+TRANSACTION: Final[str] = "buy"
+
+#: Hardcoded. Never "cfd", "marginTrade", or "realFutures".
+SETTLEMENT_TYPE: Final[str] = "real"
+
+#: DESIGN §1.1: eligibility is queried in batches of at most 100 instruments.
+MAX_ELIGIBILITY_BATCH: Final[int] = 100
+
+#: DESIGN §1.1: trade history lookback is documented as under one year.
+MAX_TRADE_HISTORY_DAYS: Final[int] = 364
+
+_DEFAULT_MAX_ATTEMPTS: Final[int] = 5
+_DEFAULT_BASE_DELAY: Final[float] = 1.0
+_DEFAULT_MAX_DELAY: Final[float] = 20.0
+_DEFAULT_POLL_INTERVAL: Final[float] = 2.0
+_DEFAULT_POLL_TIMEOUT: Final[float] = 90.0
+
+
+@dataclass(frozen=True, slots=True)
+class PollResult:
+    """The outcome of a bounded poll-to-terminal loop (DESIGN §1.1, §6.H).
+
+    ``timed_out`` is True when the configured timeout was reached without
+    the order settling into a terminal status -- ``order`` in that case still
+    carries the last known (possibly WAITING_FOR_MARKET) status, and callers
+    must **never** treat a timeout as a fill.
+    """
+
+    order: OrderResult
+    attempts: int
+    timed_out: bool
+
+
+class EtoroClient:
+    """The eToro HTTP client wrapping every endpoint DESIGN §1.1/§4.3 uses.
+
+    Construction never performs any HTTP call itself (mirrors
+    :class:`~nightwatch.notify.telegram.TelegramNotifier`'s pattern of "safe
+    to construct, calls only happen in methods").
+    """
+
+    def __init__(
+        self,
+        config: EtoroConfig,
+        *,
+        role: str = "write",
+        transport: httpx.BaseTransport | None = None,
+        client: httpx.Client | None = None,
+        repo: Repo | None = None,
+        rate_limiter: RateLimiter | None = None,
+        sleep: Callable[[float], None] = time.sleep,
+        clock: Callable[[], float] = time.monotonic,
+        max_attempts: int = _DEFAULT_MAX_ATTEMPTS,
+        poll_interval_seconds: float = _DEFAULT_POLL_INTERVAL,
+        poll_timeout_seconds: float = _DEFAULT_POLL_TIMEOUT,
+    ) -> None:
+        if role not in ("write", "read"):
+            raise ValueError(f"role must be 'write' or 'read', got {role!r}")
+        self._config = config
+        self._role = role
+        # Structural safety: the ONLY way this object ever gets credentials is
+        # by asking `config` for them, which derives the pair from
+        # `config.environment`. There is no constructor parameter through
+        # which a caller could inject a mismatched pair.
+        self._credentials: Credentials = (
+            config.write_credentials if role == "write" else config.read_credentials
+        )
+        expected_prefix = f"{config.environment.value}:"
+        if not self._credentials.label.startswith(expected_prefix):
+            # Should be unreachable given EtoroConfig's own invariants -- kept
+            # anyway per DESIGN §6.A's "checked anyway" principle.
+            raise EtoroEnvironmentMismatchError(
+                configured=config.environment.value,
+                detected=self._credentials.label,
+            )
+
+        self._owns_client = client is None
+        self._http = client or httpx.Client(
+            base_url=config.base_url,
+            timeout=config.timeout_seconds,
+            transport=transport,
+        )
+        self._repo = repo
+        self._limiter = rate_limiter or RateLimiter()
+        self._sleep = sleep
+        self._clock = clock
+        self._max_attempts = max_attempts
+        self._poll_interval = poll_interval_seconds
+        self._poll_timeout = poll_timeout_seconds
+        #: The most recent response's `Date` header, for preflight gate 4
+        #: (clock skew > 60s aborts). `None` until at least one call is made.
+        self.last_server_date: str | None = None
+
+    # -- lifecycle -----------------------------------------------------------
+
+    def close(self) -> None:
+        if self._owns_client:
+            self._http.close()
+
+    def __enter__(self) -> "EtoroClient":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    @property
+    def environment(self) -> str:
+        return self._config.environment.value
+
+    @property
+    def is_demo(self) -> bool:
+        return self._config.environment.value == "demo"
+
+    # -- core transport --------------------------------------------------------
+
+    def _wait_for_capacity(self, request_class: RequestClass) -> None:
+        deadline = self._clock() + 120.0  # generous local safety valve
+        while not self._limiter.try_acquire(request_class):
+            wait = min(self._limiter.time_until_available(request_class), 5.0)
+            if self._clock() + wait > deadline:
+                # Do not hang forever locally; let the request proceed and
+                # rely on the server's own 429 + Retry-After as the backstop.
+                break
+            self._sleep(max(wait, 0.01))
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        request_class: RequestClass,
+        params: Mapping[str, Any] | None = None,
+        json_body: Any | None = None,
+        request_id: str | None = None,
+    ) -> httpx.Response:
+        """Send one request with rate limiting, retries, and typed errors.
+
+        Retry policy (DESIGN's stated policy, carried over from
+        TelegramNotifier's proven shape): network errors and 5xx retry with
+        bounded exponential backoff; 429 retries honouring `Retry-After`;
+        every other 4xx is raised immediately, never retried.
+        """
+        last_error: Exception | str = "unknown error"
+        for attempt in range(1, self._max_attempts + 1):
+            self._wait_for_capacity(request_class)
+            headers = auth.build_headers(self._credentials, request_id)
+            try:
+                response = self._http.request(
+                    method, path, params=params, json=json_body, headers=headers
+                )
+            except httpx.TimeoutException as exc:
+                last_error = exc
+                if attempt == self._max_attempts:
+                    raise EtoroTimeoutError(f"timed out calling {path}: {exc}") from exc
+                self._sleep(self._backoff(attempt))
+                continue
+            except httpx.RequestError as exc:
+                last_error = exc
+                if attempt == self._max_attempts:
+                    raise EtoroNetworkError(f"network error calling {path}: {exc}") from exc
+                self._sleep(self._backoff(attempt))
+                continue
+
+            self.last_server_date = response.headers.get("Date", self.last_server_date)
+            self._limiter.reconcile(request_class, response.headers)
+
+            if response.status_code < 300:
+                return response
+
+            if response.status_code in (401, 403):
+                raise EtoroAuthError(
+                    f"{response.status_code} from {path}: {self._safe_body(response)}"
+                )
+
+            if response.status_code == 429:
+                retry_after = RateLimiter.retry_after_from_headers(response.headers) or 1.0
+                last_error = f"429 rate limited (retry_after={retry_after}s)"
+                if attempt == self._max_attempts:
+                    raise EtoroRateLimitError(str(last_error), retry_after=retry_after)
+                self._sleep(retry_after)
+                continue
+
+            if 500 <= response.status_code < 600:
+                last_error = f"{response.status_code} server error: {self._safe_body(response)}"
+                if attempt == self._max_attempts:
+                    raise EtoroServerError(str(last_error), status_code=response.status_code)
+                self._sleep(self._backoff(attempt))
+                continue
+
+            # Any other 4xx: permanent, never retried.
+            raise EtoroValidationError(
+                f"{response.status_code} from {path}: {self._safe_body(response)}",
+                status_code=response.status_code,
+            )
+
+        # Unreachable in practice (every branch above either returns or
+        # raises on the final attempt), but keeps type-checkers honest.
+        raise EtoroError(str(last_error))
+
+    @staticmethod
+    def _safe_body(response: httpx.Response) -> str:
+        try:
+            return response.text[:500]
+        except Exception:  # pragma: no cover - defensive
+            return "<unreadable body>"
+
+    def _backoff(self, attempt: int) -> float:
+        return min(_DEFAULT_BASE_DELAY * (2 ** (attempt - 1)), _DEFAULT_MAX_DELAY)
+
+    def _demo(self) -> str:
+        """The URL path segment for the *current* environment (DESIGN §1.1).
+
+        Never call this in place of ``config.path_segment`` from a place that
+        doesn't already hold this client's own config -- kept as a thin
+        wrapper purely so every path-building call site below reads
+        identically.
+        """
+        return self._config.path_segment
+
+    # -- gate 6/9: auth probe + balances --------------------------------------
+
+    def get_balance(self) -> Balance:
+        """``GET /balances`` (preflight gate 6 auth probe; DESIGN §4.5, §9).
+
+        Computes ``available_cash`` with eToro's documented formula, never
+        ``totalBalance``.
+        """
+        response = self._request(
+            "GET", f"/api/v1/{self._demo()}balances", request_class="read"
+        )
+        data = response.json()
+        credit = float(data.get("credit", 0.0))
+        available = compute_available_cash(
+            credit,
+            orders_for_open=data.get("ordersForOpen", []),
+            orders=data.get("orders", []),
+        )
+        return Balance(
+            credit=credit,
+            total_balance=(
+                float(data["totalBalance"]) if data.get("totalBalance") is not None else None
+            ),
+            available_cash=available,
+            raw=data,
+        )
+
+    def verify_environment(self) -> None:
+        """Probe that the credential's bound environment matches config.
+
+        DESIGN §5 gate 7 / §6.F: this must be *detected*, not assumed. A
+        config value alone cannot prove which environment a key is bound to
+        -- eToro binds a key to an environment at creation time and does not
+        expose that as a documented, stable response field, so this method
+        treats a handful of plausible signals as a *positive* mismatch
+        indicator without treating their absence as proof of a match:
+
+        * an explicit boolean/string field in the balances payload (several
+          plausible names are checked, since the exact shape has not yet
+          been observed against a live key -- see the module docstring on
+          `EtoroClient` and the HANDOFF note this ships with);
+        * a real-money-shaped response (e.g. a non-trivial `totalBalance`)
+          returned while `config.environment` is `demo`, which is the one
+          asymmetric signal that's fairly safe to trust: eToro demo accounts
+          are seeded with a fixed, well-known balance, not zero and not
+          identical to a funded real account by chance.
+
+        Raises :class:`EtoroEnvironmentMismatchError` on a detected mismatch.
+        Raises nothing (returns normally) when no positive signal is found --
+        that is "unable to confirm," not "confirmed OK," and callers relying
+        on this for gate 7 should treat it only as an additional check
+        layered on top of `get_balance()` succeeding at all (a real key
+        pointed at a demo-only endpoint, or vice versa, still fails outright
+        with 401/403 in the common case, which `get_balance` already turns
+        into `EtoroAuthError`).
+        """
+        response = self._request(
+            "GET", f"/api/v1/{self._demo()}balances", request_class="read"
+        )
+        data = response.json()
+        detected = self._detect_environment(data)
+        if detected is not None and detected != self._config.environment.value:
+            raise EtoroEnvironmentMismatchError(
+                configured=self._config.environment.value, detected=detected
+            )
+
+    @staticmethod
+    def _detect_environment(payload: Mapping[str, Any]) -> str | None:
+        """Best-effort extraction of an environment signal from a balances body.
+
+        Returns ``"demo"``, ``"real"``, or ``None`` if no signal is present.
+        Kept as a static, independently-testable function so its heuristic
+        can be exercised with a hand-built payload without any HTTP call.
+        """
+        for key in ("isDemo", "is_demo", "demo"):
+            if key in payload:
+                value = payload[key]
+                if isinstance(value, bool):
+                    return "demo" if value else "real"
+        for key in ("accountType", "account_type", "environment"):
+            if key in payload:
+                value = str(payload[key]).strip().lower()
+                if value in ("demo", "virtual", "practice"):
+                    return "demo"
+                if value in ("real", "live"):
+                    return "real"
+        return None
+
+    # -- gate 8, portfolio, pnl ------------------------------------------------
+
+    def get_portfolio(self) -> list[Position]:
+        """``GET /trading/info/portfolio`` (or the `/demo/` variant)."""
+        response = self._request(
+            "GET", f"/api/v1/trading/info/{self._demo()}portfolio", request_class="read"
+        )
+        data = response.json()
+        positions_raw = data.get("positions", data if isinstance(data, list) else [])
+        return [self._parse_position(p) for p in positions_raw]
+
+    def get_pnl(self) -> dict[str, Any]:
+        """``GET /trading/info/real/pnl`` (or the `/demo/` variant)."""
+        segment = "demo" if self.is_demo else "real"
+        response = self._request(
+            "GET", f"/api/v1/trading/info/{segment}/pnl", request_class="read"
+        )
+        return dict(response.json())
+
+    @staticmethod
+    def _parse_position(raw: Mapping[str, Any]) -> Position:
+        return Position(
+            position_id=str(raw.get("positionID") or raw.get("positionId") or raw.get("id")),
+            instrument_id=int(raw.get("instrumentID", raw.get("instrumentId", 0))),
+            symbol=raw.get("symbol"),
+            units=float(raw.get("units", 0.0)),
+            entry_price=float(raw.get("openRate", raw.get("entryPrice", 0.0))),
+            current_price=(
+                float(raw["currentRate"]) if raw.get("currentRate") is not None else None
+            ),
+            invested=(float(raw["invested"]) if raw.get("invested") is not None else None),
+            leverage=int(raw.get("leverage", 1)),
+            is_buy=bool(raw.get("isBuy", True)),
+            unrealized_pnl=(
+                float(raw["unrealizedPL"]) if raw.get("unrealizedPL") is not None else None
+            ),
+            open_date=raw.get("openDateTime"),
+            raw=dict(raw),
+        )
+
+    # -- trade history, paged, <1yr window ------------------------------------
+
+    def get_trade_history(
+        self,
+        *,
+        start_date: str,
+        end_date: str,
+        page_size: int = 200,
+        max_pages: int = 50,
+    ) -> list[TradeHistoryEntry]:
+        """``GET /trading/info/trade/history``, paged, <1yr lookback enforced.
+
+        Args:
+            start_date: ``YYYY-MM-DD``, inclusive.
+            end_date: ``YYYY-MM-DD``, inclusive.
+        """
+        start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
+        end = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
+        if (end - start).days > MAX_TRADE_HISTORY_DAYS:
+            raise EtoroValidationError(
+                f"trade history window {start_date}..{end_date} exceeds the "
+                f"documented <1yr lookback ({MAX_TRADE_HISTORY_DAYS} days)"
+            )
+
+        entries: list[TradeHistoryEntry] = []
+        page = 0
+        while page < max_pages:
+            response = self._request(
+                "GET",
+                "/api/v1/trading/info/trade/history",
+                request_class="read",
+                params={
+                    "startDate": start_date,
+                    "endDate": end_date,
+                    "page": page,
+                    "pageSize": page_size,
+                },
+            )
+            data = response.json()
+            rows = data.get("items", data if isinstance(data, list) else [])
+            if not rows:
+                break
+            entries.extend(self._parse_trade_history_entry(r) for r in rows)
+            if len(rows) < page_size:
+                break
+            page += 1
+        return entries
+
+    @staticmethod
+    def _parse_trade_history_entry(raw: Mapping[str, Any]) -> TradeHistoryEntry:
+        return TradeHistoryEntry(
+            position_id=(
+                str(raw["positionID"]) if raw.get("positionID") is not None else None
+            ),
+            instrument_id=int(raw.get("instrumentID", raw.get("instrumentId", 0))),
+            symbol=raw.get("symbol"),
+            action=str(raw.get("action", "")),
+            units=float(raw.get("units", 0.0)),
+            open_rate=(float(raw["openRate"]) if raw.get("openRate") is not None else None),
+            close_rate=(float(raw["closeRate"]) if raw.get("closeRate") is not None else None),
+            profit=(float(raw["profit"]) if raw.get("profit") is not None else None),
+            open_date=raw.get("openDateTime"),
+            close_date=raw.get("closeDateTime"),
+            raw=dict(raw),
+        )
+
+    # -- instrument resolution + caching (immutable ids, cache via DB) --------
+
+    def search_instrument(self, symbol: str) -> InstrumentSearchResult:
+        """``GET /market-data/instruments/search`` for one ticker (uncached)."""
+        response = self._request(
+            "GET",
+            "/api/v1/market-data/instruments/search",
+            request_class="market_data",
+            params={"internalSymbolFull": symbol},
+        )
+        data = response.json()
+        rows = data.get("instruments", data if isinstance(data, list) else [data])
+        if not rows:
+            raise EtoroValidationError(f"no instrument found for symbol {symbol!r}")
+        row = rows[0]
+        return InstrumentSearchResult(
+            instrument_id=int(row.get("instrumentId", row.get("instrumentID"))),
+            symbol=symbol,
+            name=row.get("instrumentDisplayName") or row.get("name"),
+            exchange=row.get("exchangeName") or row.get("exchange"),
+            currency=row.get("instrumentCurrency") or row.get("currency"),
+            raw=dict(row),
+        )
+
+    def resolve_instrument_id(self, symbol: str) -> int:
+        """Resolve ``symbol`` to its immutable eToro instrument id.
+
+        Cached in the DB `instruments` table forever (ids are immutable per
+        DESIGN §1.1) -- a repeat call never hits the network once cached, and
+        never re-checks, since there is nothing to invalidate.
+        """
+        if self._repo is not None:
+            cached = self._repo.get_instrument(symbol)
+            if cached is not None:
+                return cached.instrument_id
+        result = self.search_instrument(symbol)
+        if self._repo is not None:
+            self._repo.upsert_instrument(
+                Instrument(
+                    symbol=symbol,
+                    instrument_id=result.instrument_id,
+                    name=result.name,
+                    exchange=result.exchange,
+                    currency=result.currency,
+                )
+            )
+        return result.instrument_id
+
+    def get_instruments(self, instrument_ids: Sequence[int]) -> list[dict[str, Any]]:
+        """``GET /market-data/instruments`` metadata for a set of ids."""
+        response = self._request(
+            "GET",
+            "/api/v1/market-data/instruments",
+            request_class="market_data",
+            params={"instrumentIds": ",".join(str(i) for i in instrument_ids)},
+        )
+        data = response.json()
+        return list(data.get("instruments", data if isinstance(data, list) else []))
+
+    # -- rates + candles ---------------------------------------------------
+
+    def get_rates(self, instrument_ids: Sequence[int]) -> dict[int, Rate]:
+        """``GET /market-data/instruments/rates`` -- live quotes, no market-open flag."""
+        response = self._request(
+            "GET",
+            "/api/v1/market-data/instruments/rates",
+            request_class="market_data",
+            params={"instrumentIds": ",".join(str(i) for i in instrument_ids)},
+        )
+        data = response.json()
+        rows = data.get("rates", data if isinstance(data, list) else [])
+        result: dict[int, Rate] = {}
+        for row in rows:
+            instrument_id = int(row.get("instrumentId", row.get("InstrumentID", 0)))
+            result[instrument_id] = Rate(
+                instrument_id=instrument_id,
+                bid=float(row.get("bid", row.get("Bid", 0.0))),
+                ask=float(row.get("ask", row.get("Ask", 0.0))),
+                last_execution=(
+                    float(row["lastExecution"]) if row.get("lastExecution") is not None else None
+                ),
+                timestamp=row.get("timestamp") or row.get("dateTime"),
+            )
+        return result
+
+    def get_candles(
+        self, instrument_id: int, *, direction: str = "backward", interval: str = "OneDay",
+        count: int = 400,
+    ) -> list[Candle]:
+        """``GET .../instruments/{id}/history/candles/{direction}/{interval}/{count}``."""
+        response = self._request(
+            "GET",
+            f"/api/v1/market-data/instruments/{instrument_id}/history/candles/"
+            f"{direction}/{interval}/{count}",
+            request_class="market_data",
+        )
+        data = response.json()
+        # Response shape observed in eToro's own docs nests candles under the
+        # instrument; tolerate both a flat list and that nested shape.
+        rows: Iterable[Mapping[str, Any]]
+        if isinstance(data, list):
+            rows = data
+        else:
+            candles_block = data.get("candles", [data])
+            if candles_block and isinstance(candles_block[0], dict) and "candles" in candles_block[0]:
+                rows = candles_block[0]["candles"]
+            else:
+                rows = candles_block
+        return [
+            Candle(
+                date=str(row.get("fromDate") or row.get("date") or row.get("timestamp"))[:10],
+                open=float(row.get("open", row.get("Open", 0.0))),
+                high=float(row.get("high", row.get("High", 0.0))),
+                low=float(row.get("low", row.get("Low", 0.0))),
+                close=float(row.get("close", row.get("Close", 0.0))),
+                volume=(float(row["volume"]) if row.get("volume") is not None else None),
+            )
+            for row in rows
+        ]
+
+    # -- eligibility, batched ≤100 ---------------------------------------------
+
+    def get_eligibility(self, instrument_ids: Sequence[int]) -> EligibilityBatchResult:
+        """``POST /trading/info/eligibility``, batched at ≤100 ids per call."""
+        results: dict[int, Eligibility] = {}
+        ids = list(instrument_ids)
+        for start in range(0, len(ids), MAX_ELIGIBILITY_BATCH):
+            batch = ids[start : start + MAX_ELIGIBILITY_BATCH]
+            response = self._request(
+                "POST",
+                "/api/v2/trading/info/eligibility",
+                request_class="eligibility",
+                json_body={"instrumentIds": batch},
+            )
+            data = response.json()
+            rows = data.get("eligibility", data if isinstance(data, list) else [])
+            for row in rows:
+                instrument_id = int(row.get("instrumentId", row.get("instrumentID", 0)))
+                results[instrument_id] = Eligibility(
+                    instrument_id=instrument_id,
+                    allow_open_position=bool(row.get("allowOpenPosition", False)),
+                    min_position_exposure=(
+                        float(row["minPositionExposure"])
+                        if row.get("minPositionExposure") is not None
+                        else None
+                    ),
+                    min_position_amount=(
+                        float(row["minPositionAmount"])
+                        if row.get("minPositionAmount") is not None
+                        else None
+                    ),
+                    allow_partial_close=(
+                        bool(row["allowPartialClose"])
+                        if row.get("allowPartialClose") is not None
+                        else None
+                    ),
+                    raw=dict(row),
+                )
+        return EligibilityBatchResult(results=results)
+
+    def check_eligibility_for_order(
+        self, instrument_id: int, order_size: float
+    ) -> Eligibility:
+        """Fetch eligibility for one instrument and enforce the minimum-size
+        guard (DESIGN §4.3): blocks and alerts loudly, never silently resizes.
+        """
+        batch = self.get_eligibility([instrument_id])
+        eligibility = batch.get(instrument_id)
+        if eligibility is None:
+            raise EtoroEligibilityError(
+                f"no eligibility data returned for instrument {instrument_id}"
+            )
+        if not eligibility.allow_open_position:
+            raise EtoroEligibilityError(
+                f"instrument {instrument_id} is not open-able "
+                "(allowOpenPosition=false)"
+            )
+        if (
+            eligibility.min_position_exposure is not None
+            and order_size < eligibility.min_position_exposure
+        ):
+            raise EtoroEligibilityError(
+                f"order_size {order_size} is below instrument {instrument_id}'s "
+                f"minPositionExposure {eligibility.min_position_exposure} -- "
+                "blocked, not resized"
+            )
+        return eligibility
+
+    # -- costs -----------------------------------------------------------------
+
+    def get_costs(self, instrument_id: int, amount: float) -> dict[str, Any]:
+        """``POST /trading/info/costs``."""
+        response = self._request(
+            "POST",
+            "/api/v2/trading/info/costs",
+            request_class="read",
+            json_body={"instrumentId": instrument_id, "amount": amount, "leverage": MAX_LEVERAGE},
+        )
+        return dict(response.json())
+
+    # -- orders: open (buy) ------------------------------------------------
+
+    def place_buy_order(self, request_id: str, instrument_id: int, amount_usd: float) -> str:
+        """``POST /trading/execution/orders`` (or `/demo/orders`) -- DESIGN §4.3.
+
+        Args:
+            request_id: The caller-supplied ``x-request-id`` UUID. MUST have
+                already been persisted to the ``intents`` table (DESIGN §5)
+                before this call -- this method does not generate its own id,
+                by design, so recovery can look it up by ``referenceId``.
+            instrument_id: The resolved (and immutable) eToro instrument id.
+            amount_usd: USD notional to open (opens are USD-denominated).
+
+        Returns:
+            eToro's ``orderId`` string. HTTP 200 here means *accepted*, not
+            filled -- callers MUST follow up with :meth:`poll_order_to_terminal`.
+        """
+        body = OrderRequest(instrument_id=instrument_id, amount=amount_usd).to_json()
+        response = self._request(
+            "POST",
+            f"/api/v2/trading/execution/{self._demo()}orders",
+            request_class="write",
+            json_body=body,
+            request_id=request_id,
+        )
+        data = response.json()
+        order_id = data.get("orderId") or data.get("orderID") or data.get("id")
+        return str(order_id) if order_id is not None else ""
+
+    # -- orders: close (full close only) --------------------------------------
+
+    def close_position(self, request_id: str, position_id: str, instrument_id: int) -> str:
+        """``POST /market-close-orders/positions/{positionId}`` (DESIGN §4.3).
+
+        Always a full close -- ``UnitsToDeduct: null`` -- because one lot is
+        exactly one eToro position and partial close is explicitly out of
+        scope for this app (see :class:`~nightwatch.etoro.models.CloseRequest`,
+        which refuses to construct with a non-``None`` unit count).
+        """
+        body = CloseRequest(position_id=position_id, instrument_id=instrument_id).to_json()
+        response = self._request(
+            "POST",
+            f"/api/v1/trading/execution/{self._demo()}market-close-orders/positions/{position_id}",
+            request_class="write",
+            json_body=body,
+            request_id=request_id,
+        )
+        data = response.json()
+        order_id = data.get("orderId") or data.get("orderID") or data.get("id")
+        return str(order_id) if order_id is not None else ""
+
+    # -- orders:lookup, poll to terminal, referenceId recovery ---------------
+
+    def lookup_order(
+        self, *, order_id: str | None = None, reference_id: str | None = None
+    ) -> OrderResult:
+        """``GET /v2/trading/info/orders:lookup`` for one order.
+
+        Exactly one of ``order_id``/``reference_id`` should normally be given;
+        ``reference_id`` is what a crash-recovery path uses (DESIGN §6.H) when
+        the original response was lost and the local ``x-request-id`` is the
+        only handle left.
+        """
+        if order_id is None and reference_id is None:
+            raise ValueError("lookup_order requires order_id or reference_id")
+        params: dict[str, Any] = {}
+        if order_id is not None:
+            params["orderId"] = order_id
+        if reference_id is not None:
+            params["referenceId"] = reference_id
+        response = self._request(
+            "GET",
+            "/api/v2/trading/info/orders:lookup",
+            request_class="read",
+            params=params,
+        )
+        return self._parse_order_result(response.json())
+
+    def recover_by_reference_id(self, reference_id: str) -> OrderResult | None:
+        """Recover a possibly-lost response by ``referenceId`` (DESIGN §6.H).
+
+        Returns ``None`` if eToro has no record of the order at all -- which
+        means the original request never reached the server and it is safe
+        to (re)submit; any other result means it did, and must never be
+        submitted again.
+        """
+        try:
+            return self.lookup_order(reference_id=reference_id)
+        except EtoroValidationError:
+            return None
+
+    @staticmethod
+    def _parse_order_result(data: Mapping[str, Any]) -> OrderResult:
+        row = data.get("order", data)
+        status_raw = row.get("status", row.get("orderStatus"))
+        try:
+            status = OrderStatus(int(status_raw))
+        except (TypeError, ValueError):
+            status = OrderStatus.RECEIVED
+        return OrderResult(
+            order_id=(str(row["orderId"]) if row.get("orderId") is not None else None),
+            reference_id=(
+                str(row["referenceId"]) if row.get("referenceId") is not None else None
+            ),
+            status=status,
+            position_id=(
+                str(row["positionId"]) if row.get("positionId") is not None else None
+            ),
+            fill_price=(float(row["executionPrice"]) if row.get("executionPrice") is not None else None),
+            fill_units=(float(row["units"]) if row.get("units") is not None else None),
+            fill_amount_usd=(float(row["amount"]) if row.get("amount") is not None else None),
+            reject_reason=row.get("rejectReason"),
+            raw=dict(row),
+        )
+
+    def poll_order_to_terminal(
+        self,
+        *,
+        order_id: str | None = None,
+        reference_id: str | None = None,
+        interval_seconds: float | None = None,
+        timeout_seconds: float | None = None,
+    ) -> PollResult:
+        """Poll ``orders:lookup`` until a terminal status or a timeout.
+
+        DESIGN §1.1/§6.H: HTTP 200 on submission means *accepted*, not
+        *filled*. Status 11 (WaitingForMarket) is explicitly "queued, not
+        filled" and is never treated as terminal here -- polling continues
+        (bounded by ``timeout_seconds``) rather than returning early on it.
+        A timeout returns the last observed status with ``timed_out=True``;
+        it is the caller's job to never read that as a fill (`OrderResult`'s
+        own `is_filled` already encodes this, since WAITING_FOR_MARKET and
+        every non-terminal status are excluded from `FILLED_ORDER_STATUSES`).
+        """
+        interval = interval_seconds if interval_seconds is not None else self._poll_interval
+        timeout = timeout_seconds if timeout_seconds is not None else self._poll_timeout
+        deadline = self._clock() + timeout
+        attempts = 0
+        result = self.lookup_order(order_id=order_id, reference_id=reference_id)
+        attempts += 1
+        while not result.is_terminal:
+            if self._clock() >= deadline:
+                return PollResult(order=result, attempts=attempts, timed_out=True)
+            self._sleep(interval)
+            result = self.lookup_order(
+                order_id=order_id or result.order_id, reference_id=reference_id
+            )
+            attempts += 1
+        if result.status in (OrderStatus.REJECTED, OrderStatus.REJECTED_PARTIALLY_FILLED):
+            _logger.warning(
+                "order rejected: order_id=%s reference_id=%s reason=%s",
+                order_id, reference_id, result.reject_reason,
+            )
+        return PollResult(order=result, attempts=attempts, timed_out=False)
