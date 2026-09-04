@@ -90,7 +90,7 @@ no nonce, no JWT — secret handling, not auth mechanics, was ever the hard part
 | **8** | Forward-test harness + fake eToro broker | See §6 below — this is the user's explicit new ask |
 | 9 | Session engine: preflight, executor, idempotency, reconciliation, sleeve accounting | §5 (preflight), §4.5 (sleeve) |
 | 10 | Full integration: Telegram inbound, snapshot push, live web app | Reuses the exact plumbing already proven on the probe |
-| 11 | Demo end-to-end **on the phone** | Multiple consecutive sessions, on battery |
+| 11 | Demo end-to-end **on the phone** | Multiple consecutive sessions, on battery. **Acceptance criterion (operator decision 2026-09-04, DESIGN §11/§12):** at least one session must run while the demo account genuinely holds a non-empty position, with `get_portfolio()`'s `clientPortfolio` envelope handling confirmed correct against it — every prior probe passed against 0 positions, which is the "check that passes because nothing happened" pattern (§7 rule 1 below), not proof the parsing is right. The manual trade controls spec'd in DESIGN §9.7 are the intended way to get a real position onto the demo account for this. |
 | 12 | Go live | Real keys, `NIGHTWATCH_ARM`, a generous `cash_reserve_usd` so only a small sleeve is initially exposed |
 
 **No real-money credential is used before step 12. This is non-negotiable and is stated in the
@@ -229,7 +229,10 @@ result.
    because the phone lives away from the user most of the time — but arming live trading,
    changing `cash_reserve_usd`, or any other config write stay local-only by design (§6.E).
    This tension is intentional and stated in the design; do not silently resolve it by expanding
-   what Telegram or the Worker's `/command` route can do.
+   what Telegram or the Worker's `/command` route can do. The manual trade controls spec'd in
+   DESIGN §9.7 are the concrete test of this rule: they exist only on the on-device UI and the
+   LAN-only embedded dashboard, never on the Pages web app, the Worker, or Telegram, and still
+   require `NIGHTWATCH_ARM` in live mode like any other order.
 5. **Verify claims about delivery, not just acceptance.** An FCM message ID or an HTTP 200 from
    a send endpoint proves the message was *accepted*, not that it was *delivered* — FCM queues
    for offline devices. This distinction mattered concretely this session.

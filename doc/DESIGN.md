@@ -757,6 +757,12 @@ against a real, multi-asset account.
   alone.
 - **The invariant:** every kill switch in §6.I can only ever **stop** trading. None of them,
   alone or combined with anything else, can **start** a trade.
+- This invariant is what bounds the manual trade controls spec'd in §9.7: they are a UI on top
+  of the same executor, not a second path to money. In `mode = "live"` a manually-placed order
+  still requires `NIGHTWATCH_ARM` exactly as an automated order does, and the controls are
+  reachable only from the on-device UI or the LAN-only embedded dashboard — never from the
+  Worker or Telegram (§8.2, §8.3), where a compromised channel could otherwise use them to move
+  money.
 
 ### F. Environment safety
 
@@ -1174,6 +1180,13 @@ The original idea — have the web app talk to the Telegram bot directly — was
   never be publicly readable** — the read token gates it.
 - No Telegram bot token, no eToro API key, ever reaches the browser or the Worker's public
   surface.
+- **What the remote app deliberately does not get: any way to place, size, or close a trade.**
+  §8.3 makes broad remote operability a design principle and that tension is deliberate, not an
+  oversight to fix later — but a manual trade is unambiguously a money-moving control, and §6.E /
+  §8.2's invariant (a compromised remote channel must never be able to move money) applies to the
+  Worker and the Pages app exactly as it applies to Telegram. The manual trade controls (§9.7)
+  exist only on the on-device UI and the LAN-only embedded dashboard; they are never exposed
+  through `/api/snapshot`, `/api/refresh`, or any future Worker command route.
 
 ### 9.5 The embedded FastAPI server — now optional
 
@@ -1227,6 +1240,60 @@ is never confused with the live account view. Push cadence should be roughly one
 simulated trading day, not per tick — fast enough to watch progress, not so fast it floods the
 Worker's free-tier write budget over a multi-year run.
 
+### 9.7 Manual trade controls (spec only — not built until steps 8–10 land)
+
+The operator wants buttons to place a trade by hand, primarily so a real, non-empty position
+exists on the demo account to verify `get_portfolio()`'s envelope handling against (§1.1, §12)
+without waiting for the strategy's own signal to fire — see the §11 step 11 acceptance
+criterion. This is a spec for steps 8–10 to build against, not code to write now.
+
+**Where this lives, and where it explicitly does not.** A manual trade button is unambiguously a
+money-moving control, so the placement follows §6.E's arming invariant and §8.2's stated
+rationale (*"a compromised Telegram account must never be able to move money"*) all the way
+through:
+
+- **Allowed:** the on-device Android UI (`MainActivity`), reachable only with physical access to
+  the unlocked phone; and the embedded FastAPI dashboard (§9.5), which is LAN-only.
+- **Forbidden, explicitly:** the Cloudflare Pages remote web app (§9.1–§9.4), the Worker's
+  `/command` route (§8.3), and Telegram (§8.2). None of these gets a manual-trade capability,
+  ever. §6.E and §8.2 rule 4 (`doc/HANDOFF.md` §7) are the reason: §8.3 makes broad remote
+  operability a design principle precisely because the phone lives away from the user most of the
+  time, and that is in deliberate tension with "arming, config writes, and anything that can move
+  money stay local-only" — the design calls that tension out rather than silently resolving it,
+  and a manual trade is squarely on the money-moving side of that line. Widening either remote
+  surface to include it would be exactly the silent expansion §8.3 and HANDOFF §7 rule 4 warn
+  against.
+
+**Arming still applies, unmodified.** In `mode = "live"` a manually-placed order requires
+`NIGHTWATCH_ARM` exactly as an automated order does (§6.E) — there is no "manual" exemption from
+the two-key gate. The controls exist for demo verification and are **demo-only until step 12**;
+they are never a bypass around arming, the symbol allowlist (§6.D — UPRO/SCHG only), `max_leverage
+= 1` (§6.A), or the risk caps in preflight gate 12 (§5).
+
+**Same executor, same bookkeeping — never a side channel.** An order placed by hand must flow
+through the identical executor, idempotency (`x-request-id`/`referenceId`, §6.H), lot bookkeeping,
+and reconciliation path as an automated order. It must never write a position the `lots` table
+doesn't know about — that would manufacture exactly the unmatched-managed-symbol position that
+§5 gate 11 treats as a hard preflight failure, on the very account the controls exist to verify
+against. Concretely: a manually-created lot still needs its book/vintage/`entry_spy_ath` metadata
+(§1.4, HANDOFF §5 fix 3) written at the same time the position is opened, or it will break
+reconciliation on the very next scheduled session.
+
+**Minimum viable control surface**, shaped by §4.3's USD/units asymmetry:
+
+- **Symbol picker: UPRO or SCHG only.** SPY is signal-only and is never offered as a tradable
+  symbol here, same as everywhere else in the app (§1.4, §6.D).
+- **Open a position** — operator enters a USD amount (opens are USD-denominated, §4.3); the
+  control enforces the same minimum-size guard as automated buys (§4.3's per-instrument
+  `minPositionExposure`) rather than silently resizing.
+- **Close a position** — operator picks one existing lot from the `lots` table and closes it in
+  full; per §4.3 there is no partial close in this app, so the control is a full-close action
+  only (`UnitsToDeduct: null`), not a units-entry field. Opens and closes are deliberately
+  different shapes in the UI because they are different shapes in the API.
+- **A confirmation step** before submission — this is an irreversible, money-moving action.
+- **The resulting order's status surfaced back to the operator** — accepted/filled/rejected
+  (§1.1's poll-to-terminal semantics), not just a fire-and-forget "sent."
+
 ---
 
 ## 10. Forward test — the acceptance gate
@@ -1277,7 +1344,7 @@ step-by-step console/CLI instructions behind steps 0–2.
 | 8 | Forward-test harness + fake broker; acceptance criteria 1–8 (§10, desktop CPython) | **Gate** |
 | 9 | Session engine: preflight (§5), executor, idempotency, reconciliation, sleeve accounting (§4.5) | |
 | 10 | Full app integration: Telegram inbound with escalation-only hourly poll and the allowlist (§8.2), snapshot push to the Worker, the web app now reading live data instead of the step-2 stub; embedded FastAPI demoted to LAN-only debug view (§9.5) | |
-| 11 | Demo end-to-end **on the phone, on battery**: scheduled wake → real demo orders → back to Doze, several consecutive sessions | **Gate** |
+| 11 | Demo end-to-end **on the phone, on battery**: scheduled wake → real demo orders → back to Doze, several consecutive sessions. **Acceptance criterion, not just a smoke test:** at least one session in this run must occur while the demo account genuinely holds a non-empty position, and `get_portfolio()`'s `clientPortfolio` envelope handling (§1.1, §12) must be confirmed correct against it — a run where every session sees 0 positions does not close this step, per the "check that passes because nothing happened" rule (`doc/HANDOFF.md` §7 rule 1). The manual trade controls (§9.7) are the intended way to get a real position onto the demo account for this without waiting on the strategy's own signal to fire. | **Gate** |
 | 12 | Go live: real keys, `NIGHTWATCH_ARM`, a generous `cash_reserve_usd` so only a small sleeve is initially exposed, watch closely | Your call |
 
 **Do not build steps 3–12 on an unproven platform.** If the minimal APK (step 4) cannot reliably
@@ -1303,9 +1370,9 @@ recorded here as a standing risk, not re-argued.
 | **OS upgrade resets power-management settings** — the Z10 is early in its support life and *will* take major upgrades | **High** | Runbook: re-verify all five OriginOS settings **and re-run a one-night proof** after every OS update. Host panel shows the last-verified date. |
 | **`SCHEDULE_EXACT_ALARM` revoked** — *"your app stops, and all future exact alarms are canceled"* | **High** | `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` receiver + `canScheduleExactAlarms()` in preflight gate 2. Never silently downgrade to an inexact alarm. |
 | **Orders near the close may behave differently than documented** | **High** | Step 11 on demo settles it; status 11 handled either way. |
-| **Live-rate staleness check is unimplemented** — `Rate.timestamp` (the live `date` field, §1.1) exists but `market/bars.py` never reads it, deferred twice pending preflight (§5 gate 10 note, §6.G). A live probe with the market closed caught SCHG timestamped to the prior session's close while SPY's was current — the same moment, two managed-set instruments, different staleness: a real condition, not a hypothetical one. | **High** | Build the check into preflight gate 10 before step 9 is considered done; it needs the "now" reference and the configured limit that only preflight has. |
-| **A bar-history gap is currently caught only by a stretched tolerance, not detected as a gap** — `market/bars.py`'s bad-tick guard (§6.G) widens multiplicatively with elapsed sessions, capped at 10x base (200% SPY/SCHG, 600% UPRO), past which only an order-of-magnitude error still trips it. `missing_trading_days()` exists as the diagnostic but nothing calls it to halt+reseed. | **High** | Build a preflight gate that calls `missing_trading_days()` directly and halts + re-seeds on a real gap, rather than relying on the tolerance band to keep catching errors indefinitely (§5 gate 10 note, §6.G). An `ERROR` log alone is insufficient — this must alert over Telegram (§8), the same as every other preflight failure, since the phone lives away from the user. |
-| **`get_portfolio()`'s `clientPortfolio` envelope handling is unverified against a genuinely non-empty portfolio** — every live probe so far ran against a demo account with 0 positions, which passes regardless of whether the envelope is unwrapped correctly. Step 9's reconciliation (§5 gate 11) treats an unmatched managed-symbol position as a hard preflight failure, so a wrong envelope read there is not a cosmetic bug. | Medium | Re-verify against a non-empty demo portfolio before trusting step 9. A 0-position pass is exactly the "check that passes because nothing happened" pattern (`doc/HANDOFF.md` §7 rule 1) — treat it as unverified, not as a pass. |
+| **Live-rate staleness check is unimplemented** — `Rate.timestamp` (the live `date` field, §1.1) exists but `market/bars.py` never reads it, deferred twice pending preflight (§5 gate 10 note, §6.G). A live probe with the market closed caught SCHG timestamped to the prior session's close while SPY's was current — the same moment, two managed-set instruments, different staleness: a real condition, not a hypothetical one. | **High** | **Concrete gate spec.** Preflight gate 10 rejects a rate whose `date` timestamp is older than a configured limit while the market is open, using the same "now" reference the calendar gate (§5 gate 9) already establishes. On failure it takes the standard gate-failure path (§5): abort before any order, hold the wake lock, alert over Telegram (§8) naming the stale symbol and its age — never a silent skip or a fallback to a cached price. Additionally, persist the rate's own `date` on the bar row (`is_provisional` bars, §4.2) alongside the value it produced, so staleness is auditable from the DB after the fact rather than only inferable from logs at the moment it happened. Build before step 9 is considered done. |
+| **A bar-history gap is currently caught only by a stretched tolerance, not detected as a gap** — `market/bars.py`'s bad-tick guard (§6.G) widens multiplicatively with elapsed sessions, capped at 10x base (200% SPY/SCHG, 600% UPRO), past which only an order-of-magnitude error still trips it. `missing_trading_days()` exists as the diagnostic but nothing calls it to halt+reseed. | **High** | **Concrete gate spec.** Preflight gate 10 calls the existing `missing_trading_days()` over the required-history window (§1.4's ≥265-bar SPY requirement); any gap halts the session, alerts over Telegram (§8) the same as every other gate failure (an `ERROR` log alone is not sufficient — the phone lives away from the user), and **re-seeds from official candles** before trading resumes — the candles endpoint serves up to 1000 daily bars per request (§1.1, live-verified 2026-09-04), so a full re-seed is cheap and authoritative, not a partial patch. **Follow-up tied to this gate, not immediate:** once gap detection and re-seed exist, the bad-tick guard's multiplicative tolerance stretching (§6.G) exists only to survive gaps that this gate will now catch directly — its 10x cap should be revisited and tightened at that point. A widened band that no longer needs to be wide is just a weaker guard; do not tighten it before the gate lands, or gaps go undetected in the interim. |
+| **`get_portfolio()`'s `clientPortfolio` envelope handling is unverified against a genuinely non-empty portfolio** — every live probe so far ran against a demo account with 0 positions, which passes regardless of whether the envelope is unwrapped correctly. Step 9's reconciliation (§5 gate 11) treats an unmatched managed-symbol position as a hard preflight failure, so a wrong envelope read there is not a cosmetic bug. | Medium | **Scheduled, not floating — operator decision 2026-09-04.** Verification is deliberately postponed rather than manufactured: no synthetic position is opened early just to exercise the parser. It is now a named acceptance criterion of §11 step 11 ("demo end-to-end on the phone") — see the step 11 row below — because step 11 is the first point in the build order where the demo app is deployed on the phone and can hold a real, non-empty position under normal operation. This does **not** block step 9 from being *built*: the reconciliation code (gate 11) can and should be written and unit-tested against fixtures in step 9. It does block step 9's reconciliation from being *trusted* — a 0-position pass is exactly the "check that passes because nothing happened" pattern (`doc/HANDOFF.md` §7 rule 1) — until step 11 closes this row. |
 | **A missing tz database makes `market/calendar.py` unimportable** — `EASTERN = ZoneInfo("America/New_York")` runs at module scope, so a missing tz database raises before `main()` and before any preflight gate runs, producing a bare traceback instead of the abort-hold-wakelock-notify behavior §5 promises for every other failure. Preflight gate 9 covers "not a trading day," not "the calendar module failed to import." | Medium | `tzdata` is pinned in `requirements.txt` for desktop CPython (Windows ships no system tz database; Android resolves `ZoneInfo` via the APEX mainline module, so this is a desktop-only exposure). Wrap the import at the app's entry point so an import failure still produces the graceful abort path, not a bare traceback. |
 | **No Android build tooling on the development machine** — no JDK, no Android SDK, no `adb` installed as of this writing | Medium | Recorded as an explicit prerequisite gap, not assumed away. §11 sequences the Firebase/Cloudflare infrastructure proof (steps 0–2) *before* this install (step 3) specifically so the tooling install is deferred until it's known to be worth doing. Installing it is mechanical (Android Studio or SDK Studio command-line tools + a JDK) but is real setup time, not yet spent. |
 | **Running on battery rather than mains** — a flat phone is a missed session with no alert | Medium | Preflight gate 2 aborts below 40% and says so; daily heartbeat makes a dead phone obvious; charge cap and periodic inspection for the opposite failure. |
