@@ -1112,6 +1112,22 @@ static web app, sourced from the pushed snapshot:
 *Overlay note (carried from etoro_trader):* chart overlays are registered indicators, never
 strategy-specific metadata.
 
+### 9.6 Watching a forward test run live (new requirement, added post-Android-proof)
+
+The forward test (§10) runs on desktop CPython during development, not on the phone — but
+the user should be able to watch one run from the same web app that will later show the live
+account, rather than only reading a static end-of-run report. This reuses the architecture
+already proven working for the phone: the forward-test runner pushes progressive snapshots to
+the same Worker `/snapshot` endpoint (authenticated the same way, with `PHONE_PUSH_SECRET`, or a
+separate `SIM_PUSH_SECRET` if the two should be distinguishable in the audit trail — build
+agent's call, document whichever is chosen), tagged with a `mode: "simulation"` field the
+snapshot schema does not otherwise carry, and the existing Pages UI renders a visibly distinct
+"simulation running" view when that field is present — same components (positions table, trade
+history, chart with markers, sleeve panel), unmistakably labelled as historical/simulated so it
+is never confused with the live account view. Push cadence should be roughly one snapshot per
+simulated trading day, not per tick — fast enough to watch progress, not so fast it floods the
+Worker's free-tier write budget over a multi-year run.
+
 ---
 
 ## 10. Forward test — the acceptance gate
