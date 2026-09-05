@@ -119,6 +119,15 @@ that actually computes this formula against a runtime `sleeve_cash`, since the l
 
 ## The core floor — the most likely real finding, worked out arithmetically
 
+> **RESOLVED 2026-09-05 — the operator reviewed this finding and accepted it.** Their words:
+> *"'SCHG's sell headroom shrinks by half of every dollar you deposit' is no problem."* The
+> behaviour below is therefore **intended and closed**, not a defect awaiting a fix. Do not
+> propose a mitigation, a floor exemption for deposited cash, or a change to
+> `core_floor_pct × sleeve_equity`. The derivation is retained because whoever builds
+> `strategy/ladder.py` still needs to understand *why* headroom moves when no trade occurred —
+> and because the effect is conservative (it protects SCHG harder exactly when more cash is
+> available to fund ladder buys directly, which is the thing selling SCHG would otherwise fund).
+
 **This logic (`strategy/ladder.py`) is entirely unbuilt.** No code exists to test. Everything
 below is a hand-worked derivation from the design spec (DESIGN.md §1.4, §4.5;
 DESIGN_market_data.md §4.7), offered as the forward-looking constraint for whoever builds the
