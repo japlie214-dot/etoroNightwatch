@@ -36,7 +36,7 @@ original brief it is called out.
 | **There is no SELL order.** `action` supports only `open`; `transaction` only `buy`/`sellShort`. Reducing a holding = closing a specific `positionId`. | Maps cleanly onto the ladder: one lot = one eToro position. |
 | Opens are **USD-denominated** (`amount`); closes are **unit-denominated** (`UnitsToDeduct`, `null` = full close). | Lot bookkeeping must bridge the asymmetry. We always full-close a lot, so `UnitsToDeduct: null`. |
 | **HTTP 200 means accepted, not filled.** Must poll `GET /api/v2/trading/info/orders:lookup`. Status 3=Filled, 4=Rejected, 5=PartiallyFilled, **11=WaitingForMarket**. | Every order needs a poll-to-terminal loop and a persisted reference id for crash recovery. |
-| Minimum trade size is **per-instrument**, from `POST /api/v2/trading/info/eligibility` (`minPositionExposure` top-level; `minPositionAmount` **per `leverageConfigs` entry**, keyed by `(settlementType, direction)` — this app reads the `real`/`long` one). Not a constant. **Verified live 2026-09-04**: for UPRO, `minPositionExposure=10.0`, real/long `minPositionAmount=10.0`; for SCHG, `minPositionExposure=50.0`, real/long `minPositionAmount=10.0`. The response's top-level key is `eligibilities` (not `eligibility`, which the code wrongly used until this date and got zero rows back from every real call), and the partial-close flag is `allowPartialClosePosition` (not `allowPartialClose`). | Query at preflight. Never hardcode $10. |
+| Minimum trade size is **per-instrument**, from `POST /api/v2/trading/info/eligibility` (`minPositionExposure` top-level; `minPositionAmount` **per `leverageConfigs` entry**, keyed by `(settlementType, direction)` — this app reads the `real`/`long` one). Not a constant. **Verified live 2026-09-04, corrected 2026-09-05**: the 2026-09-04 read reported `minPositionExposure=50.0` for SCHG; a fuller 2026-09-05 live eligibility payload (see DESIGN_market_data.md §10.14, §0.1) shows this was wrong — **both UPRO and SCHG carry `minPositionExposure=10.0`**, real/long `minPositionAmount=10.0` for each, `allowOpenPosition: true` for both, `maxUnitsPerOrder` 28,321 SCHG / 13,421 UPRO. The response's top-level key is `eligibilities` (not `eligibility`, which the code wrongly used until 2026-09-04 and got zero rows back from every real call), and the partial-close flag is `allowPartialClosePosition` (not `allowPartialClose`). **`min_order_size` in `config/config.toml` stays `50` regardless of this correction — that value is a deliberate operator decision, not a broker-floor tracking figure (DESIGN_market_data.md §10.14); do not lower it to 10.** | Query at preflight. Never hardcode $10. |
 | Rate limits per user key, 1-min window: reads 60/min, writes 20/min, market-data 120/min, eligibility 20/min dedicated. | Ample for a session. Throttle the webapp during the trading window. |
 | Candles: `GET /api/v1/market-data/instruments/{id}/history/candles/{dir}/{interval}/{count}`, `OneDay`, up to 1000. **Verified live 2026-09-04**: this path-segment shape is correct (the query-parameter shape found in eToro's own docs, `GET /market-data/instruments/history/candles?instrumentId=…`, 404s live and does not exist) — but `{dir}` must be `asc`/`desc`, not `backward`/`forward` as this table previously said (that also 404s). `limit=1000` genuinely returns 1000 rows; the response nests candles as `{"candles":[{"instrumentId":…,"candles":[{...OHLCV rows...}]}]}`. | Our history source. Self-contained — no Snowflake dependency. |
 | Live prices: `GET /api/v1/market-data/instruments/rates?instrumentIds=…` → `bid`/`ask`/`lastExecution`. **No market-open flag.** **Verified live 2026-09-04**: this path and these three field names were already correct. The instrument-id field in each row is `instrumentID` (lowercase `i`, capitalised `ID`) — a third casing distinct from `instrumentId`/`InstrumentID`, which the code checked for until this date and so silently matched zero rows despite the HTTP call succeeding. The quote timestamp field is `date`, not `timestamp`/`dateTime`. | Source of today's provisional close. Market-open comes from our own calendar. |
@@ -502,14 +502,19 @@ mandate a `stopLossRate`.
 **Minimum size guard.** `order_size = budget / 60` can fall below the instrument's
 `minPositionExposure`. etoroNightwatch **blocks and alerts loudly** rather than silently
 resizing — a silent bump would break the tier-cap arithmetic the whole strategy rests on.
-**Verified live 2026-09-04 (§1.1): SCHG's `minPositionExposure` is $50.00, UPRO's is $10.00** —
-not the same number, and `minPositionAmount` is nested per `leverageConfigs` entry keyed by
-`(settlementType, direction)`, not a top-level field; this app reads the `real`/`long` entry.
-This is a **step-12 sizing constraint, not just a preflight check**: SCHG's core buys are sized
-off `core_floor_pct × sleeve_equity` / the surplus-sweep calculation (§4.5), not directly off
-`order_size`, so `sleeve_cash` must be large enough that SCHG's computed core fraction clears
-$50 — a sleeve sized only against UPRO's $10 floor can pass gate 8 for UPRO while every SCHG
-core order it computes is rejected. Under the exclusion model, `sleeve_cash` is a runtime
+**Verified live 2026-09-04, corrected 2026-09-05: SCHG's and UPRO's `minPositionExposure` are
+both $10.00** — the 2026-09-04 read reported $50.00 for SCHG, which a fuller 2026-09-05 live
+eligibility payload contradicts (DESIGN_market_data.md §10.14, §0.1); `minPositionAmount` is
+nested per `leverageConfigs` entry keyed by `(settlementType, direction)`, not a top-level field;
+this app reads the `real`/`long` entry. **`min_order_size = 50` in `config/config.toml` is
+unaffected by this correction — it is the operator's own deliberate floor, not a broker-tracking
+figure, and stays 50 regardless of what the broker's minimum is (DESIGN_market_data.md §10.14).**
+This makes the sizing constraint below a config-driven one, not a differing-broker-minimums one:
+SCHG's core buys are sized off `core_floor_pct × sleeve_equity` / the surplus-sweep calculation
+(§4.5), not directly off `order_size`, so `sleeve_cash` must still be large enough that SCHG's
+computed core fraction clears the operator's `$50` `min_order_size` floor (both instruments'
+actual broker minimum is $10, so it is Nightwatch's own configured floor that binds here, not a
+per-instrument broker asymmetry). Under the exclusion model, `sleeve_cash` is a runtime
 quantity (`broker_available_cash − cash_reserve_usd`, §4.5), so this is now a live-cash
 condition rather than a static config comparison — see the two-tier warning in
 `nightwatch.strategy.min_allocation`.

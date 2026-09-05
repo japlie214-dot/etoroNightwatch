@@ -32,11 +32,22 @@ by" column is the one to use, and its own section is the one to cite.
 | `sleeve_cash` / broker cash | ~$1,000 (estimated) | **$1,264.59** (`credit` $1,514.59 − pending orders $250.00) — §10.11 | 2026-09-05 |
 | Sleeve-cap sizing decision (§4.7 "Sleeve accounting") | operator-set cap, adopted equity decoupled from sizing | adopted lots counted **in full**, no cap — §4.7 | 2026-09-05 |
 | `_parse_trade_history_entry` mismatch characterisation (§10.13, models.py) | "one row, a data anomaly unrelated to fees" (119/120 sample) | 4/120 rows disagree; units-based formula only 117/120 (max error $398.51); `investment`-based formula is the one that holds, 120/120 (max error $0.0091) — §10.13 | 2026-09-05 |
+| SCHG `minPositionExposure` (DESIGN.md §1.1/§4.3's live-verified figure, cited as the reason `min_order_size` was raised 10→50) | $50.00, "verified live 2026-09-04" | **$10.00** — same as UPRO — per the 2026-09-05 live eligibility payload (`minPositionExposure: 10.0` for both, `allowOpenPosition: true` for both, `maxUnitsPerOrder` 28,321 SCHG / 13,421 UPRO) — §10.14 | 2026-09-05 |
+| Count of unmanaged instruments in the account (18 positions) | "5 instruments" (§4.5, §4.7, §7) | **6 instruments** — ids 1149, 1390, 1865, 4365, 4375, 6365, matching the 6 tickers (IAU, VONG, OEF, FISV, STZ, MINT) already listed in §10.11 — the "5" in prose never matched the "6" already in that table | 2026-09-05 |
 
 **Not wrong, but easy to misread as wrong — kept here for the same reason:** the position *count*
 (202 SCHG + 7 UPRO = 209, or 227 including the 18 unmanaged positions) was measured correctly from
 the first probe and never revised. Only the *per-position amount* was ever an estimate. Recording
 provenance per quantity, not per sentence, is the fix (§10.12's own stated lesson).
+
+**The mirror trap — a correct figure sitting next to a deliberate decision, easy to conflate in
+either direction.** `min_order_size = 50` in `config/config.toml` is **not** a stale number
+tracking the (now-corrected) $50 SCHG figure above. The operator has independently, deliberately
+**demanded `min_order_size = 50`** regardless of what the broker's real per-instrument floor is —
+see §10.14. Do not "fix" it down to 10 because its original justification turned out to be wrong;
+the justification and the decision are two different things, and only the justification was
+wrong. Both facts — the corrected $10 floor, and the deliberate $50 config value — must be read
+together, or a future pass will get this wrong in one direction or the other.
 
 ---
 
@@ -697,8 +708,10 @@ disagree about once the broker owns them — and becomes a membership + invarian
 
 DESIGN.md §6.D is preserved: the executor may only close a `position_id` present in the sidecar
 — the sidecar is the allowlist. **This is not a hypothetical guard.** The same live probe found
-227 open positions across 8 instruments — 202 SCHG, 7 UPRO, and 18 across 5 instruments this app
-does not manage — meaning **220 of 227 open positions are outside the managed set**. Gates 1–2
+227 open positions across 8 instruments — 202 SCHG, 7 UPRO, and 18 across **6** instruments this
+app does not manage (ids 1149, 1390, 1865, 4365, 4375, 6365 — corrected 2026-09-05, §0.1; earlier
+text in this section said "5", which never matched the 6 tickers already listed in §10.11) —
+meaning **220 of 227 open positions are outside the managed set**. Gates 1–2
 and DESIGN.md §6.D's allowlist are protecting a large amount of unrelated capital that sits in the
 same account, not a corner case.
 
@@ -756,7 +769,7 @@ ex-dividend seam correction (§8). It is no longer an adjustment input for anyth
 **Status: operator decision, 2026-09-04.**
 
 The same live probe (§4.2, §4.5) found 227 open positions predating this app entirely: **202
-SCHG and 7 UPRO** — both managed symbols — plus **18 positions across 5 unrelated instruments**.
+SCHG and 7 UPRO** — both managed symbols — plus **18 positions across 6 unrelated instruments** (corrected 2026-09-05, §0.1).
 Gate 11 invariant 1 (§4.5) requires every open broker position in a managed symbol to have a
 sidecar row, else halt. None of the 209 has one. Left alone, the app would halt on its first
 session and every session after — this is not a corner case invariant 1 can be relaxed around,
@@ -801,7 +814,7 @@ the time would have produced. This is a direct, accepted cost of the operator's 
 rather than quarantine, not an oversight in the migration. It is recorded here rather than
 smoothed over.
 
-**What does not change.** The 18 positions in the 5 unrelated instruments remain excluded by
+**What does not change.** The 18 positions in the 6 unrelated instruments remain excluded by
 instrument filter — they get no sidecar row and are never touched. DESIGN.md §6.D's rule is
 unchanged: the executor may only close a `position_id` present in the sidecar. Adoption does not
 loosen that rule; it simply means all 209 managed-symbol positions now qualify for a row under it,
@@ -859,11 +872,16 @@ Raising `cash_reserve_usd` lowers `sleeve_cash`, which lowers `sleeve_equity`, w
 core floor, which makes **more** SCHG sellable. Withholding cash to be cautious quietly makes the
 app freer to sell the core book. Anyone tuning the reserve needs to know it moves the floor too.
 
-**The one outstanding sleeve input** is `cash_reserve_usd` itself. It is `0.0` in the shipped
-`config/config.toml`, which means the app's cash sleeve is currently **the entire account cash
-balance** — in an account that also holds 18 positions across 5 instruments this app never
-touches. Under exclusion, any deposit above the reserve is immediately tradable with no explicit
-act (DESIGN.md §4.4). This does not block the §4.7 migration; it blocks going live.
+**`cash_reserve_usd` staying `0.0` — CLOSED, 2026-09-05, no longer a go-live blocker.** It is
+`0.0` in the shipped `config/config.toml`, which means the app's cash sleeve is currently **the
+entire account cash balance** — in an account that also holds 18 positions across 6 instruments
+this app never touches. **This is now confirmed as the operator's deliberate, explicit decision:
+the entire account cash balance is intended to be tradable by the strategy.** Measured live figure
+as of 2026-09-05: `broker_available_cash = $1,264.59` (§10.11). Under exclusion, any deposit above
+the reserve is immediately tradable with no explicit act (DESIGN.md §4.4) — the operator manages
+exposure by raising the reserve **before** a deposit lands, per §4.4 above, not by pinning
+`cash_reserve_usd` above zero as a standing posture. HANDOFF_2026-09-05.md §6, §7 item 6, and §8
+previously listed this as a go-live blocker; it is removed from that list as of this decision.
 
 ---
 
@@ -1265,7 +1283,13 @@ decisions, not engineering findings** — none was derived or verified from data
 Cross-reference §4.7 for the migration this bears on, and §10.10 for the recurring-DCA
 consequence.
 
-### 10.10 The manual recurring SCHG buy — RESOLVED 2026-09-05: it stops
+### 10.10 The manual recurring SCHG buy — RESOLVED 2026-09-05: it stops. CONFIRMED STOPPED, 2026-09-05.
+
+**Update, same day: the operator confirmed the recurring buy has actually been switched off on
+the eToro side** — not merely decided, but done. This satisfies this subsection's own ordering
+constraint below (the DCA must stop before the backfill runs) and **unblocks the §4.7 adoption
+migration**. The migration itself has still **never been run** against the live account — that
+remains open, tracked in HANDOFF_2026-09-05.md §6/§7 item 1.
 
 Raised from §10.9's first answer: the operator's manual recurring DCA on SCHG is an eToro-side
 standing instruction independent of this app, and every fill it produces would be an open position
@@ -1327,8 +1351,11 @@ substantially. **Neither estimate was ever labelled as load-bearing, and both we
 **What this means:**
 
 - The sleeve is far above the **$7,500** clamp, so `order_size` is unclamped at ~$335 and clears
-  SCHG's `$50` `minPositionExposure` and UPRO's `$10` comfortably (DESIGN.md §4.3). The
-  minimum-viable-allocation warning in DESIGN.md §4.5 does not bite.
+  SCHG's and UPRO's real `$10.00` `minPositionExposure` comfortably (§10.14 corrects the earlier
+  "$50 for SCHG" figure this line used to cite; DESIGN.md §4.3) — and clears the operator-mandated
+  `$50` `min_order_size` config floor too, which is a deliberate choice independent of either
+  broker minimum (§0.1, §10.14). The minimum-viable-allocation warning in DESIGN.md §4.5 does not
+  bite.
 - SCHG sits **above** the core floor with ~$19.8k sellable, so **the sell-to-fund path is live**.
 - `sleeve_cash` ($1,264.59) is below `cash_target` (~$2,676). Funding that gap by selling SCHG down
   toward the floor is exactly what the sell-to-fund path exists for.
@@ -1337,7 +1364,7 @@ substantially. **Neither estimate was ever labelled as load-bearing, and both we
 
 **Invariants re-verified in the same probe:** `amount ≈ units × openRate` holds **227/227**, and
 `leverage == 1` / `isBuy == true` holds **227/227** — checked across *all* positions, not only
-managed symbols. Position counts confirmed exactly: 202 SCHG + 7 UPRO + 18 across 5 others = 227.
+managed symbols. Position counts confirmed exactly: 202 SCHG + 7 UPRO + 18 across 6 others (corrected 2026-09-05, §0.1) = 227.
 
 ### 10.12 The per-position SCHG amount — RESOLVED 2026-09-05 by measurement
 
@@ -1449,6 +1476,163 @@ table; `is_buy`/`leverage` are the real equivalents of `action`), adds `investme
 than silently defaulting — matching `_parse_position`'s corrected precedent. See
 `test_trade_history_entry_matches_real_account_row_shape` and the two
 `test_trade_history_entry_raises_on_missing_*` tests in `tests/test_etoro_client.py`.
+
+### 10.14 SCHG's real `minPositionExposure` is $10.00, not $50.00 — and `min_order_size=50` is a deliberate operator choice, not a bug — CORRECTED 2026-09-05
+
+**The factual claim, corrected.** DESIGN.md §1.1/§4.3 and `config/config.toml`'s comment on
+`min_order_size` record "live-verified minimums: SCHG $50, UPRO $10 — hence `min_order_size` was
+raised 10 → 50 on 2026-09-04." **The $50 figure for SCHG is contradicted by today's live payload.**
+The 2026-09-05 on-device eligibility probe (`POST /api/v2/trading/info/eligibility` for SPY, UPRO,
+SCHG in one call) reads `minPositionExposure: 10.0` for **both** SCHG and UPRO,
+`allowOpenPosition: true` for both, and `maxUnitsPerOrder` 28,321 for SCHG / 13,421 for UPRO. This
+is added to the §0.1 superseded-figures table; do not read the $50-for-SCHG claim anywhere else in
+this document family as current.
+
+**The deliberate choice, which stands regardless.** The operator has, independently of the above,
+**demanded `min_order_size = 50`** in `config/config.toml`. This is not this document (or
+`config.toml`'s comment) tracking a stale broker floor — it is a deliberate sizing decision the
+operator wants enforced, and it must **not** be "corrected" down to 10 just because the $50 broker
+figure that once justified it turns out to be wrong. Both facts have to be read together:
+
+1. The real broker floor is $10.00 for both managed instruments (this subsection).
+2. `min_order_size` stays 50 anyway, by explicit operator demand (config value unchanged by this
+   correction — only the comment explaining it needs to stop citing a wrong number).
+
+Getting only one of these two facts into a future reader's head is worse than getting neither:
+reading only (1) invites "helpfully" lowering `min_order_size` to 10, undoing a decision the
+operator made on purpose; reading only (2) invites treating the $50 SCHG figure as still true and
+re-deriving other sizing logic (e.g. §10.11's sell-headroom arithmetic, DESIGN.md §4.3's sizing
+note) against a number that was never real.
+
+### 10.15 The fee model — SETTLED, 2026-09-05
+
+Full detail in `doc/FINDINGS_fees_2026-09-05.md`; summarised here because it belongs in the design
+record, not only in a findings memo.
+
+**Fees are a carrying charge proportional to size × time, not a commission, not dividend-related,
+and not a leverage charge.** Correlation of `|fees|` against `investment × holding_days` is
+**Pearson r = 0.9918** (vs. 0.9157 for `investment` alone, −0.0611 for `holding_days` alone) across
+all 120 closed trades. A scan of all 120 payloads found no dividend- or account-charge-shaped
+field anywhere on this API surface. Every fee-bearing row is `leverage = 1`; the 2
+leveraged/short trades in the account carry $0.00 of fees, while the other 118 plain 1× long
+trades carry the entire `Σfees = -$380.40`.
+
+**`get_costs`' quoted `overnightFee: $0.00` is contradicted by realised `totalFees` for the same
+instrument, and must never be treated as evidence.** SCHG's `get_costs` quote reads `$0.00` while
+the account's SCHG position has accrued **−$59.17** in realised `totalFees`. This is a quoted rate,
+not a measured one — no gate, surface, or future parser audit may treat `get_costs`' fee fields as
+ground truth for whether a fee is actually being charged.
+
+**SCHG is not fee-free: 0.320%/yr**, −$59.17 accrued on a $40,867.17 cost basis (§10.12). It lands
+on the long-hold core book — the position the strategy is least likely to close — and is currently
+**modelled nowhere** in this app. This is flagged as an open item, not something this pass invents
+a model for.
+
+**The app's accounting principle, now confirmed rather than merely proposed:** a $100 order
+produces a clean, unreduced $100 position — `amount` carries no baked-in fee at entry, ever — and
+on exit the realised cash balance must be **read**, never predicted from `openRate`/`closeRate`/
+`units`, because the fee accrues with holding time and settles on close, and no formula recovers
+it after the fact. This is the specification the executor and any P&L surface must follow: compute
+entry from `amount`, and always read realised proceeds from the broker's own post-close cash
+figure rather than deriving them.
+
+Instrument **4375** — one of the 6 unmanaged instruments (§0.1, §4.5, §4.7) — carries **81% of all
+historical fees** (−$309.61 of −$380.40, across 8 closed trades, a strikingly consistent
+2.9–3.8%/yr) and still has a $5,000 position open. Real money, unrelated to Nightwatch's managed
+set; identifying it needs a metadata fetch the offline probe could not do. Carried forward as an
+open follow-up, not resolved here.
+
+### 10.16 The probe's own parser-audit caveat — high false-positive rate on `missing_from_payload`
+
+The 2026-09-05 device probe's Section C parser audit (RUNBOOK_DEVICE_PROBE.md) produces two
+outputs per parser: `missing_from_payload` and `unused_in_payload`. **`missing_from_payload` has a
+high false-positive rate** — it flags every key name a parser *references*, including fallback
+alternatives inside an `or`-chain, as if each were independently required. `_parse_candle` was
+flagged for six "missing" keys this way and is in fact correct; the six names are alternatives
+tried in sequence, not six separate required fields. **`unused_in_payload` is the trustworthy
+half** — a field the live payload actually carries that no parser reads is a real, actionable
+finding. Treat any `missing_from_payload` line as a hypothesis to check against the parser's
+source, not as a bug report on its own; do not let a future reader chase these as ghosts.
+
+The genuinely unread fields the same probe surfaced on the eligibility payload — real findings,
+not false positives — are `requiresW8Ben`, `leverageConfigs`, `settlementType` (`real` vs. `cfd`),
+and `maxUnitsPerOrder`. None of these is consumed by `get_eligibility` today; whoever next touches
+gate 8 (instrument minimums, still a stub) should check whether any of them belong in that gate.
+
+### 10.17 Live payload shapes confirmed today, 2026-09-05
+
+Recorded here alongside the other confirmed field shapes (§4.2, §10.7, §10.8, §10.13) so a future
+reader has one place to check a payload shape against rather than trusting a parser's assumptions:
+
+- **Candles** nest as `{"interval": ..., "candles": [{"instrumentId": N, "candles": [rows]}]}`,
+  with each row keyed `instrumentID`/`fromDate`/`open`/`high`/`low`/`close`/`volume`.
+- **The portfolio endpoint returns a bare list** of 227 positions (not wrapped further beyond the
+  `clientPortfolio` envelope already documented, §10.8), with keys including `settlementTypeID`,
+  `isSettled`, `totalFees`, `totalExternalFees`, `amount`, `openDateTime`.
+- **Trade history is likewise a bare list** — see §10.18 below for the parser bug this shape
+  caused.
+
+### 10.18 A fifth parser bug — `get_trade_history`'s envelope assumption, not a field inside it
+
+Distinct from every prior instance of this defect class (§10.7 `_parse_position`, `get_balance`,
+§10.13 `_parse_trade_history_entry`'s field names, and the truthiness bug in
+HANDOFF_2026-09-05.md §4) — this one is about the **envelope**, not a field name inside it.
+`get_trade_history` assumed the response body was `{"items": [...]}"` and read
+`data.get("items", data if isinstance(data, list) else [])`. **The live body is a bare list**
+(§10.17), and the fallback in that expression was dead code: `data.get` is evaluated before its own
+`isinstance` fallback is ever considered, so calling `.get` on a bare list raised
+`AttributeError: 'list' object has no attribute 'get'` before the fallback could run. Fixed
+2026-09-05 by branching explicitly on `isinstance(data, list)` vs. `isinstance(data, dict)` and
+raising `EtoroValidationError` on a shape that is neither — see `etoro/client.py`'s
+`get_trade_history`, the comment at the `isinstance` branch.
+
+**The pattern is now five instances in this family, not four** — see the updated tally in
+HANDOFF_2026-09-05.md §4. **The meta-lesson, specific to this fifth instance:** every pre-existing
+test wrapped fixture rows in `{"items": [...]}"` before this fix, so the test suite encoded the
+same wrong envelope assumption the production code made, rather than independently checking it —
+a fixture that agrees with a bug is not a check on the bug.
+
+### 10.19 Section D re-measure, and the ATH-inclusivity judgment call — RESOLVED 2026-09-05
+
+**Section D of the 2026-09-05 device probe re-confirms §10.11 exactly**: SCHG $44,866.97, UPRO
+$4,046.98, `sleeve_equity` $50,178.53, 202 + 7 managed positions. HANDOFF_2026-09-05.md §11's "the
+migration should be re-measured immediately before the write" ask is satisfied by this re-measure,
+with the caveat carried forward that it should be run **once more** immediately before the
+migration's write, since a live account can move between any two reads.
+
+**The ATH-inclusivity judgment call (HANDOFF_2026-09-05.md §8) is resolved in favour of
+inclusive.** §4.7 never specified whether SPY's all-time-high "as of" a date includes that date's
+own close; `market/adopt.py`'s `build_spy_context_index` chose inclusive (its own docstring:
+"the ATH as of a given date is the maximum `adjClose` over every bar up to and INCLUDING that
+date, so a new-ATH day itself has `drawdown == 0.0`, not the day after") and flagged it as an
+unverified judgment call.
+
+**Verified against the code before asserting this, per this task's own instruction.** The live
+session sequence (§4.1 of DESIGN.md, step [5]) computes `cone_5_z` "over 265+ bars ending on
+today's provisional close" — i.e. the trailing window used for that day's live decision
+**includes today's own (provisional, not-yet-official) close**, not just history through
+yesterday. Since §1.4 sources `cone_5_z`, the running all-time high, and the drawdown tier from
+the same SPY closes series, the live strategy's own ATH-and-drawdown computation is, by the same
+construction, inclusive of today's bar at decision time. `market/adopt.py`'s inclusive convention
+therefore makes reconstructed history consistent with what the live strategy actually computes —
+the backfill and the live path agree.
+
+**One correction to the rationale as originally proposed, stated so it is not silently smoothed
+over:** the proposed rationale characterised the live decision point as "~10 minutes before the
+close." That figure is stale — it is the **T-10** timing DESIGN.md §1.1 explicitly says the
+design *originally* carried and has since moved away from; the live session fires at **T-30
+minutes** (DESIGN.md §4.1, step [3]/[4]/[5]). The correction does not change the conclusion: at
+either T-10 or T-30, the decision still necessarily runs before the official close exists, against
+a provisional value for the current bar, so the inclusive-vs-exclusive argument is unaffected by
+which T-offset is current — only the "~10 minutes" figure in the rationale was wrong, not the
+reasoning built on it.
+
+`strategy/params.py`'s `tier_for_drawdown` was also checked: it only maps an already-computed
+signed drawdown fraction to a tier index and takes no position on how `ath`/`drawdown` themselves
+are computed, so it neither confirms nor contradicts the inclusive convention — it is consistent
+with either choice, and does not need to change.
+
+This question moves from open to **closed, resolved as inclusive**, in HANDOFF_2026-09-05.md §8.
 
 ---
 

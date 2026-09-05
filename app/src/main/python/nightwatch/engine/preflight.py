@@ -52,9 +52,14 @@ of this module:
        was the trusted reference by construction, with no check on its own
        age; see `_check_candle_freshness` and `_check_provisional_close`.
     2. Window completeness (>=265 sessions, date-set matches the calendar)
-       -- TODO(step 3-4, DESIGN_market_data.md §6 item 2, §3, market/bars.py
-       missing_trading_days()). Depends on the fetch-derive-discard window
-       assembly, not yet built.
+       -- the fetch-derive-discard window assembly this depended on is now
+       built: ``market.window.validate_window_completeness`` (build steps
+       3-4, DESIGN_market_data.md §6 item 2, §3, §12) is a fully working,
+       tested interface over a freshly fetched window. TODO(step 5): wire
+       its ``WindowCompletenessResult`` into an actual gate function here --
+       that wiring, and the session orchestration that calls
+       ``market.window.assemble_spy_signal`` in the first place, are still
+       not built (both belong to step 5 per §12's build-sequencing table).
     3. Sanity: live rate present and non-zero for every managed symbol
        -- IMPLEMENTED (trivial and adjacent to item 1; both read the same
        `Rate` objects).
@@ -67,9 +72,14 @@ of this module:
        itself being computed, which depends on item 2's window, so it is
        blocked by the same prerequisite.
 
-Items 2, 4 and 5 are out of scope here because each depends on
-build-sequencing steps 3-4 (drop `bars`, fetch-derive-discard window
-assembly) which this task explicitly does not build.
+Items 2, 4 and 5 remain out of scope for *this* module -- turning any of
+them into an actual gate function that halts a session is step 5's job, not
+this task's. Item 2's dependency (the fetch-derive-discard window assembly)
+has since been built in ``market/window.py`` (build steps 3-4); items 4 and
+5 still depend on pieces that module deliberately does not build either
+(the `corporate_actions` prior-session comparison, and the session
+orchestration that would call any of this in the first place) -- see that
+module's own docstring.
 """
 
 from __future__ import annotations

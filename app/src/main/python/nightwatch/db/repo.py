@@ -33,6 +33,7 @@ __all__ = [
     "Order",
     "Lot",
     "LotAnnotation",
+    "PriceWindowFingerprint",
     "Bucket",
     "StrategyState",
     "BudgetRecord",
@@ -293,6 +294,27 @@ class LotAnnotation:
     is_open: bool = True
     created_at: str | None = None
     updated_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PriceWindowFingerprint:
+    """One row of ``price_window_fingerprints`` (DESIGN_market_data.md §3.4,
+    §7, migration 004) -- built by
+    :func:`nightwatch.market.window.compute_fingerprint`. Never a price
+    series: a SHA-256 over one session's fetched ``(date, adjClose)`` window,
+    kept so a silent upstream revision of history (undetectable once prices
+    are never stored) can still be caught by comparing against the previous
+    session's fingerprint for the overlapping range.
+    """
+
+    trading_date: str
+    symbol: str
+    window_start: str
+    window_end: str
+    bar_count: int
+    series_sha256: str
+    source: str
+    source_fetched_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -1388,6 +1410,71 @@ class Repo:
             entry_amount=row["entry_amount"], is_open=bool(row["is_open"]),
             origin=row["origin"], created_at=row["created_at"],
             updated_at=row["updated_at"],
+        )
+
+    # -- price window fingerprints (DESIGN_market_data.md §3.4, §7) --------
+
+    def record_price_window_fingerprint(self, fingerprint: PriceWindowFingerprint) -> None:
+        """Persist one session's window fingerprint (never the price series
+        itself). Idempotent per ``(trading_date, symbol)`` -- re-running the
+        same session's window assembly overwrites its own fingerprint rather
+        than raising, since re-assembly is expected (e.g. a retried
+        session), not an error.
+        """
+        self.conn.execute(
+            """
+            INSERT INTO price_window_fingerprints (
+                trading_date, symbol, window_start, window_end, bar_count,
+                series_sha256, source, source_fetched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT (trading_date, symbol) DO UPDATE SET
+                window_start = excluded.window_start,
+                window_end = excluded.window_end,
+                bar_count = excluded.bar_count,
+                series_sha256 = excluded.series_sha256,
+                source = excluded.source,
+                source_fetched_at = excluded.source_fetched_at
+            """,
+            (
+                fingerprint.trading_date, fingerprint.symbol,
+                fingerprint.window_start, fingerprint.window_end,
+                fingerprint.bar_count, fingerprint.series_sha256,
+                fingerprint.source, fingerprint.source_fetched_at,
+            ),
+        )
+        self.conn.commit()
+
+    def get_price_window_fingerprint(
+        self, trading_date: str, symbol: str
+    ) -> PriceWindowFingerprint | None:
+        """Return one session's stored fingerprint for ``symbol``, or
+        ``None`` if none was recorded."""
+        row = self.conn.execute(
+            "SELECT * FROM price_window_fingerprints WHERE trading_date = ? "
+            "AND symbol = ?",
+            (trading_date, symbol),
+        ).fetchone()
+        return self._price_window_fingerprint(row) if row else None
+
+    def list_price_window_fingerprints(self, symbol: str) -> list[PriceWindowFingerprint]:
+        """Return every stored fingerprint for ``symbol``, most recent
+        session first -- used to find the previous session's overlapping
+        window to compare a new fingerprint against (§3.4's revision-
+        detection recovery)."""
+        rows = self.conn.execute(
+            "SELECT * FROM price_window_fingerprints WHERE symbol = ? "
+            "ORDER BY trading_date DESC",
+            (symbol,),
+        ).fetchall()
+        return [self._price_window_fingerprint(r) for r in rows]
+
+    @staticmethod
+    def _price_window_fingerprint(row: sqlite3.Row) -> PriceWindowFingerprint:
+        return PriceWindowFingerprint(
+            trading_date=row["trading_date"], symbol=row["symbol"],
+            window_start=row["window_start"], window_end=row["window_end"],
+            bar_count=row["bar_count"], series_sha256=row["series_sha256"],
+            source=row["source"], source_fetched_at=row["source_fetched_at"],
         )
 
     # -- buckets -----------------------------------------------------------

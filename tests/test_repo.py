@@ -20,6 +20,7 @@ from nightwatch.db.repo import (
     Order,
     PortfolioSnapshot,
     PreflightCheck,
+    PriceWindowFingerprint,
     Repo,
     SnapshotPosition,
     StrategyState,
@@ -513,3 +514,54 @@ def test_notification_round_trip_and_delivery_status(repo: Repo) -> None:
     assert failed.status == "failed"
     assert failed.error == "timeout"
     assert repo.pending_notifications() == []
+
+
+# -- price window fingerprints (DESIGN_market_data.md §3.4, §7, migration 004) --
+
+
+def _fingerprint(trading_date: str = "2026-09-05", symbol: str = "SPY", **overrides) -> PriceWindowFingerprint:
+    fields = dict(
+        trading_date=trading_date,
+        symbol=symbol,
+        window_start="2025-01-02",
+        window_end="2026-09-04",
+        bar_count=420,
+        series_sha256="a" * 64,
+        source="tiingo",
+        source_fetched_at="2026-09-05T12:00:00+00:00",
+    )
+    fields.update(overrides)
+    return PriceWindowFingerprint(**fields)  # type: ignore[arg-type]
+
+
+def test_price_window_fingerprint_round_trip(repo: Repo) -> None:
+    assert repo.get_price_window_fingerprint("2026-09-05", "SPY") is None
+    repo.record_price_window_fingerprint(_fingerprint())
+    row = repo.get_price_window_fingerprint("2026-09-05", "SPY")
+    assert row is not None
+    assert row.symbol == "SPY"
+    assert row.bar_count == 420
+    assert row.series_sha256 == "a" * 64
+    assert row.source == "tiingo"
+
+
+def test_price_window_fingerprint_upsert_overwrites_same_day_same_symbol(repo: Repo) -> None:
+    repo.record_price_window_fingerprint(_fingerprint(series_sha256="a" * 64, bar_count=420))
+    repo.record_price_window_fingerprint(_fingerprint(series_sha256="b" * 64, bar_count=421))
+    row = repo.get_price_window_fingerprint("2026-09-05", "SPY")
+    assert row.series_sha256 == "b" * 64
+    assert row.bar_count == 421
+    # Still exactly one row -- PRIMARY KEY (trading_date, symbol), not a
+    # growing history of every session's fingerprint under one key.
+    assert len(repo.list_price_window_fingerprints("SPY")) == 1
+
+
+def test_price_window_fingerprint_distinct_symbols_and_dates_do_not_collide(repo: Repo) -> None:
+    repo.record_price_window_fingerprint(_fingerprint(trading_date="2026-09-04", symbol="SPY"))
+    repo.record_price_window_fingerprint(_fingerprint(trading_date="2026-09-05", symbol="SPY"))
+    repo.record_price_window_fingerprint(_fingerprint(trading_date="2026-09-05", symbol="UPRO"))
+    assert len(repo.list_price_window_fingerprints("SPY")) == 2
+    assert len(repo.list_price_window_fingerprints("UPRO")) == 1
+    # Most recent session first.
+    dates = [r.trading_date for r in repo.list_price_window_fingerprints("SPY")]
+    assert dates == ["2026-09-05", "2026-09-04"]

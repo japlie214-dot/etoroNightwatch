@@ -59,14 +59,24 @@ core_floor_pct         = 0.5    # CORE_FLOOR_PCT — SCHG never sold below this 
 order_divisor          = 60     # ORDER_DIVISOR — order_size = budget / 60
 min_order_size         = 50.0   # MIN_ORDER_SIZE — superseded by the per-instrument
                                 # minimum if that is higher; we block, never resize.
-                                # Raised 10.0 -> 50.0 on 2026-09-04: the live
-                                # eligibility endpoint reports SCHG
-                                # minPositionExposure = 50.0 (UPRO = 10.0), so a
-                                # floor of 50 is the smallest value at which BOTH
-                                # managed symbols are always orderable.  The
-                                # per-instrument query stays authoritative
-                                # (DESIGN §1.1 "never hardcode $10") -- this is a
-                                # floor, not a replacement for it.
+                                # Raised 10.0 -> 50.0 on 2026-09-04, originally
+                                # because the live eligibility endpoint was read
+                                # as reporting SCHG minPositionExposure = 50.0
+                                # (UPRO = 10.0). CORRECTED 2026-09-05: a fuller
+                                # live eligibility payload shows minPositionExposure
+                                # is actually 10.0 for BOTH SCHG and UPRO -- the
+                                # original $50 justification was wrong (see
+                                # doc/DESIGN_market_data.md §10.14, §0.1).
+                                # THE VALUE STAYS 50 ANYWAY: the operator has
+                                # independently, deliberately demanded 50 as the
+                                # floor regardless of the real (lower) broker
+                                # minimum. Do not "fix" this back down to 10 --
+                                # that would undo a deliberate decision, not
+                                # correct a bug. The per-instrument query stays
+                                # authoritative for the broker's own floor
+                                # (DESIGN §1.1 "never hardcode $10") -- this
+                                # config value is an operator-imposed floor on
+                                # top of it, not a copy of it.
 buy_threshold          = -2.0   # BUY_THRESHOLD  (cone_5_z)
 sell_threshold         = 3.0    # SELL_THRESHOLD (cone_5_z)
 max_lots               = 60     # MAX_LOTS
@@ -96,10 +106,16 @@ required_history_bars  = 265
 # operator withholds from the app for their own use, outside etoroNightwatch.
 # sleeve_cash = max(0, broker_available_cash - cash_reserve_usd), computed at
 # runtime once the broker's available cash is known. 0 (also what null/absent
-# collapses to) means "use all available cash". Shipped default is 0 -- an
-# explicit "no reserve withheld" starting point; raise it to carve out cash
-# for things outside nightwatch. If the resulting sleeve is too small to
-# trade, the app WARNS on the UI (status/snapshot payload, two tiers -- see
+# collapses to) means "use all available cash". Shipped default is 0.
+#
+# CLOSED, 2026-09-05: staying at 0.0 is a deliberate, explicit operator
+# decision -- the entire account cash balance is intended to be tradable by
+# the strategy -- not an unfinished go-live blocker. Exposure is managed by
+# raising this value BEFORE moving money (e.g. before an unrelated deposit),
+# not by holding it above zero as a standing posture. Measured live figure,
+# 2026-09-05: broker_available_cash = $1,264.59 (doc/DESIGN_market_data.md
+# §10.11). If the resulting sleeve is too small to trade, the app WARNS on
+# the UI (status/snapshot payload, two tiers -- see
 # nightwatch.strategy.min_allocation) and keeps running -- it is a product
 # decision, never a backend block.
 cash_reserve_usd       = 0.0
