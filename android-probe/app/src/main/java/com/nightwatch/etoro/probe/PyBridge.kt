@@ -83,4 +83,38 @@ object PyBridge {
         val module = py.getModule("probe.probe_runner")
         return module.callAttr("run_default", configDir, outputDir).toString()
     }
+
+    /**
+     * On-device measurement task (2026-09-05): the cost of parsing a FULL-HISTORY SPY payload
+     * through the REAL market/window.py + strategy/cone.py code path, vs the previously-used
+     * 276-bar window -- both payload files must already be on-device (pushed via adb beforehand;
+     * this call makes no network request itself, isolating parse/compute cost from fetch
+     * latency). See android-probe/app/src/main/python/probe/window_bench.py.
+     */
+    @Synchronized
+    fun runWindowBench(context: Context, payload276Path: String, payloadFullPath: String, outputDir: String): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.window_bench")
+        return module.callAttr("run", payload276Path, payloadFullPath, outputDir).toString()
+    }
+
+    /**
+     * §4.7 adoption-migration dry run (2026-09-05): READ-ONLY on-device portfolio fetch.
+     * See android-probe/app/src/main/python/probe/adopt_fetch.py's own docstring -- this calls
+     * ONLY EtoroClient.get_portfolio()/resolve_instrument_id()/get_instruments(), all GETs,
+     * using role="read" (ETORO_READ_PRIVATE_KEY), and never opens a database. The actual
+     * adoption resolution (nightwatch.market.adopt.run_adoption_backfill, dry_run=True) runs
+     * separately on the PC against the JSON this saves -- the dev machine can reach Tiingo but
+     * not eToro, so the two halves are deliberately split across processes/machines.
+     *
+     * `configDir`/`outputDir` follow the same convention as `runLiveProbe` above.
+     */
+    @Synchronized
+    fun runAdoptionFetch(context: Context, configDir: String, outputDir: String): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.adopt_fetch")
+        return module.callAttr("run", configDir, outputDir).toString()
+    }
 }

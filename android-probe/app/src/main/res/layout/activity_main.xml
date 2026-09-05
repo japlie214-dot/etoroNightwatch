@@ -238,6 +238,19 @@
             android:textIsSelectable="true"
             android:text="Live probe: (not yet run)" />
 
+        <Button
+            android:id="@+id/btnWindowBench"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Run window bench (full-history vs 276-bar parse cost, no network)" />
+
+        <TextView
+            android:id="@+id/txtWindowBenchStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:text="Window bench: (not yet run)" />
+
         <View style="@style/Divider" />
 
         <TextView

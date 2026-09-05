@@ -163,6 +163,8 @@ class MainActivity : AppCompatActivity() {
 
         binding.btnRunLiveProbe.setOnClickListener { runLiveProbeNow() }
 
+        binding.btnWindowBench.setOnClickListener { runWindowBenchNow() }
+
         binding.btnShareLog.setOnClickListener { shareLog() }
 
         setupLogFilterSpinner()
@@ -170,12 +172,75 @@ class MainActivity : AppCompatActivity() {
         refreshStatus()
         refreshEventList()
         startCountdownLoop()
+
+        maybeRunAdoptionFetchFromIntent(intent)
+        maybeRunWindowBenchFromIntent(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        // launchMode="singleTop": a second `adb shell am start` against an already-running
+        // instance lands here, not in onCreate -- handle both so the adb-only trigger below
+        // works regardless of whether the app was already open.
+        maybeRunAdoptionFetchFromIntent(intent)
+        maybeRunWindowBenchFromIntent(intent)
     }
 
     override fun onResume() {
         super.onResume()
         refreshStatus()
         refreshEventList()
+    }
+
+    // -- §4.7 adoption-migration dry run (2026-09-05): READ-ONLY on-device portfolio fetch,
+    // triggered purely by adb intent extra rather than a tap -- this device's screen is locked
+    // with a pattern the operator has not shared (see BenchReceiver.kt's docstring for the same
+    // constraint on an earlier task), and task instructions forbid adding any new EXPORTED
+    // component to reach it. MainActivity is already exported (MAIN/LAUNCHER) for its ordinary
+    // purpose; this only adds intent-extra handling inside it, not a new component, and performs
+    // no UI interaction of its own -- everything is visible in logcat ("ADOPTFETCH: ...") and in
+    // the event log, and every produced file lands under outputDir for `adb pull`.
+    //
+    //   adb shell am start -n com.nightwatch.etoro/.MainActivity \
+    //     -a android.intent.action.MAIN -c android.intent.category.LAUNCHER \
+    //     --ez run_adopt_fetch true
+    private fun maybeRunAdoptionFetchFromIntent(intent: Intent?) {
+        if (intent == null || !intent.getBooleanExtra("run_adopt_fetch", false)) return
+        val configDir = File(filesDir, "nightwatch_config").absolutePath
+        val outputDir = File(filesDir, "nightwatch_adopt_fetch_output").absolutePath
+        android.util.Log.i("ADOPTFETCH", "starting: config_dir=$configDir output_dir=$outputDir")
+        store.log("ADOPT_FETCH_START", "config_dir=$configDir output_dir=$outputDir")
+        lifecycleScope.launch {
+            val result = withTimeoutOrNull(5 * 60 * 1000L) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        PyBridge.runAdoptionFetch(this@MainActivity, configDir, outputDir)
+                    } catch (e: Exception) {
+                        "EXCEPTION calling PyBridge.runAdoptionFetch: ${e.javaClass.simpleName}: ${e.message}"
+                    }
+                }
+            }
+            val summary = result ?: "TIMED OUT after 5 minutes waiting for the adoption fetch to return."
+            android.util.Log.i("ADOPTFETCH", "done: $summary")
+            store.log("ADOPT_FETCH_DONE", summary.take(4000))
+            refreshEventList()
+        }
+    }
+
+    // -- Window bench (2026-09-05), adb-only route: mirrors maybeRunAdoptionFetchFromIntent
+    // above -- runs the same full-history-vs-276-bar parse/compute benchmark as the
+    // "Run window bench" button, but triggered purely by an intent extra so it can be fired
+    // without unlocking the device's screen (this device's pattern lock was not shared). This
+    // replaces an earlier BenchReceiver broadcast receiver that was android:exported="true" with
+    // no permission guard and no input validation on the intent -- any other installed app could
+    // have broadcast into it. MainActivity is already exported (MAIN/LAUNCHER); this only adds
+    // intent-extra handling here, not a new exported component.
+    //
+    //   adb shell am start -n com.nightwatch.etoro/com.nightwatch.etoro.probe.MainActivity \
+    //     --ez run_window_bench true
+    private fun maybeRunWindowBenchFromIntent(intent: Intent?) {
+        if (intent == null || !intent.getBooleanExtra("run_window_bench", false)) return
+        runWindowBenchNow()
     }
 
     // --- Edge-to-edge (task Problem 2): pad for systemBars() + displayCutout(), top and bottom ---
@@ -385,6 +450,33 @@ class MainActivity : AppCompatActivity() {
             } else {
                 NotificationHelper.post(this@MainActivity, "Live probe finished", "See event log + $outputDir")
             }
+            refreshEventList()
+        }
+    }
+
+    // -- Window bench (2026-09-05): full-history vs 276-bar parse/compute cost on-device.
+    // No network call -- both payload JSON files must already be pushed onto the device
+    // (see doc, adb push into filesDir/nightwatch_bench_input/). Read-only, CPU/memory only. --
+    private fun runWindowBenchNow() {
+        val inputDir = File(filesDir, "nightwatch_bench_input")
+        val payload276 = File(inputDir, "payload_276.json").absolutePath
+        val payloadFull = File(inputDir, "payload_full.json").absolutePath
+        val outputDir = File(filesDir, "nightwatch_bench_output").absolutePath
+        binding.txtWindowBenchStatus.text = "Window bench: RUNNING -- output_dir=$outputDir"
+        store.log("WINDOW_BENCH_START", "payload_276=$payload276 payload_full=$payloadFull output_dir=$outputDir")
+        lifecycleScope.launch {
+            val result = withTimeoutOrNull(5 * 60 * 1000L) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        PyBridge.runWindowBench(this@MainActivity, payload276, payloadFull, outputDir)
+                    } catch (e: Exception) {
+                        "EXCEPTION calling PyBridge.runWindowBench: ${e.javaClass.simpleName}: ${e.message}"
+                    }
+                }
+            }
+            val summary = result ?: "TIMED OUT after 5 minutes waiting for the window bench to return."
+            store.log("WINDOW_BENCH_DONE", summary.take(4000))
+            binding.txtWindowBenchStatus.text = "Window bench: DONE -- see event log + adb pull $outputDir"
             refreshEventList()
         }
     }
