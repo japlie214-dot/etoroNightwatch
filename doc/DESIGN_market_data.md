@@ -208,6 +208,12 @@ divCash      →  per-day dividend
 50 req/hour, 1000/day (we need 3/day) · plain `httpx` GET with a query-param key · no JS
 challenge · reachable from this network.
 
+**The real ceiling, confirmed from the operator's Tiingo dashboard, 2026-09-05 — see §10.4.**
+This project had been sizing its fetch window against the *request* quota above while the
+account's actual binding limit is *bytes*: Tiingo's free tier is **1 GB bandwidth/month, 1000
+requests/day, 50 requests/hour, 500 unique symbols/month**. The bandwidth figure appeared nowhere
+in this document before this correction. §10.4 has the full sizing math this unblocks.
+
 **History depth, corrected — verified 2026-09-04.** The original "30+ years" figure was checked
 only against SPY. Full per-symbol verification shows it does not generalize:
 
@@ -1168,6 +1174,49 @@ Everything in §2.5 is build-time resolution. Unverified: that `numpy` 1.26.2, `
 
 Layer-2 bands must be derived from the forward test's observed per-symbol daily-return
 distribution, not carried over from the current 20%/60% guesses.
+
+**Rule this section exists to state:** set limits from observation, don't guess. Two concrete
+applications of it, recorded 2026-09-05:
+
+**(a) `provisional_close_deviation_pct` — calibrated.** See `config.MarketDataConfig`'s own
+docstring and `HANDOFF_2026-09-05_evening.md` §4 / `FINDINGS_window_live_2026-09-05.md` §3: 272
+common Tiingo-raw-vs-eToro dates, mean |dev| 0.128%, max 0.640%; set to 1.0% (0.010).
+`max_rate_age_minutes` and `rate_vs_candle_deviation_pct` remain provisional, pending the
+still-unbuilt forward test (§12 step 7).
+
+**(b) Tiingo's free-tier ceiling — corrected 2026-09-05, from the operator's own dashboard.**
+§2.7 recorded the request-count limits (50/hour, 1000/day) from Tiingo's public documentation but
+never recorded the account's bandwidth ceiling, and this project had implicitly been sizing its
+fetch window against the request quota — the wrong axis. The real, binding limits, confirmed
+2026-09-05:
+
+| limit | value |
+|---|---|
+| bandwidth | **1 GB/month** |
+| requests | 1000/day, 50/hour |
+| unique symbols | 500/month |
+
+This project fetches 3 symbols once/day: nowhere close to the request or symbol quotas. The
+binding constraint, if there is one, is bandwidth — so this is the number that matters for sizing
+the fetch window, and it had never been written down before this correction.
+
+**Measured payload sizes** (`HANDOFF_2026-09-05_evening.md` §3):
+
+| bars | span | payload |
+|---|---|---|
+| 276 | ~13 months | 94 KB |
+| 819 | ~39 months | 278 KB |
+| 4,184 | 2010-2026 (full SPY history) | 1.42 MB |
+
+Full history daily, one fetch/day, 3 symbols: **~43 MB/month at SPY's own size** (the other two
+managed symbols, UPRO from 2009-06-25 and SCHG from 2009-12-11, are shorter series and cost
+proportionally less) — **~4.2% of the 1 GB ceiling**, growing only ~2.5 MB/month per additional
+year of history (one more year ≈ 252 more bars ≈ 252 × ~340 bytes/bar). **Bandwidth is not a
+binding constraint today.** This is why `market/window.py` fetches full history from
+`FULL_HISTORY_START_DATE` ("2010-01-01") rather than a rolling window (operator decision,
+2026-09-05, superseding the same day's earlier 819-bar/39-month decision) — see that module's own
+docstring for the full reasoning, and `doc/DESIGN_ath_staircase.md` for the designed-but-not-built
+contingency if this ceiling ever does become binding.
 
 ### 10.5 Is eToro's trade history windowed? — ANSWERED 2026-09-05: no. CLOSED
 

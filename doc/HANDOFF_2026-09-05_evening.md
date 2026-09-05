@@ -38,8 +38,8 @@ has earned: **a green suite is evidence about your fixtures, not about eToro.**
 | Fee model | ✅ settled across all 120 closed trades | `FINDINGS_fees_2026-09-05.md` |
 | Sleeve arithmetic (SCHG $44,866.97, UPRO $4,046.98, equity $50,178.53) | ✅ re-measured live, matches §10.11 exactly | section D |
 | Five eToro parser bugs | ✅ fixed, tested | `etoro/client.py` |
-| **ATH is a 276-bar high, not all-time** | ❌ **BUG, unfixed** | §3 below |
-| **`adjClose` vs raw `close` bases mixed incoherently** | ❌ **BUG, unfixed** | §4 below |
+| **ATH is a 276-bar high, not all-time** | ✅ **FIXED** (2026-09-05, superseded twice — see §3) | `market/window.py`'s fetch now covers full history from `FULL_HISTORY_START_DATE` ("2010-01-01"); the rolling ATH is the full-history ATH by construction, every session |
+| **`adjClose` vs raw `close` bases mixed incoherently** | ✅ **FIXED** | `market/window.py`'s `_spy_context_with_provisional` (raw `close` for ATH/drawdown/tier, `adj_close` for `cone_5_z`) and `market/adopt.py`'s `SpyContext`/`build_spy_context_index` (raw `close` throughout) — matches §4's table exactly |
 | Gates 1–9, 11, 12 + `run_preflight` | ❌ comment-only stubs | `engine/preflight.py` |
 | Gate 10 items 2, 4, 5 | ❌ unbuilt (item 2 now unblocked) | |
 | `strategy/ladder.py`, `state.py`, `engine/session.py` | ❌ stubs | |
@@ -48,7 +48,8 @@ has earned: **a green suite is evidence about your fixtures, not about eToro.**
 | UPRO rates-freeze re-poll | ❌ needs an open market — **Friday 2026-09-11** | |
 | Everything else in `window.py` / `cone.py` against live data | ⚠️ section F is the ONLY live exercise; the rest is fakes | |
 
-Tests: **495 passed** (from 392 at session start).
+Tests: **495 passed** (from 392 at session start). **Update, 2026-09-05 (later the same day):
+509 passed** — verified by running the suite after the window/basis/floor fixes below landed.
 
 ---
 
@@ -61,7 +62,15 @@ The error runs in the dangerous direction: a peak that ages out of the window ma
 shallower, the tier read lower, and `TIER_CAPS` (cumulative budget ceilings) permit **less**
 capital precisely in the prolonged drawdowns the deep tiers exist for.
 
-**Decided 2026-09-05: use a 39-month (819-bar) window.** Measured on 4,184 SPY bars (2010–2026):
+**Decided 2026-09-05: use a 39-month (819-bar) window.** ~~**SUPERSEDED, 2026-09-05, a few
+hours after this was written (§7):** the operator aborted the 39-month window and replaced it
+with full history fetched from `FULL_HISTORY_START_DATE` ("2010-01-01"), because Tiingo's real
+free-tier ceiling is **1 GB/month bandwidth** (also 1000 req/day, 50/hour, 500 symbols/month),
+and full history costs ~43 MB/month ≈ 4.2% of that ceiling — there was never a bandwidth reason
+to accept a rolling window's blind spot at all. The measurement table below is unchanged and
+remains real, measured evidence for why a *short* window (276/504 bars) was wrong; only the
+*conclusion drawn from it* (819 bars vs. full history) changed, not the data itself.~~
+Measured on 4,184 SPY bars (2010–2026):
 
 | window | months | bytes/fetch | dd understated | tier differs | max gap |
 |---|---|---|---|---|---|
@@ -92,6 +101,17 @@ state `DESIGN_market_data.md` §2.2 exists to prevent, and a stored ATH from an 
 dividend-adjustment epoch would be in stale units. Extend the single fetch — one fetch is still
 one epoch.
 
+**Update, 2026-09-05 (later the same day): a narrow, rigorous exception is now designed (not
+built) in `doc/DESIGN_ath_staircase.md`.** This prohibition still stands as the default — do not
+persist a running ATH over adjusted prices. The staircase design is a different, more specific
+thing: a monotone list of raw-`close` new-highs only, argued to be legitimate precisely because
+(a) raw `close` is never retroactively revised the way `adjClose` is, and (b) a max over
+*closed* history is a re-derivable, verifiable cache, not drifting accumulated state — see that
+document's §3 for the full argument and §5 for how it stays checked against a fresh fetch. It is
+explicitly gated behind a bandwidth trigger (its §7: build only if Tiingo's free tier drops below
+~215 MB/month) that is nowhere near firing today (~43 MB/month, ~4.2% of the current 1 GB
+ceiling) — it is insurance, not a pending change to this prohibition.
+
 **Known limit of the measurement:** the dataset starts in 2010, so it cannot test 2008 (peak
 Oct 2007, not regained until roughly Mar 2013 — about 65 months) or 2000–2002. A 39-month window
 would have understated drawdown through 2011–2013. If a 2008-scale event is in scope, only full
@@ -105,6 +125,20 @@ should the app handle it? should we just lump it to tier 1?"*
 The right answer depends on **which** of three cases you are in, and only two of them need a
 policy at all. 39 months is a reprieve, not a permanent fix — SCHG is a long-hold core book, so
 today's positions age past *any* fixed window eventually.
+
+**Update, 2026-09-05 (later the same day): the premise changed, the guards stay.** With the
+39-month window superseded by full history from 2010 (§7), the live app's rolling ATH *is* the
+full-history ATH every session, so Case 2 (a stamped `entry_spy_ath` exceeding the rolling ATH)
+and Case 3 (a position predating the fetched window) are no longer *expected* paths under
+ordinary operation — a real SCHG/UPRO position cannot predate 2010. Both are **retained
+deliberately, as invariant guards, not deleted**: the §3a ATH floor (Case 2, below) is free and
+monotone-correct even when it rarely engages, and the Case-3 HALT still protects against a
+corrupted `openDateTime`, a future narrowing of the fetch window, or any other anomaly that could
+otherwise silently assign a fabricated tier. Both are now **implemented**: the floor in
+`market/window.py`'s `_spy_context_with_provisional` (`current_ath = max(rolling_window_ath,
+max(entry_spy_ath for every OPEN lot))`), and the halt in `market/adopt.py`'s
+`build_adoption_plan`, whose own in-code comment (2026-09-05) records this same near-unreachable
+-guard framing.
 
 **Case 1 — a position ages past the window after the app bought it. NOT A PROBLEM.**
 `DESIGN_market_data.md` §4.3 requires `entry_spy_ath`/`entry_spy_close`/`entry_spy_drawdown`/
@@ -221,18 +255,34 @@ first real distribution available.
 
 ## 6. TODO — in priority order
 
-**Blocking correctness**
+**Blocking correctness — items 1-4 below are DONE as of 2026-09-05 (later the same day this
+handoff was written); kept here, marked, rather than deleted, per this project's audit-trail
+practice:**
 
-1. **Fix the ATH window to 39 months / 819 bars** (§3). Highest priority: it silently
-   under-deploys capital in crashes *and* strands 72 positions from the migration.
-2. **Implement §3a's ATH floor** — `current_ath = max(rolling_window_ath, max(entry_spy_ath of
-   every open lot))`. Free, monotone-correct, and closes the case where a lot sits above the
-   rolling ATH. Also add `entry_context_source` provenance to `lot_annotations`, and make
-   `market/adopt.py` HALT rather than guess a tier when a position predates the window.
-3. **Implement the basis split** (§4): `adjClose` for `cone_5_z`, raw `close` for ATH/tier and
-   every eToro cross-check. Audit `window.py` and `adopt.py` for mixed use.
-4. **Re-set `provisional_close_deviation_pct`** from §4's measured distribution instead of the
-   documented placeholder.
+1. ~~**Fix the ATH window to 39 months / 819 bars** (§3).~~ **DONE — superseded, not merely
+   fixed as specified.** The operator replaced the 39-month window with full history from 2010
+   (§7) before this item was ever built against 819 bars; `market/window.py`'s fetch now covers
+   full available history every session, so the ATH is the true all-time high by construction,
+   and the migration-stranding concern is moot (full history's 2010 floor covers the same ground
+   the 39-month table already showed was sufficient).
+2. ~~**Implement §3a's ATH floor**~~ **DONE.** `market/window.py`'s
+   `_spy_context_with_provisional` implements `current_ath = max(rolling_window_ath,
+   max(entry_spy_ath of every open lot))` (`open_lot_entry_spy_ath` is now a required, no-default
+   parameter, after a "silently never engaged" defect in an earlier defaulted-empty version was
+   found and fixed). `entry_context_source` provenance (`'derived'` / `'assumed_out_of_window'`)
+   is live in `lot_annotations` via migration 005, and `market/adopt.py`'s `build_adoption_plan`
+   HALTs (an `UnresolvedPosition` that `run_adoption_backfill` turns into an `AdoptionError`)
+   rather than guessing a tier for an out-of-window position — see §3a's update above.
+3. ~~**Implement the basis split**~~ **DONE.** `market/window.py` uses `adj_close` for
+   `cone_5_z` and raw `close` for ATH/drawdown/tier; `market/adopt.py`'s `SpyContext` and
+   `build_spy_context_index` use raw `close` throughout — matches §4's table exactly, audited in
+   both modules.
+4. ~~**Re-set `provisional_close_deviation_pct`**~~ **DONE.** `config.py`'s
+   `MarketDataConfig.provisional_close_deviation_pct` is now **0.010** (1.0%), calibrated from
+   the measured 272-date Tiingo-raw-vs-eToro distribution (mean 0.128%, max 0.640%) — **this
+   value is operator-accepted; do not change it.** `max_rate_age_minutes` and
+   `rate_vs_candle_deviation_pct` remain provisional placeholders (see `config.py`'s own updated
+   docstring) — still open, not part of this DONE set.
 
 **The product**
 
@@ -247,9 +297,9 @@ first real distribution available.
 
 **Operations**
 
-8. Run the adoption migration against the live account — unblocked now, but **only after** the ATH
-   window fix (§3), or 72 positions get the wrong `entry_tier`. Re-measure immediately before
-   writing.
+8. Run the adoption migration against the live account — the ATH window prerequisite (§3) is now
+   **satisfied** (items 1-4 above are DONE), but the migration itself has **not** been run against
+   the live account as of this writing. Still open. Re-measure immediately before writing.
 9. **Friday 2026-09-11:** the UPRO rates-freeze re-poll (§10.6(a)) — the only remaining item that
    genuinely needs an open market.
 10. Send or hold the eToro bug report (`doc/etoroTicket.md`) — awaiting operator review.
@@ -268,8 +318,18 @@ first real distribution available.
 
 - **Should the strategy rebalance toward the core floor?** Unspecified anywhere. Carried forward
   unchanged for three handoffs now.
-- **Is a 39-month ATH window enough?** Exact on 2010–2026, untestable against 2008 (~65-month
-  recovery). Accepted with eyes open (§3).
+- ~~**Is a 39-month ATH window enough?**~~ **CLOSED, 2026-09-05, superseded same day.** The
+  operator aborted the 39-month/819-bar window a few hours after this handoff was written and
+  replaced it with full history from `FULL_HISTORY_START_DATE` ("2010-01-01") -- bandwidth
+  measurements (§3's own table) showed full history costs ~43 MB/month, ~4.2% of Tiingo's real 1
+  GB/month ceiling (DESIGN_market_data.md §10.4), so there was no longer a bandwidth reason to
+  accept a rolling window's blind spot at all. The live app's rolling-window ATH now **is** the
+  full-history ATH, by construction, every session -- this question does not recur for the live
+  app. It is **not** fully closed in the abstract: the fetch still starts at 2010 (the ETF-inception
+  floor for UPRO/SCHG), so a 2008-scale event (peak Oct 2007, not regained until ~Mar 2013) or
+  1999-2002 would still be invisible to it, exactly as a 39-month window would have been. That
+  residual limit is accepted with eyes open, same as before -- it is just a much smaller one now
+  (missing 2008-2009 rather than missing the last three years).
 - **T-10 vs T-30 divergence** — decision made (T-30 stays), but the forward-test replay is still
   worth running as a measurement.
 - **Does the disclosed `$0.15 transactionFee` ever hit cash?** Needs a live order; deferred to
