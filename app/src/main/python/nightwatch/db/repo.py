@@ -275,6 +275,17 @@ class LotAnnotation:
     pre-existing position whose SPY entry context was reconstructed from
     history because nothing was ever stamped for it. Both are fully
     managed once a row exists.
+
+    ``entry_context_source`` (migration 005, HANDOFF_2026-09-05_evening.md
+    §3a) is a second, orthogonal provenance column, also never an access
+    gate: ``'derived'`` for context that was genuinely computed (from
+    measured history for an adopted lot, or a live stamped close for an
+    app-created one) versus ``'assumed_out_of_window'``, reserved for a
+    lot whose SPY entry context had to be guessed because its open date
+    predates the fetched SPY window entirely. ``market.adopt`` never
+    produces the latter today -- it halts the whole backfill instead of
+    guessing (§3a Case 3) -- the value exists so a future override path, if
+    one is ever built, has somewhere honest to record that it guessed.
     """
 
     position_id: str
@@ -283,6 +294,7 @@ class LotAnnotation:
     entry_date: str
     entry_amount: float
     origin: str
+    entry_context_source: str = "derived"
     entry_reference_spy: float | None = None
     entry_spy_ath: float | None = None
     entry_spy_close: float | None = None
@@ -1291,6 +1303,12 @@ class Repo:
                 f"lot_annotations.origin must be 'app' or 'adopted', got "
                 f"{annotation.origin!r} (position_id={annotation.position_id!r})"
             )
+        if annotation.entry_context_source not in ("derived", "assumed_out_of_window"):
+            raise ValueError(
+                "lot_annotations.entry_context_source must be 'derived' or "
+                f"'assumed_out_of_window', got {annotation.entry_context_source!r} "
+                f"(position_id={annotation.position_id!r})"
+            )
 
     def insert_lot_annotation(self, annotation: LotAnnotation) -> None:
         """Insert one sidecar row. Raises ``sqlite3.IntegrityError`` if
@@ -1308,8 +1326,8 @@ class Repo:
                 position_id, symbol, book, entry_reference_spy, entry_spy_ath,
                 entry_spy_close, entry_spy_drawdown, entry_tier, bucket_id,
                 entry_order_id, exit_order_id, entry_date, entry_amount,
-                is_open, origin, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_open, origin, entry_context_source, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 annotation.position_id, annotation.symbol, annotation.book,
@@ -1319,6 +1337,7 @@ class Repo:
                 annotation.entry_order_id, annotation.exit_order_id,
                 annotation.entry_date, annotation.entry_amount,
                 int(annotation.is_open), annotation.origin,
+                annotation.entry_context_source,
                 annotation.created_at or now, annotation.updated_at or now,
             ),
         )
@@ -1372,8 +1391,8 @@ class Repo:
                         entry_spy_ath, entry_spy_close, entry_spy_drawdown,
                         entry_tier, bucket_id, entry_order_id, exit_order_id,
                         entry_date, entry_amount, is_open, origin,
-                        created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        entry_context_source, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         annotation.position_id, annotation.symbol,
@@ -1383,7 +1402,8 @@ class Repo:
                         annotation.bucket_id, annotation.entry_order_id,
                         annotation.exit_order_id, annotation.entry_date,
                         annotation.entry_amount, int(annotation.is_open),
-                        annotation.origin, annotation.created_at or now,
+                        annotation.origin, annotation.entry_context_source,
+                        annotation.created_at or now,
                         annotation.updated_at or now,
                     ),
                 )
@@ -1408,7 +1428,9 @@ class Repo:
             entry_order_id=row["entry_order_id"],
             exit_order_id=row["exit_order_id"], entry_date=row["entry_date"],
             entry_amount=row["entry_amount"], is_open=bool(row["is_open"]),
-            origin=row["origin"], created_at=row["created_at"],
+            origin=row["origin"],
+            entry_context_source=row["entry_context_source"],
+            created_at=row["created_at"],
             updated_at=row["updated_at"],
         )
 

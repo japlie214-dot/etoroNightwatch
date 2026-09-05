@@ -448,14 +448,19 @@ class TiingoConfig:
 class MarketDataConfig:
     """Preflight gate 10 tolerances (DESIGN_market_data.md §6, §10.4).
 
-    **These are provisional placeholders, not calibrated numbers.** §10.4 is
-    explicit that the real values must come from the forward test's observed
-    per-symbol daily-return distribution, not be guessed. The defaults below
-    are chosen only to sit between the two magnitudes this session's live
-    evidence established (DESIGN_market_data.md §2.9, §2.11(C)): eToro's own
-    candle-vs-rates venue/timing noise is ~0.1%, while the UPRO rates-freeze
-    bug measured +1.322%/+19.0h -- both tolerances below are set to catch the
-    latter while tolerating the former, pending real calibration.
+    **Partially calibrated as of 2026-09-05.**
+    ``provisional_close_deviation_pct`` now comes from a real observed
+    distribution (272 dates of Tiingo-raw-vs-eToro deviation, see its own
+    field docstring) -- §10.4's requirement is satisfied for that one field.
+    ``max_rate_age_minutes`` and ``rate_vs_candle_deviation_pct`` remain
+    provisional placeholders: §10.4 is explicit the real values must come
+    from the forward test's observed per-symbol distribution (still
+    unbuilt, DESIGN_market_data.md §12 step 7), not be guessed. Their
+    defaults are chosen only to sit between the two magnitudes this
+    session's live evidence established (DESIGN_market_data.md §2.9,
+    §2.11(C)): eToro's own candle-vs-rates venue/timing noise is ~0.1%,
+    while the UPRO rates-freeze bug measured +1.322%/+19.0h -- set to catch
+    the latter while tolerating the former, pending real calibration.
     """
 
     #: Max age of ``Rate.timestamp`` before a live quote is considered stale,
@@ -473,8 +478,26 @@ class MarketDataConfig:
     #: Max fractional deviation between the provisional close actually used
     #: (Tiingo IEX primary, or eToro candle fallback) and eToro's own candle,
     #: when both are available to cross-check (DESIGN_market_data §3.1, §5.1,
-    #: §8). Same magnitude reasoning as above.
-    provisional_close_deviation_pct: float = 0.0075
+    #: §8, §10.4).
+    #:
+    #: **Set from a real observed distribution, 2026-09-05** (HANDOFF_2026-09
+    #: -05_evening.md §4; FINDINGS_window_live_2026-09-05.md §3): Tiingo raw
+    #: ``close`` vs eToro candle ``close`` -- both raw, like-with-like, per
+    #: the §4 basis split (an ``adjClose``-vs-eToro comparison at the window
+    #: edge diverges 1.09% and would breach any sane tolerance; this
+    #: comparison must never be, and today is not, that one --
+    #: ``engine/preflight.py``'s ``_check_provisional_close`` compares
+    #: ``ProvisionalClose.value`` (always raw: Tiingo IEX ``tngoLast`` or a
+    #: raw eToro candle close) against ``Candle.close`` (also raw), verified
+    #: 2026-09-05) -- across 272 common dates, 2025-08-01..2026-09-04: mean
+    #: |dev| 0.128%, median 0.124%, max 0.640%. Set to 1.0% (0.010): ~56%
+    #: headroom above the observed max (0.640%) so ordinary venue/timing
+    #: noise never trips it, while staying comfortably below the +1.322%
+    #: UPRO rates-freeze error (§2.9) this gate must still catch. Was the
+    #: placeholder 0.0075 (0.75%), which the observed max sat uncomfortably
+    #: close to -- revisit again once the forward test accumulates its own
+    #: distribution (§10.4).
+    provisional_close_deviation_pct: float = 0.010
     #: Max age of ``Candle.timestamp`` before an **intraday** candle
     #: (``OneMinute``, ``FiveMinutes``, ... ``FourHours`` --
     #: ``engine.preflight.INTRADAY_CANDLE_INTERVALS``) is considered stale
@@ -787,7 +810,7 @@ def load_config(
         max_rate_age_minutes=float(md.get("max_rate_age_minutes", 15.0)),
         rate_vs_candle_deviation_pct=float(md.get("rate_vs_candle_deviation_pct", 0.0075)),
         provisional_close_deviation_pct=float(
-            md.get("provisional_close_deviation_pct", 0.0075)
+            md.get("provisional_close_deviation_pct", 0.010)
         ),
         max_candle_age_minutes_intraday=float(
             md.get("max_candle_age_minutes_intraday", 20.0)

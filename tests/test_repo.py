@@ -285,6 +285,19 @@ def test_lot_annotation_round_trip(repo: Repo) -> None:
     assert row.is_open is True
     assert row.bucket_id is None
     assert row.created_at is not None
+    # migration 005, HANDOFF_2026-09-05_evening.md §3a: defaults to
+    # 'derived' -- every row this codebase writes today has measured, never
+    # guessed, SPY context.
+    assert row.entry_context_source == "derived"
+
+
+def test_lot_annotation_entry_context_source_round_trips_explicitly(repo: Repo) -> None:
+    repo.insert_lot_annotation(
+        _annotation("pos-assumed", entry_context_source="assumed_out_of_window")
+    )
+    row = repo.get_lot_annotation("pos-assumed")
+    assert row is not None
+    assert row.entry_context_source == "assumed_out_of_window"
 
 
 def test_insert_lot_annotation_rejects_duplicate_position_id(repo: Repo) -> None:
@@ -298,6 +311,14 @@ def test_insert_lot_annotation_rejects_bad_book_or_origin(repo: Repo) -> None:
         repo.insert_lot_annotation(_annotation("pos-bad-book", book="not-a-book"))
     with pytest.raises(ValueError, match="origin"):
         repo.insert_lot_annotation(_annotation("pos-bad-origin", origin="legacy"))
+    assert repo.list_lot_annotations() == []
+
+
+def test_insert_lot_annotation_rejects_bad_entry_context_source(repo: Repo) -> None:
+    with pytest.raises(ValueError, match="entry_context_source"):
+        repo.insert_lot_annotation(
+            _annotation("pos-bad-context", entry_context_source="guessed")
+        )
     assert repo.list_lot_annotations() == []
 
 

@@ -183,6 +183,19 @@ def test_spy_context_index_unsorted_input_still_correct() -> None:
     assert index["2024-12-02"].ath == 110.0
 
 
+def test_spy_context_index_uses_raw_close_not_adj_close() -> None:
+    """HANDOFF_2026-09-05_evening.md §4: ATH/drawdown/tier are LEVELS and
+    must be derived from raw ``close``, never ``adjClose`` -- unlike this
+    module's earlier docstring, which (before this fix) claimed adjClose."""
+    bars = [
+        EodBar(date="2024-01-02", close=100.0, adj_close=80.0, split_factor=1.0, div_cash=0.0),
+    ]
+    index = build_spy_context_index(bars)
+    assert index["2024-01-02"].ath == 100.0  # raw close, not the lower adjClose
+    assert index["2024-01-02"].close == 100.0
+    assert index["2024-01-02"].drawdown == 0.0
+
+
 # -- build_adoption_plan / run_adoption_backfill: the happy path -------------
 
 
@@ -247,6 +260,10 @@ def test_apply_writes_exactly_the_planned_rows_with_correct_fields(repo: Repo) -
     assert row.entry_spy_close == 104.5
     assert row.entry_spy_drawdown == pytest.approx(-0.05)
     assert row.entry_tier == 0
+    # migration 005, HANDOFF_2026-09-05_evening.md §3a: every position this
+    # module resolves has MEASURED context -- an out-of-window position
+    # halts the whole run instead (see the predates-window tests below).
+    assert row.entry_context_source == "derived"
 
     # AAPL must never get a row.
     assert repo.get_lot_annotation("AAPL-1") is None
@@ -351,6 +368,79 @@ def test_spy_series_not_covering_open_date_halts(repo: Repo) -> None:
         run_adoption_backfill(repo, positions, SPY_BARS, dry_run=False)
 
     assert repo.list_lot_annotations() == []
+
+
+def test_position_predating_the_fetched_window_halts_with_a_specific_reason(repo: Repo) -> None:
+    """HANDOFF_2026-09-05_evening.md §3a Case 3: a position whose open_date
+    predates the fetched SPY window entirely must HALT LOUDLY, name the
+    offending position, and write NOTHING -- never silently assign a tier.
+    This is the same underlying "SPY series does not cover" mechanism as
+    the general-gap case above, but this position's open date is before
+    SPY_BARS's very first bar (2024-01-02), so it gets the more specific
+    "predates the fetched SPY window" reason, not merely a generic gap."""
+    _seed_instruments(repo)
+    positions = [
+        *_populated_positions(),
+        _position(
+            "SCHG-PREDATES-WINDOW", SCHG_ID, units=1.0, entry_price=1.0,
+            amount=1.0, open_date="2020-01-01T10:00:00+00:00",
+        ),
+    ]
+
+    with pytest.raises(AdoptionError, match="PREDATES") as excinfo:
+        run_adoption_backfill(repo, positions, SPY_BARS, dry_run=False)
+    assert "SCHG-PREDATES-WINDOW" in str(excinfo.value)
+    # Named per §3a's explicit disagreement: if an override is ever added,
+    # the assumed tier must be 0, never 1.
+    assert "tier 0" in str(excinfo.value) or "tier 1" in str(excinfo.value)
+
+    # Atomic: nothing at all was written, including the otherwise-valid 8
+    # positions.
+    assert repo.list_lot_annotations() == []
+
+
+def test_dry_run_also_surfaces_a_predates_window_halt(repo: Repo) -> None:
+    """§3a's halt must be visible in a dry run too (task brief item 5: a
+    dry run must not report a falsely clean plan when the real run would
+    halt) -- mirrors the existing unknown-instrument dry-run test above."""
+    _seed_instruments(repo)
+    positions = [
+        *_populated_positions(),
+        _position(
+            "SCHG-PREDATES-WINDOW", SCHG_ID, units=1.0, entry_price=1.0,
+            amount=1.0, open_date="2020-01-01T10:00:00+00:00",
+        ),
+    ]
+
+    with pytest.raises(AdoptionError, match="PREDATES"):
+        run_adoption_backfill(repo, positions, SPY_BARS, dry_run=True)
+
+    assert repo.list_lot_annotations() == []
+
+
+def test_build_adoption_plan_gives_predates_window_positions_a_specific_reason() -> None:
+    """Lower-level check on the pure function's reason string itself,
+    independent of the atomic-write behaviour covered above."""
+    instruments_by_id = {SCHG_ID: Instrument(symbol="SCHG", instrument_id=SCHG_ID)}
+    spy_context = build_spy_context_index(SPY_BARS)  # earliest bar 2024-01-02
+
+    positions = [
+        _position(
+            "SCHG-PREDATES", SCHG_ID, units=1.0, entry_price=1.0, amount=1.0,
+            open_date="2020-01-01T10:00:00+00:00",
+        ),
+    ]
+    plan = build_adoption_plan(
+        positions,
+        instruments_by_id=instruments_by_id,
+        spy_context=spy_context,
+        managed_symbols=("SCHG", "UPRO"),
+    )
+
+    assert len(plan.unresolved) == 1
+    assert plan.unresolved[0].position_id == "SCHG-PREDATES"
+    assert "PREDATES" in plan.unresolved[0].reason
+    assert "2024-01-02" in plan.unresolved[0].reason  # names the window's earliest bar
 
 
 def test_missing_open_date_is_unresolved(repo: Repo) -> None:

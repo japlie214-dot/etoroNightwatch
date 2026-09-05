@@ -47,11 +47,23 @@ handled by *re-running* this same function, not by a standing loop.
   adopted.
 * :class:`UnresolvedPosition` -- a position the backfill genuinely cannot
   make sense of: an ``instrumentID`` absent from the ``instruments`` table,
-  an ``openDateTime`` the fetched SPY series does not cover, or a missing
-  required broker field. :func:`run_adoption_backfill` treats ANY
-  unresolved position as reason to write nothing at all (task brief: "a
-  partial backfill that half-satisfies gate 11 invariant 1 is worse than
-  none").
+  an ``openDateTime`` the fetched SPY series does not cover (including a
+  position that PREDATES the fetched window entirely --
+  HANDOFF_2026-09-05_evening.md §3a Case 3, given its own, more specific
+  reason string in :func:`build_adoption_plan`), or a missing required
+  broker field. :func:`run_adoption_backfill` treats ANY unresolved
+  position as reason to write nothing at all (task brief: "a partial
+  backfill that half-satisfies gate 11 invariant 1 is worse than none").
+  There is no override path here that assigns a tier to an out-of-window
+  position -- HALT is the only behaviour this module implements for that
+  case, by design (§3a: "a guessed tier that is indistinguishable from a
+  measured one is this project's exact pathology"). If an override is ever
+  added, §3a is explicit it must assign tier 0, not tier 1.
+
+**Basis note (HANDOFF_2026-09-05_evening.md §4, decided 2026-09-05):**
+``entry_spy_ath``/``entry_spy_close``/``entry_spy_drawdown``/``entry_tier``
+are derived from Tiingo's raw ``close``, not ``adjClose`` -- they are
+LEVELS, not returns; see :class:`SpyContext`'s docstring.
 """
 
 from __future__ import annotations
@@ -73,6 +85,7 @@ __all__ = [
     "AdoptionPlan",
     "DEFAULT_BOOK",
     "DEFAULT_ORIGIN",
+    "DEFAULT_ENTRY_CONTEXT_SOURCE",
     "build_spy_context_index",
     "build_adoption_plan",
     "run_adoption_backfill",
@@ -86,6 +99,16 @@ DEFAULT_BOOK = "catapult"
 
 #: Provenance, never an access gate (§4.4's origin column comment, §4.7).
 DEFAULT_ORIGIN = "adopted"
+
+#: Every row this module ever writes has measured, not guessed, SPY context
+#: -- the only positions it resolves are ones whose openDateTime the fetched
+#: SPY window actually covers (HANDOFF_2026-09-05_evening.md §3a: an
+#: out-of-window position is UnresolvedPosition and halts the whole run, it
+#: never reaches a write). ``'assumed_out_of_window'`` is the other value
+#: ``lot_annotations.entry_context_source`` accepts (migration 005); it is
+#: reserved for a possible future override of that halt and is never
+#: produced by this module today.
+DEFAULT_ENTRY_CONTEXT_SOURCE = "derived"
 
 
 class AdoptionError(Exception):
@@ -104,11 +127,16 @@ class AdoptionError(Exception):
 class SpyContext:
     """SPY all-time-high / close / drawdown / tier as of one trading date.
 
-    Computed from Tiingo's ``adjClose`` series (DESIGN_market_data.md §3.1:
-    "adjClose series -> cone_5_z, ath, drawdown, tier"), the same field the
-    live session's own signal derivation reads -- an adopted position's
-    reconstructed SPY context is on the same footing as a live one's, not a
-    different, ad hoc calculation.
+    **Basis: raw ``close``, not ``adjClose``** (HANDOFF_2026-09-05_evening.md
+    §4, decided 2026-09-05, correcting this docstring's earlier claim that
+    ``adjClose`` drives ATH/drawdown/tier). ATH/drawdown/tier are LEVELS --
+    compared against traded prices, and the entry_tier this produces is
+    used exactly like a live-derived one (``market.window``'s
+    ``_spy_context_with_provisional``, same basis) -- never RETURNS, so the
+    ``adjClose`` reasoning that correctly governs ``cone_5_z`` does not apply
+    here. An adopted position's reconstructed SPY context is on the same
+    footing as a live one's, not a different, ad hoc calculation -- and now
+    on the same *basis* as one too.
     """
 
     ath: float
@@ -215,9 +243,12 @@ def build_spy_context_index(spy_bars: Sequence[EodBar]) -> dict[str, SpyContext]
     ``spy_bars`` need not be pre-sorted -- this sorts by date before the
     running-ATH pass.
 
+    **Basis: raw ``close``** (HANDOFF_2026-09-05_evening.md §4) -- see
+    :class:`SpyContext`'s own docstring for why.
+
     **Inclusive convention, stated explicitly because DESIGN_market_data.md
     does not spell it out for this specific reconstruction:** the ATH as of
-    a given date is the maximum ``adjClose`` over every bar up to and
+    a given date is the maximum raw ``close`` over every bar up to and
     INCLUDING that date, so a new-ATH day itself has ``drawdown == 0.0``,
     not the day after. This is the natural reading of "entry_spy_ath ...
     computed from openDateTime plus a long Tiingo SPY series" (§4.7), but it
@@ -228,11 +259,11 @@ def build_spy_context_index(spy_bars: Sequence[EodBar]) -> dict[str, SpyContext]
     index: dict[str, SpyContext] = {}
     running_ath = float("-inf")
     for bar in ordered:
-        running_ath = max(running_ath, bar.adj_close)
-        drawdown = (bar.adj_close - running_ath) / running_ath
+        running_ath = max(running_ath, bar.close)
+        drawdown = (bar.close - running_ath) / running_ath
         index[bar.date] = SpyContext(
             ath=running_ath,
-            close=bar.adj_close,
+            close=bar.close,
             drawdown=drawdown,
             tier=tier_for_drawdown(drawdown),
         )
@@ -296,6 +327,12 @@ def build_adoption_plan(
     already = set(already_annotated)
     managed = set(managed_symbols)
     plan = AdoptionPlan()
+    # Earliest date the fetched SPY window actually covers -- used only to
+    # give a "predates the window" halt (below) a more specific reason than
+    # the generic "does not cover" message (HANDOFF_2026-09-05_evening.md
+    # §3a Case 3). Not used for any resolution decision -- `spy_context.get`
+    # below is still the sole source of truth for whether a date resolves.
+    window_start = min(spy_context) if spy_context else None
 
     for position in positions:
         instrument = instruments_by_id.get(position.instrument_id)
@@ -343,16 +380,61 @@ def build_adoption_plan(
         trading_date = _entry_trading_date(position.open_date)
         context = spy_context.get(trading_date)
         if context is None:
-            plan.unresolved.append(
-                UnresolvedPosition(
-                    position_id=position.position_id,
-                    reason=(
-                        f"SPY series does not cover {trading_date!r} "
-                        f"(openDateTime={position.open_date!r}) -- cannot "
-                        "derive entry_spy_ath/entry_spy_close/"
-                        "entry_spy_drawdown/entry_tier"
-                    ),
+            if window_start is not None and trading_date < window_start:
+                # HANDOFF_2026-09-05_evening.md §3a Case 3: a position opened
+                # before the fetched SPY window even starts. HALT LOUDLY --
+                # do not silently assign a tier. A guessed tier that is
+                # indistinguishable from a measured one is this project's
+                # exact recurring pathology. There is no override path built
+                # here: if the operator later adds one, the assigned tier
+                # MUST be 0, not 1 -- a position bought above every price in
+                # the window was, by definition, bought at a high (entry
+                # drawdown ~0, which is tier 0); asserting tier 1 would claim
+                # a -10%-to--15% entry drawdown the data actively
+                # contradicts. Recorded as an explicit disagreement with an
+                # earlier "just lump it to tier 1" suggestion, not a default
+                # to fall into silently.
+                #
+                # **Near-unreachable as of 2026-09-05** (operator decision,
+                # same day, overriding the 819-bar window this halt was
+                # originally written against): the live fetch now starts at
+                # ``market.window.FULL_HISTORY_START_DATE`` ("2010-01-01"),
+                # the ETF-inception floor for both managed symbols, so this
+                # branch fires only if a position's own ``openDateTime``
+                # somehow predates 2010 -- effectively impossible for a real
+                # SCHG/UPRO position. It is intentionally KEPT, not deleted:
+                # with a fixed 2010 floor this is no longer an expected path
+                # (it was, briefly, under the superseded 819-bar/39-month
+                # window, where a long-held SCHG lot could plausibly age
+                # past the window) -- it is now a genuine invariant guard
+                # against a data anomaly (a corrupt/garbled openDateTime, or
+                # a future change that narrows the fetch again without
+                # updating this comment). "Widen the fetch window" is no
+                # longer actionable advice once the window is already full
+                # history; the reason string below says so.
+                reason = (
+                    f"SPY series does not cover {trading_date!r} -- "
+                    f"position {position.position_id!r} opened at "
+                    f"{position.open_date!r}, which PREDATES the fetched "
+                    f"SPY window (earliest bar {window_start!r}, expected "
+                    "to be at or near market.window.FULL_HISTORY_START_DATE "
+                    "\"2010-01-01\"). Refusing to fabricate entry_spy_ath/"
+                    "entry_spy_close/entry_spy_drawdown/entry_tier for a "
+                    "position with no measured context -- this should be "
+                    "unreachable for a real SCHG/UPRO position given the "
+                    "2010 fetch floor; treat this as a data anomaly "
+                    "(corrupt openDateTime, or a fetch window narrower than "
+                    "expected) rather than widening the window further."
                 )
+            else:
+                reason = (
+                    f"SPY series does not cover {trading_date!r} "
+                    f"(openDateTime={position.open_date!r}) -- cannot "
+                    "derive entry_spy_ath/entry_spy_close/"
+                    "entry_spy_drawdown/entry_tier"
+                )
+            plan.unresolved.append(
+                UnresolvedPosition(position_id=position.position_id, reason=reason)
             )
             continue
 
@@ -364,6 +446,12 @@ def build_adoption_plan(
                 entry_date=position.open_date,
                 entry_amount=position.amount,
                 origin=origin,
+                # Resolved via measured history, never guessed -- the only
+                # path that reaches this line (HANDOFF_2026-09-05_evening.md
+                # §3a: 'assumed_out_of_window' is reserved for a possible
+                # future override of the halt above, which this function
+                # does not implement).
+                entry_context_source=DEFAULT_ENTRY_CONTEXT_SOURCE,
                 entry_reference_spy=None,
                 entry_spy_ath=context.ath,
                 entry_spy_close=context.close,

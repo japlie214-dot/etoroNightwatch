@@ -66,7 +66,7 @@ import hashlib
 import math
 from dataclasses import dataclass
 from datetime import date as _date
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from functools import lru_cache
 from typing import Final, Sequence
 
@@ -85,8 +85,9 @@ __all__ = [
     "WindowCompletenessResult",
     "WindowFingerprint",
     "AssembledSignal",
-    "DEFAULT_LOOKBACK_CALENDAR_DAYS",
+    "FULL_HISTORY_START_DATE",
     "DEFAULT_CALENDAR_NAME",
+    "MIN_HISTORY_BARS",
     "expected_sessions",
     "fetch_symbol_window",
     "validate_window_completeness",
@@ -95,13 +96,52 @@ __all__ = [
     "assemble_spy_signal",
 ]
 
-#: Calendar days of history to request per fetch. 400 calendar days
-#: comfortably covers >=265 NYSE trading sessions (about 261 trading days
-#: occur in a normal 365-calendar-day span; 400 leaves headroom for holiday
-#: weeks and a slow start) in exactly one Tiingo call -- the same figure
-#: ``market/bars.py``'s now-superseded ``seed(count=400)`` used, kept here
-#: for continuity, not because it is independently derived.
-DEFAULT_LOOKBACK_CALENDAR_DAYS: Final[int] = 400
+#: Start date for the SPY history fetch: **operator decision, 2026-09-05,
+#: overriding the 39-month/819-bar window HANDOFF_2026-09-05_evening.md §3
+#: had settled on hours earlier.** The 819-bar window was itself a fix for
+#: FINDINGS_window_live_2026-09-05.md §2's bug (a 276-bar/~13-month fetch
+#: silently lost the true ATH); the operator's follow-up decision goes
+#: further and abandons a rolling window entirely in favour of the full
+#: available history. Fetching from ``"2010-01-01"`` -- the ETF-inception
+#: floor for this project's two managed symbols (UPRO launched 2009-06-25,
+#: SCHG 2009-12-15/vintage-adjacent; both effectively begin trading in
+#: 2009-2010, so 2010-01-01 is the earliest date at which either symbol's
+#: SPY-context comparison is meaningful, and the uniform floor this project
+#: uses everywhere a "how far back" choice must be made) -- means the
+#: rolling-window ATH question §3a asked ("is 39 months enough?") is now
+#: moot for the live app: the fetched window's own running max **is** the
+#: full-history ATH, by construction, every session.
+#:
+#: Bandwidth was the reason a shorter window was ever considered, and it
+#: is not a binding constraint: full history (4,184 bars, 2010-2026,
+#: measured 2026-09-05) is **1.42 MB per fetch**, ~43 MB/month at one
+#: session/day (~4.2% of Tiingo's real 1 GB/month free-tier ceiling,
+#: DESIGN_market_data.md §10.4), growing only ~2.5 MB/month per additional
+#: year of history. See ``doc/DESIGN_ath_staircase.md`` for the designed
+#: (not built) contingency if that ever changes.
+#:
+#: **Do NOT reintroduce a rolling window by shortening this date, and do
+#: NOT persist a running ATH across sessions instead of widening the
+#: fetch.** Either would reintroduce the accumulated-state bug §2.2 exists
+#: to forbid, or reopen the exact staleness/understatement bug this
+#: decision closes. This is still a single fetch -- one fetch is one
+#: epoch -- it simply reaches back to a fixed calendar date instead of a
+#: fixed number of calendar days.
+FULL_HISTORY_START_DATE: Final[str] = "2010-01-01"
+
+#: Sanity FLOOR on fetched bar count, not a target and not the window's
+#: actual size. Repurposed 2026-09-05 (operator decision) from its previous
+#: role as ``ATH_WINDOW_BARS`` -- the exact 39-month/819-bar rolling window
+#: the fetch used to be sized to before the operator replaced that window
+#: with full history from :data:`FULL_HISTORY_START_DATE`. Full history is
+#: ~4,184 bars as of 2026-09-05 and only grows; 819 remains here purely as
+#: a floor that catches a badly truncated Tiingo response (e.g. a
+#: mid-fetch failure that silently returns only a recent slice) well before
+#: it could ever be mistaken for a legitimate full-history fetch -- it does
+#: NOT mean "this many months of history is enough." Do not raise this to
+#: track the growing size of full history; that would defeat its purpose
+#: as a floor, not a target.
+MIN_HISTORY_BARS: Final[int] = 819
 
 #: The exchange this design validates against throughout (DESIGN_market_data
 #: .md §2.6, §6 gate 9): NYSE.
@@ -120,7 +160,10 @@ class WindowAssemblyError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class WindowCompletenessResult:
-    """Gate 10 item 2's verdict (DESIGN_market_data.md §6): >=265 sessions,
+    """Gate 10 item 2's verdict (DESIGN_market_data.md §6): >=819 sessions
+    (:data:`MIN_HISTORY_BARS`, a truncation-detecting floor, not a target --
+    the live app fetches full history from :data:`FULL_HISTORY_START_DATE`
+    and will clear this floor by a wide margin every session), and the
     date set matching ``exchange_calendars``' expected sessions for the
     range spanned by the fetched window itself -- **not** against "today",
     which is exactly what would otherwise call today a holiday before its
@@ -214,13 +257,20 @@ def fetch_symbol_window(
     tiingo: TiingoClient,
     symbol: str,
     *,
-    lookback_calendar_days: int = DEFAULT_LOOKBACK_CALENDAR_DAYS,
+    start_date: str = FULL_HISTORY_START_DATE,
     today: _date | None = None,
 ) -> list[EodBar]:
     """[fetch]: one Tiingo EOD history call for ``symbol`` (DESIGN_market_data
     .md §3.1, §10: "one fetch is one epoch").
 
     Args:
+        start_date: Defaults to :data:`FULL_HISTORY_START_DATE`
+            (``"2010-01-01"``) -- the live app fetches SPY's full available
+            history, not a rolling window (operator decision, 2026-09-05,
+            superseding the 39-month/819-bar window this module used
+            earlier the same day). A caller wanting a narrower fetch (e.g.
+            a test, or a future diagnostic) may still pass an explicit,
+            more recent date.
         today: Injectable clock for testability -- defaults to the real
             ``date.today()``. Any bar Tiingo returns dated ``today`` is
             dropped defensively: DESIGN_market_data.md §6 item 2 is explicit
@@ -240,7 +290,6 @@ def fetch_symbol_window(
             ``seed()``, which raised for the same reason).
     """
     reference_today = today if today is not None else _date.today()
-    start_date = (reference_today - timedelta(days=lookback_calendar_days)).isoformat()
     bars = tiingo.get_eod_history(symbol, start_date=start_date)
     if not bars:
         raise WindowAssemblyError(
@@ -262,14 +311,18 @@ def validate_window_completeness(
     symbol: str,
     bars: Sequence[EodBar],
     *,
-    min_sessions: int = REQUIRED_HISTORY_BARS,
+    min_sessions: int = MIN_HISTORY_BARS,
     calendar_name: str = DEFAULT_CALENDAR_NAME,
 ) -> WindowCompletenessResult:
-    """Gate 10 item 2 (DESIGN_market_data.md §6): >=265 sessions, and the
-    fetched window's date set must match ``exchange_calendars``' expected
-    sessions for **the range the window itself spans** -- comparing against
-    the window's own last bar date, never against "today", is what avoids
-    the "today looks like a missing holiday" trap §6 item 2 names explicitly.
+    """Gate 10 item 2 (DESIGN_market_data.md §6): >=819 sessions
+    (:data:`MIN_HISTORY_BARS` -- a truncation-detecting floor; the live
+    fetch is full history from :data:`FULL_HISTORY_START_DATE` and clears
+    this by a wide margin, so a failure here means a badly truncated
+    response, not merely "a short window"), and the fetched window's date
+    set must match ``exchange_calendars``' expected sessions for **the
+    range the window itself spans** -- comparing against the window's own
+    last bar date, never against "today", is what avoids the "today looks
+    like a missing holiday" trap §6 item 2 names explicitly.
 
     Promotes ``market/bars.py``'s ``missing_trading_days()`` from "dead
     diagnostic" (its own docstring) to this check, adapted to validate a
@@ -396,11 +449,55 @@ def resolve_provisional_close(
 
 
 def _spy_context_with_provisional(
-    history: Sequence[EodBar], provisional_close: float
+    history: Sequence[EodBar],
+    provisional_close: float,
+    *,
+    open_lot_entry_spy_ath: Sequence[float],
 ) -> SpyContext:
     """SPY ATH/close/drawdown/tier as of *today*, folding in the spliced
-    provisional close as the final observation (DESIGN_market_data.md §3.1:
-    "adjClose series -> cone_5_z, ath, drawdown, tier").
+    provisional close as the final observation.
+
+    ``open_lot_entry_spy_ath`` has **no default** -- deliberately, per the
+    task brief's defect finding (2026-09-05): a defaulted-empty version of
+    this parameter was wired into :func:`assemble_spy_signal` on the day
+    the floor was built, but the still-unbuilt session engine that is
+    supposed to pass real open-lot ATHs never called either function with
+    a non-empty value, so the floor was **live in name only** -- tested,
+    looks done, silently never engaged in the only place that matters. A
+    caller MUST now state explicitly whether there are open lots
+    (``[a.entry_spy_ath for a in ...]``) or none (``[]``/``()``) -- omitting
+    the argument is a ``TypeError`` at the call site, not a silent no-op.
+    Do not reintroduce a default here; that is exactly how the defect
+    reappears.
+
+    **Basis (HANDOFF_2026-09-05_evening.md §4, decided 2026-09-05): raw
+    ``close``, never ``adjClose``.** ATH/drawdown/tier are LEVELS compared
+    against traded prices (they drive real buy decisions and are what an
+    eToro cross-check must agree with), not a return series -- the split
+    from ``cone_5_z`` (a RETURN, computed on ``adjClose`` by
+    :func:`assemble_spy_signal`) is deliberate, not an oversight; see §4's
+    table. ``provisional_close`` is already raw (Tiingo IEX ``tngoLast`` or
+    an eToro candle close -- :func:`resolve_provisional_close` never
+    supplies an adjusted value), so this function is basis-consistent
+    end-to-end without any conversion.
+
+    **The ATH floor (HANDOFF_2026-09-05_evening.md §3a, Case 2, decided
+    2026-09-05):** ``current_ath = max(rolling_window_ath,
+    max(entry_spy_ath for every OPEN lot))``. Once a lot's own stamped entry
+    peak ages out of the fetched window, the window's rolling max alone can
+    sit BELOW a value SPY is known to have actually traded at (we bought
+    there) -- comparing the two as if the rolling max were the true ATH
+    would be incoherent. The floor is monotone-correct (an ATH never
+    decreases, and every ``entry_spy_ath`` is a previously-true SPY level)
+    and free (no extra fetch, no persisted state -- ``open_lot_entry_spy_ath``
+    is read fresh from ``lot_annotations``, the sidecar the app already
+    maintains, every time this is called). With no open lots (caller passes
+    ``[]``/``()`` explicitly), this degrades cleanly to the plain
+    rolling-window ATH -- there is nothing to floor against.
+    **This is NOT the accumulated price history DESIGN_market_data.md §2.2
+    forbids** -- no price series is persisted; only already-stamped,
+    already-trusted per-lot values already living in the sidecar are read
+    back.
 
     Deliberately not ``market.adopt.build_spy_context_index`` as-is: that
     index is keyed by historical trading date and never sees a provisional
@@ -414,24 +511,35 @@ def _spy_context_with_provisional(
     adopted-position's reconstructed tier are computed by the identical
     rule, per §3.1/§4.7's own stated intent.
     """
-    running_ath = float("-inf")
+    rolling_ath = float("-inf")
     for bar in history:
-        if not math.isfinite(bar.adj_close) or bar.adj_close <= 0:
+        if not math.isfinite(bar.close) or bar.close <= 0:
             raise WindowAssemblyError(
                 f"SPY history bar {bar.date} has a non-finite/non-positive "
-                f"adjClose {bar.adj_close!r} -- refusing to compute an ATH "
+                f"raw close {bar.close!r} -- refusing to compute an ATH "
                 f"off a corrupt series"
             )
-        running_ath = max(running_ath, bar.adj_close)
+        rolling_ath = max(rolling_ath, bar.close)
     if not math.isfinite(provisional_close) or provisional_close <= 0:
         raise WindowAssemblyError(
             f"provisional SPY close {provisional_close!r} is not finite/"
             f"positive -- refusing to compute today's drawdown off it"
         )
-    running_ath = max(running_ath, provisional_close)
-    drawdown = (provisional_close - running_ath) / running_ath
+    rolling_ath = max(rolling_ath, provisional_close)
+
+    floor_ath = rolling_ath
+    for stamped_ath in open_lot_entry_spy_ath:
+        if not math.isfinite(stamped_ath) or stamped_ath <= 0:
+            raise WindowAssemblyError(
+                f"open lot's stamped entry_spy_ath {stamped_ath!r} is not "
+                f"finite/positive -- refusing to floor the ATH against a "
+                f"corrupt sidecar value"
+            )
+        floor_ath = max(floor_ath, stamped_ath)
+
+    drawdown = (provisional_close - floor_ath) / floor_ath
     return SpyContext(
-        ath=running_ath,
+        ath=floor_ath,
         close=provisional_close,
         drawdown=drawdown,
         tier=tier_for_drawdown(drawdown),
@@ -445,11 +553,12 @@ def assemble_spy_signal(
     iex_quote: IexQuote | None,
     etoro_daily_candle: Candle | None,
     cone_horizon: int = 5,
-    lookback_calendar_days: int = DEFAULT_LOOKBACK_CALENDAR_DAYS,
-    min_sessions: int = REQUIRED_HISTORY_BARS,
+    start_date: str = FULL_HISTORY_START_DATE,
+    min_sessions: int = MIN_HISTORY_BARS,
     calendar_name: str = DEFAULT_CALENDAR_NAME,
     enforce_completeness: bool = True,
     today: _date | None = None,
+    open_lot_entry_spy_ath: Sequence[float],
 ) -> AssembledSignal:
     """DESIGN_market_data.md §3.1's full session sequence for SPY, the
     symbol ``cone_5_z`` is computed on: [fetch] -> [derive] + [splice] ->
@@ -460,6 +569,15 @@ def assemble_spy_signal(
             explicitly rather than imported so this stays a pure function
             of its arguments, matching every other signal/guard module in
             this codebase.
+        start_date: Defaults to :data:`FULL_HISTORY_START_DATE`
+            (``"2010-01-01"``, operator decision 2026-09-05) -- the live
+            app fetches SPY's full available history every session, not a
+            rolling window, so the ATH computed below **is** the
+            full-history ATH by construction; §3a's "is a 39-month window
+            enough?" question is closed for the live app.
+        min_sessions: Defaults to :data:`MIN_HISTORY_BARS` (819) -- a
+            truncation-detecting FLOOR, not a target; see that constant's
+            own docstring.
         enforce_completeness: When ``True`` (the default), an incomplete
             window (:func:`validate_window_completeness` failing) raises
             immediately rather than computing a signal off a gappy/short
@@ -471,6 +589,21 @@ def assemble_spy_signal(
             diagnostic) that wants ``completeness`` reported without this
             function aborting on it -- ``cone_5_z``/``spy_context`` are
             still computed in that case, off whatever window was fetched.
+        open_lot_entry_spy_ath: Every currently-open lot's stamped
+            ``entry_spy_ath`` (``lot_annotations``, both books, both
+            symbols) -- HANDOFF_2026-09-05_evening.md §3a Case 2's ATH
+            floor: ``current_ath = max(rolling_window_ath,
+            max(entry_spy_ath for every OPEN lot))``. **No default** -- a
+            defaulted-empty version of this parameter was found to be
+            silently inert in production (no caller ever passed a non-empty
+            value, so the floor never engaged; see
+            :func:`_spy_context_with_provisional`'s docstring). The caller
+            (the session engine, not yet built) MUST pass either
+            ``[a.entry_spy_ath for a in repo.list_lot_annotations(is_open=
+            True) if a.entry_spy_ath is not None]`` or an explicit ``[]``
+            when there genuinely are no open lots -- omitting the argument
+            is now a ``TypeError``, not a silent no-op. See
+            :func:`_spy_context_with_provisional` for the full reasoning.
 
     Raises:
         WindowAssemblyError: on any fetch, completeness (when enforced), or
@@ -480,9 +613,7 @@ def assemble_spy_signal(
             (propagated, not caught -- both are already "abort" exceptions
             in this codebase, not different flavors that need reconciling).
     """
-    history = fetch_symbol_window(
-        tiingo, "SPY", lookback_calendar_days=lookback_calendar_days, today=today
-    )
+    history = fetch_symbol_window(tiingo, "SPY", start_date=start_date, today=today)
     completeness = validate_window_completeness(
         "SPY", history, min_sessions=min_sessions, calendar_name=calendar_name
     )
@@ -496,14 +627,23 @@ def assemble_spy_signal(
         "SPY", iex_quote=iex_quote, etoro_daily_candle=etoro_daily_candle
     )
 
-    # [splice]: the most recent adjClose already equals its own raw close
-    # (factor 1.0), so appending today's raw provisional close is
+    # [splice] -- cone_5_z basis: adjClose (HANDOFF_2026-09-05_evening.md §4:
+    # cone_5_z is a RETURN, and on raw close the four annual SPY dividends
+    # inject ~0.27% fake down-moves into the 260-return window that are not
+    # real losses). The most recent adjClose already equals its own raw
+    # close (factor 1.0), so appending today's raw provisional close is
     # consistent at the seam (§8) -- except on an ex-dividend date, a known,
     # documented, ~0.33%-scale residual (§8) this function does not correct
-    # for; see the module/task report for that explicit gap.
+    # for; see the module/task report for that explicit gap. Do NOT reuse
+    # `closes` for the ATH/tier computation below -- that is a LEVEL, and
+    # §4 decides raw `close` for every LEVEL; see
+    # `_spy_context_with_provisional`'s own docstring for the full basis
+    # split.
     closes = [bar.adj_close for bar in history] + [provisional.value]
     z = cone_5_z(closes, horizon=cone_horizon)
-    spy_context = _spy_context_with_provisional(history, provisional.value)
+    spy_context = _spy_context_with_provisional(
+        history, provisional.value, open_lot_entry_spy_ath=open_lot_entry_spy_ath
+    )
 
     return AssembledSignal(
         trading_date=trading_date,

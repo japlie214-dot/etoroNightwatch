@@ -172,17 +172,26 @@ timeout_seconds = 10.0   # every call gets an explicit per-call timeout (§8 got
 # ---------------------------------------------------------------------------
 # Preflight gate 10 tolerances (DESIGN_market_data.md §6, §10.4).
 #
-# PROVISIONAL DEFAULTS -- §10.4 says the real values must be set from the
-# forward test's observed per-symbol daily-return distribution, not guessed.
-# These are chosen only to sit between two magnitudes this session's live
+# max_rate_age_minutes / rate_vs_candle_deviation_pct remain PROVISIONAL --
+# §10.4 says the real values must be set from the forward test's observed
+# per-symbol daily-return distribution (still unbuilt), not guessed. They
+# are chosen only to sit between two magnitudes this session's live
 # evidence established: eToro's own candle-vs-rates venue/timing noise is
 # ~0.1% (§2.11(C)), while the UPRO rates-freeze bug measured +1.322%/+19.0h
 # stale (§2.9).  Revisit once the forward test has run.
+#
+# provisional_close_deviation_pct is CALIBRATED (2026-09-05, HANDOFF_2026-09
+# -05_evening.md §4): Tiingo raw close vs eToro candle close (both raw --
+# §4's basis split; never adjClose, which diverges 1.09% at the window edge
+# and would breach any sane tolerance), 272 common dates 2025-08-01..
+# 2026-09-04: mean 0.128%, max 0.640%. 1.0% leaves ~56% headroom above the
+# observed max while staying below the +1.322% real staleness error this
+# gate must still catch.
 # ---------------------------------------------------------------------------
 [market_data]
 max_rate_age_minutes             = 15.0     # eToro Rate.timestamp staleness bound
 rate_vs_candle_deviation_pct     = 0.0075   # eToro rate vs eToro candle, same instant
-provisional_close_deviation_pct  = 0.0075   # provisional close vs eToro candle cross-check
+provisional_close_deviation_pct  = 0.010    # Tiingo raw close vs eToro candle close (both raw)
 # Candle.timestamp staleness bound for INTRADAY candles only (added
 # 2026-09-05 -- the candle's own freshness was previously never checked
 # anywhere in gate 10). Deliberately has no OneDay counterpart: a OneDay

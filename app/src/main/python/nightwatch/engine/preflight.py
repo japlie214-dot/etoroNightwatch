@@ -417,6 +417,15 @@ def _check_provisional_close(
     checked against eToro's own candle when one is available -- and, as of
     2026-09-05, against the candle's *own* freshness first.
 
+    **Basis, confirmed like-with-like (HANDOFF_2026-09-05_evening.md §4):**
+    ``provisional.value`` is always raw (Tiingo IEX ``tngoLast``, or a raw
+    eToro candle close -- ``market.window.resolve_provisional_close`` has no
+    code path that supplies an adjusted value), and ``candle.close`` is
+    eToro's own raw candle close. This comparison must NEVER become
+    adjClose-vs-eToro -- §4 measured that gap at 1.09% at the window edge,
+    which would breach ``max_deviation_pct`` on an ordinary day, not just a
+    real staleness incident.
+
     Both branches now gate on :func:`_check_candle_freshness`:
 
     * ``source == "etoro_candle"`` (fallback): the candle IS the provisional

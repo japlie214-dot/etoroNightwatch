@@ -22,6 +22,7 @@ from nightwatch.engine.preflight import ProvisionalClose
 from nightwatch.etoro.models import Candle
 from nightwatch.market.source import EodBar, IexQuote
 from nightwatch.market.window import (
+    MIN_HISTORY_BARS,
     REQUIRED_HISTORY_BARS,
     WindowAssemblyError,
     assemble_spy_signal,
@@ -64,15 +65,17 @@ def _real_session_window(start: str, end: str) -> list[str]:
     return list(expected_sessions(start, end))
 
 
-# A real ~14-month historical span with >=265 XNYS sessions, entirely in
-# the past so it never depends on "today".
-_WINDOW_START = "2024-06-01"
+# A real ~39-month historical span with >=819 XNYS sessions (MIN_HISTORY_BARS,
+# HANDOFF_2026-09-05_evening.md §3), entirely in the past so it never depends
+# on "today". Verified against a real exchange_calendars XNYS session count
+# (825 sessions in this exact range) while writing this fixture.
+_WINDOW_START = "2022-05-17"
 _WINDOW_END = "2025-08-29"
 
 
 def _full_synthetic_window() -> list[EodBar]:
     sessions = _real_session_window(_WINDOW_START, _WINDOW_END)
-    assert len(sessions) >= REQUIRED_HISTORY_BARS  # fixture sanity
+    assert len(sessions) >= MIN_HISTORY_BARS  # fixture sanity
     # Monotonically increasing, non-degenerate closes -- never all-equal
     # (cone_5_z raises on a zero-variance window, by design).
     return [_bar(d, 100.0 + 0.05 * i) for i, d in enumerate(sessions)]
@@ -263,6 +266,7 @@ def test_assemble_spy_signal_end_to_end_produces_a_signal():
         iex_quote=iex,
         etoro_daily_candle=None,
         today=date(2025, 9, 2),
+        open_lot_entry_spy_ath=[],
     )
 
     assert signal.completeness.passed
@@ -291,6 +295,7 @@ def test_assemble_spy_signal_raises_on_incomplete_window_by_default():
             iex_quote=iex,
             etoro_daily_candle=None,
             today=date(2025, 9, 2),
+            open_lot_entry_spy_ath=[],
         )
 
 
@@ -305,6 +310,7 @@ def test_assemble_spy_signal_can_report_incompleteness_without_raising():
         etoro_daily_candle=None,
         today=date(2025, 9, 2),
         enforce_completeness=False,
+        open_lot_entry_spy_ath=[],
     )
     assert not signal.completeness.passed
     # Still short of 265 bars, so the signal itself is honestly None, not a
@@ -322,6 +328,7 @@ def test_assemble_spy_signal_raises_when_no_provisional_close_available():
             iex_quote=None,
             etoro_daily_candle=None,
             today=date(2025, 9, 2),
+            open_lot_entry_spy_ath=[],
         )
 
 
@@ -337,6 +344,197 @@ def test_assemble_spy_signal_uses_etoro_candle_fallback():
         iex_quote=None,
         etoro_daily_candle=candle,
         today=date(2025, 9, 2),
+        open_lot_entry_spy_ath=[],
     )
     assert signal.provisional_close.source == "etoro_candle"
     assert signal.provisional_close.value == candle.close
+
+
+# ---------------------------------------------------------------------------
+# FIX 1 (HANDOFF_2026-09-05_evening.md §3): the 39-month / 819-bar window
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_spy_signal_finds_a_peak_that_would_have_aged_out_of_a_13_month_window():
+    """The whole reason to fetch 819 bars (39 months) instead of 276
+    (13 months, FINDINGS_window_live_2026-09-05.md §2): the OLD design's
+    bug was not a tail-window computation (there isn't one -- the ATH scans
+    every bar in whatever was fetched) but the fetch itself only ever
+    requesting ~276 days of history, so an older peak was never even
+    downloaded. This builds one full 819+-bar window with an early peak
+    more than 276 sessions before the window's last bar and confirms
+    today's assembled ATH is that peak, not a lower recent price -- proving
+    the *fetch* now reaches far enough back to see it at all.
+    """
+    sessions = _real_session_window(_WINDOW_START, _WINDOW_END)
+    assert len(sessions) >= MIN_HISTORY_BARS  # fixture sanity
+
+    peak_index = 5
+    peak_value = 500.0
+    # Confirm the peak really would have aged out of a 276-bar/13-month
+    # fetch ending on the same last session -- otherwise this test would
+    # not distinguish the fix from the old behaviour.
+    assert len(sessions) - peak_index > 276
+
+    bars = []
+    for i, d in enumerate(sessions):
+        if i == peak_index:
+            value = peak_value
+        else:
+            # Oscillates well below the peak (never zero-variance, never
+            # anywhere near peak_value) so cone_5_z's guard is satisfied.
+            value = 200.0 + (i % 7) * 0.37
+        bars.append(_bar(d, value))
+
+    tiingo = FakeTiingoClient(bars)
+    iex = IexQuote(ticker="SPY", tngo_last=205.0)  # far below the aged-out peak
+
+    signal = assemble_spy_signal(
+        tiingo,
+        trading_date="2025-09-02",
+        iex_quote=iex,
+        etoro_daily_candle=None,
+        today=date(2025, 9, 2),
+        open_lot_entry_spy_ath=[],
+    )
+
+    assert signal.completeness.passed
+    assert signal.spy_context.ath == peak_value
+    # A real, non-zero drawdown against the true (old) peak -- a 276-bar
+    # fetch would have silently reported tier 0 here instead.
+    assert signal.spy_context.tier > 0
+
+
+# ---------------------------------------------------------------------------
+# FIX 2a (HANDOFF_2026-09-05_evening.md §3a Case 2): the ATH floor
+# ---------------------------------------------------------------------------
+
+
+def test_assemble_spy_signal_ath_floor_uses_stamped_open_lot_ath_above_rolling_max():
+    bars = _full_synthetic_window()
+    tiingo = FakeTiingoClient(bars)
+    iex = IexQuote(ticker="SPY", tngo_last=bars[-1].adj_close + 1.0)
+    # A hypothetical lot stamped at a SPY level far above anything the
+    # fetched window (or today's provisional close) contains -- the
+    # scenario Case 2 describes: the lot's own entry peak has aged out of
+    # the window, so the rolling max alone would sit below a level SPY is
+    # known to have actually traded at.
+    stamped_ath = bars[-1].adj_close + 1000.0
+
+    signal = assemble_spy_signal(
+        tiingo,
+        trading_date="2025-09-02",
+        iex_quote=iex,
+        etoro_daily_candle=None,
+        today=date(2025, 9, 2),
+        open_lot_entry_spy_ath=[stamped_ath],
+    )
+
+    assert signal.spy_context.ath == stamped_ath
+    assert signal.spy_context.tier > 0
+
+
+def test_assemble_spy_signal_ath_floor_degrades_to_rolling_ath_with_no_open_lots():
+    bars = _full_synthetic_window()
+    tiingo = FakeTiingoClient(bars)
+    iex = IexQuote(ticker="SPY", tngo_last=bars[-1].adj_close + 1.0)
+
+    signal = assemble_spy_signal(
+        tiingo,
+        trading_date="2025-09-02",
+        iex_quote=iex,
+        etoro_daily_candle=None,
+        today=date(2025, 9, 2),
+        open_lot_entry_spy_ath=[],  # explicit empty -- no open lots to floor against
+    )
+
+    assert signal.spy_context.ath == iex.tngo_last
+    assert signal.spy_context.tier == 0
+
+
+def test_spy_context_with_provisional_floor_arithmetic():
+    from nightwatch.market.window import _spy_context_with_provisional
+
+    history = [_bar("2024-01-02", 100.0), _bar("2024-06-03", 90.0)]
+
+    # No open lots: floor is just the rolling max including the
+    # provisional close (zero open lots degrades cleanly) -- but the caller
+    # must say so explicitly (see test_spy_context_with_provisional_
+    # requires_explicit_open_lot_ath below); there is no default.
+    ctx = _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[])
+    assert ctx.ath == 100.0
+    assert ctx.drawdown == pytest.approx((95.0 - 100.0) / 100.0)
+
+    # One open lot stamped above the rolling max: the floor wins.
+    ctx2 = _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[150.0])
+    assert ctx2.ath == 150.0
+    assert ctx2.drawdown == pytest.approx((95.0 - 150.0) / 150.0)
+
+    # Multiple open lots: the floor is the max across all of them and the
+    # rolling ATH -- a lot stamped BELOW the rolling ATH must not pull it down.
+    ctx3 = _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[80.0, 120.0])
+    assert ctx3.ath == 120.0
+
+
+def test_spy_context_with_provisional_raises_on_bad_open_lot_ath():
+    from nightwatch.market.window import _spy_context_with_provisional
+
+    history = [_bar("2024-01-02", 100.0)]
+    with pytest.raises(WindowAssemblyError):
+        _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[float("nan")])
+    with pytest.raises(WindowAssemblyError):
+        _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[-10.0])
+
+
+# ---------------------------------------------------------------------------
+# FIX 3 (HANDOFF_2026-09-05_evening.md §4): raw close for ATH/tier, never
+# adjClose
+# ---------------------------------------------------------------------------
+
+
+def test_spy_context_uses_raw_close_not_adj_close_for_ath():
+    from nightwatch.market.window import _spy_context_with_provisional
+
+    # A bar whose adjClose is materially lower than its raw close, as a
+    # real post-ex-dividend-adjustment SPY bar would be (FINDINGS_window_
+    # live_2026-09-05.md §3: ~0.95% apart on the oldest bar of a real
+    # payload). ATH/drawdown/tier must track the raw value.
+    history = [_bar("2024-01-02", adj_close=90.0, close=100.0)]
+    ctx = _spy_context_with_provisional(history, 100.0, open_lot_entry_spy_ath=[])
+    assert ctx.ath == 100.0  # raw close, not the lower adjClose (90.0)
+    assert ctx.drawdown == 0.0
+
+
+# ---------------------------------------------------------------------------
+# The "silently inert" defect (task brief, 2026-09-05): open_lot_entry_spy_ath
+# used to default to () in both _spy_context_with_provisional and
+# assemble_spy_signal, so a caller could omit it and get a plain
+# rolling-window ATH with no indication the floor was never engaged. No
+# production caller (the session engine is still unbuilt) ever passed a
+# non-empty value, so the floor was tested and looked done but was never
+# live. Fixed by removing the default entirely -- omitting the argument is
+# now a TypeError, not a silent no-op. These two tests are the enforcement:
+# if a future edit reintroduces a default, they fail.
+# ---------------------------------------------------------------------------
+
+
+def test_spy_context_with_provisional_requires_explicit_open_lot_ath():
+    from nightwatch.market.window import _spy_context_with_provisional
+
+    history = [_bar("2024-01-02", 100.0)]
+    with pytest.raises(TypeError):
+        _spy_context_with_provisional(history, 95.0)  # type: ignore[call-arg]
+
+
+def test_assemble_spy_signal_requires_explicit_open_lot_ath():
+    bars = _full_synthetic_window()
+    tiingo = FakeTiingoClient(bars)
+    iex = IexQuote(ticker="SPY", tngo_last=bars[-1].adj_close + 1.0)
+    with pytest.raises(TypeError):
+        assemble_spy_signal(  # type: ignore[call-arg]
+            tiingo,
+            trading_date="2025-09-02",
+            iex_quote=iex,
+            etoro_daily_candle=None,
+            today=date(2025, 9, 2),
+        )
