@@ -455,6 +455,53 @@ residual so the order still lands at T-30min.
 
 ### 4.2 The live-bar problem — and why `is_provisional` exists
 
+> **§4.2a — Which T-30 decisions may trust a provisional close, and which may not.**
+> **Decided 2026-09-05 with the operator, from measurement, not preference.** A decision taken at
+> T-30 rests on a *provisional* close that the official close can contradict. The rule is that
+> this is acceptable wherever the error is self-favouring, and unacceptable where it is adverse.
+>
+> - **The ladder entry signal (`cone_5_z`) keeps the provisional close.** Its errors cannot hurt
+>   us. A false positive means we opened below the official close — we bought the dip cheaper
+>   than the bar that closed above the threshold. A false negative means we simply skipped an
+>   entry: opportunity cost, never a loss. The operator's framing: *"if we did open a position
+>   < -2 std then it's a good thing for us even if the price goes back above -2 std at close."*
+> - **The SCHG all-time-high test must use the PREVIOUS DAY'S SETTLED BAR.** Its false positive
+>   is adverse and asymmetric: buying SCHG on an ATH that the close revokes means buying the core
+>   book at a local high and consuming surplus cash for it. ATH is also *binary*, so an arbitrarily
+>   small move flips it, where `cone_5_z` merely shifts.
+>
+> **Measured on 4,184 SPY daily bars, so the asymmetry is not assumed:**
+>
+> | | count | share |
+> |---|---|---|
+> | closes at a new ATH | 554 | 13.24% |
+> | touched an ATH intraday but closed below | 372 | 8.89% |
+> | closes within ±0.137% of the prior ATH (one typical 30-min move) | 347 | 8.30% |
+>
+> **40.2% of intraday ATH touches fail to close at an ATH.** That is an upper bound on the T-30
+> error rate (T-30 is not the day's high), but the knife-edge row brackets it from below: bars
+> within one 30-minute move of the prior ATH are 62.6% as numerous as genuine ATH closes.
+>
+> **The drawdown tier does NOT need the same treatment, and this was checked rather than
+> assumed.** `TIER_CAPS` are cumulative ceilings, so a transient T-30 dip could in principle
+> unlock a deeper tier than the settled close justifies and spend ladder capacity reserved for a
+> real crash. It is negligible in practice because the tier boundaries (-10/-15/-20/-25/-35%) are
+> levels SPY crosses rarely, whereas the ATH boundary (drawdown = 0) is one it sits on constantly:
+> **1.27%** of bars fall within ±0.137% of any tier boundary versus **17.90%** for the ATH
+> boundary — **14x** the exposure. Tiers keep the provisional close.
+>
+> **Implementation note.** This needs **no second daily schedule.** The existing T-30 session on
+> day D already has day D-1's official close settled, so it evaluates the ATH test against that
+> settled bar and executes the SCHG buy then. A second wake (proposed and rejected the same day)
+> would have cost battery, added a failure surface for vivo's background killer, and — the real
+> objection — created two independent sessions spending from one cash sleeve and both moving the
+> `0.5 x sleeve_equity` core floor. Same correctness, none of that.
+>
+> **The one accepted deviation:** SCHG buys now land one session later than the backtest's. For a
+> long-hold core book bought on ATHs this is expected to be noise, but it is a real difference and
+> the forward test (§10) should report it rather than assume it away.
+
+
 > **Superseded in part by [`DESIGN_market_data.md`](DESIGN_market_data.md)** (2026-09-04): the compounding-error problem described below is **removed, not reduced**. The provisional close is never persisted, so nothing survives to poison the 260-bar window. `is_provisional`, `settle_previous()` and session step [2] all go away.
 
 Your requirement: *use today's live price, not yesterday's data.* Correct, and it has a
