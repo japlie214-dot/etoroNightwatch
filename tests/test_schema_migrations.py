@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
     "intents",
     "orders",
     "lots",
+    "lot_annotations",
     "buckets",
     "strategy_state",
     "schg_daily_values",
@@ -34,7 +35,12 @@ def test_migrate_creates_every_design_table(tmp_path: Path) -> None:
     conn = connect(tmp_path / "nightwatch.db")
     try:
         version = migrations.migrate(conn)
-        assert version == migrations.BASELINE_VERSION
+        # Not BASELINE_VERSION (1) any more: migration 002 (§4.2/§10.7's
+        # portfolio_snapshot_positions.invested -> amount rename) always runs
+        # after the baseline, even against a fresh database. Compare against
+        # the newest discovered migration rather than hardcoding a number, so
+        # this test doesn't need editing again the next time one is added.
+        assert version == migrations.discover()[-1].version
         rows = conn.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'"
         ).fetchall()
@@ -50,7 +56,7 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
     try:
         first = migrations.migrate(conn)
         second = migrations.migrate(conn)
-        assert first == second == migrations.BASELINE_VERSION
+        assert first == second == migrations.discover()[-1].version
     finally:
         conn.close()
 
@@ -68,5 +74,5 @@ def test_pragmas_are_set(tmp_path: Path) -> None:
 
 def test_repo_open_reports_schema_version(tmp_path: Path) -> None:
     with Repo.open(tmp_path / "nightwatch.db") as repo:
-        assert repo.schema_version() == migrations.BASELINE_VERSION
+        assert repo.schema_version() == migrations.discover()[-1].version
         assert set(repo.table_names()) >= EXPECTED_TABLES

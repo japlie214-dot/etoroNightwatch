@@ -1,0 +1,12 @@
+-- Migration 002: portfolio_snapshot_positions.invested -> amount
+--
+-- `_parse_position` (etoro/client.py) never had an `invested` value to
+-- supply -- DESIGN_market_data.md §4.2/§10.7 confirmed against a live
+-- 227-position portfolio that eToro's payload carries no `invested` key at
+-- all. `amount` (cost basis) is what genuinely exists on a broker position
+-- and is what DESIGN_market_data.md §4.5 uses as the split-invariant
+-- re-link key (`amount == units * openRate`, verified 227/227 live). This
+-- renames the column in place rather than adding a second, since nothing
+-- ever wrote a real value into `invested` (it was always None, per the bug
+-- this migration accompanies the code fix for).
+ALTER TABLE portfolio_snapshot_positions RENAME COLUMN invested TO amount;

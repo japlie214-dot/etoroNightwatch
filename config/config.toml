@@ -144,3 +144,34 @@ max_notional_per_session_usd = 5000.0
 # max_daily_loss_usd         = 500.0
 # Gate 2 aborts the session if the host is on battery below this level.
 min_battery_percent          = 40
+
+# ---------------------------------------------------------------------------
+# Tiingo (DESIGN_market_data.md §2.7, §3.1, §9).  Key comes from .secrets.env
+# as TIINGO_KEY, sent as an Authorization header, never a URL parameter.
+# ---------------------------------------------------------------------------
+[tiingo]
+base_url       = "https://api.tiingo.com"
+timeout_seconds = 10.0   # every call gets an explicit per-call timeout (§8 gotchas)
+
+# ---------------------------------------------------------------------------
+# Preflight gate 10 tolerances (DESIGN_market_data.md §6, §10.4).
+#
+# PROVISIONAL DEFAULTS -- §10.4 says the real values must be set from the
+# forward test's observed per-symbol daily-return distribution, not guessed.
+# These are chosen only to sit between two magnitudes this session's live
+# evidence established: eToro's own candle-vs-rates venue/timing noise is
+# ~0.1% (§2.11(C)), while the UPRO rates-freeze bug measured +1.322%/+19.0h
+# stale (§2.9).  Revisit once the forward test has run.
+# ---------------------------------------------------------------------------
+[market_data]
+max_rate_age_minutes             = 15.0     # eToro Rate.timestamp staleness bound
+rate_vs_candle_deviation_pct     = 0.0075   # eToro rate vs eToro candle, same instant
+provisional_close_deviation_pct  = 0.0075   # provisional close vs eToro candle cross-check
+# Candle.timestamp staleness bound for INTRADAY candles only (added
+# 2026-09-05 -- the candle's own freshness was previously never checked
+# anywhere in gate 10). Deliberately has no OneDay counterpart: a OneDay
+# candle's timestamp age is not a meaningful freshness signal (it may
+# legitimately be hours old, or date-only with no intraday time component --
+# see MarketDataConfig.max_candle_age_minutes_intraday in config.py). Gate 10
+# relies on the value-agreement check instead for OneDay candles.
+max_candle_age_minutes_intraday   = 20.0

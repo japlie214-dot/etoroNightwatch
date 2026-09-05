@@ -391,6 +391,8 @@ development, unit tests and the forward test. Only `host.py` differs in what cal
 
 ## 3. Data model (SQLite, WAL)
 
+> **Superseded in part by [`DESIGN_market_data.md`](DESIGN_market_data.md)** (2026-09-04): the `bars` table is **dropped**. The phone stores no price series; history is fetched fresh each session and discarded. `corporate_actions` and `price_window_fingerprints` are added. Every other table below is unaffected.
+
 | Table | Purpose |
 |---|---|
 | `bars` | `(symbol, date, o,h,l,c,v, is_provisional, source)` PK `(symbol,date)`. **`is_provisional` is the key column** — see §4.2 |
@@ -452,6 +454,8 @@ things: Wi-Fi re-association after Doze, and preflight. Nothing else. Step [3] s
 residual so the order still lands at T-30min.
 
 ### 4.2 The live-bar problem — and why `is_provisional` exists
+
+> **Superseded in part by [`DESIGN_market_data.md`](DESIGN_market_data.md)** (2026-09-04): the compounding-error problem described below is **removed, not reduced**. The provisional close is never persisted, so nothing survives to poison the 260-bar window. `is_provisional`, `settle_previous()` and session step [2] all go away.
 
 Your requirement: *use today's live price, not yesterday's data.* Correct, and it has a
 consequence the backtest never faced.
@@ -633,7 +637,7 @@ reachable for diagnosis in the morning.
 | 7 | **Environment match** | Config says `real` but the key is demo-bound (or vice versa) — probed, not trusted |
 | 8 | **Instruments** | UPRO/SCHG/SPY unresolvable; `allowOpenPosition` false; `minPositionExposure` > `order_size` |
 | 9 | **Calendar** | Not a US trading day; also resolves early-close (13:00 ET) days so T-30min is correct |
-| 10 | **Price data** | < 265 settled SPY bars; any unsettled provisional bar; stale/zero live rate |
+| 10 | **Price data** | ⚠️ **STALE — superseded by DESIGN_market_data.md §6.** This row still describes the settled/provisional bar architecture, which that document deletes entirely (no `bars` table, no `is_provisional`, no settle step — §3.2). Gate 10 as actually built (`engine/preflight.py`, 2026-09-05) checks freshness of the provisional close and rate/candle agreement per symbol; window completeness, corporate actions and signal sanity are specified there but not yet built. Read §6 of that document, not this cell. |
 | 11 | **Reconciliation** | An **unknown broker position in a managed symbol** (UPRO/SCHG we did not open) → hard failure. A **DB lot with no matching broker position** → hard failure (closed outside the app; needs reconciliation and a notification, never a silent re-buy). A position in **any non-managed symbol** is ignored for trading and recorded for display only — never a failure (§1.4, §6.D) |
 | 12 | **Risk caps** | Session order count or notional exceeds configured caps; daily loss guard tripped |
 
@@ -644,8 +648,13 @@ cancels every future exact alarm**. Both are checked on every run and both fail 
 Telegram, naming the exact Settings path to restore them. A quiet degradation here would look
 identical to "the market was closed."
 
-**Gate 10 is spec'd but not yet built — do not assume it exists because it's in this table.**
-"Stale/zero live rate" above is currently unimplemented: `Rate` carries the timestamp eToro
+**Gate 10 is partially built as of 2026-09-05 — see `engine/preflight.py`, not this cell, for
+what actually exists.** Items 1 (freshness of the provisional close, plus the rate-vs-candle
+cross-check) and 3 (sanity) are implemented and tested; items 2 (window completeness), 4
+(corporate actions), and 5 (signal sanity) remain stubs, as do gates 1–9, 11, and 12 below. The
+paragraph immediately below predates that build and describes the now-superseded `bars`-table
+architecture; kept for its historical reasoning, not as a current status claim. "Stale/zero live
+rate" as described there was unimplemented at the time: `Rate` carries the timestamp eToro
 actually returns (the live field is `date`, mapped to `Rate.timestamp` in
 `etoro/client.py::get_rates`), but `market/bars.py` never reads it. This was deferred twice on
 the same reasoning both times — a staleness check needs a "now" reference and a configured
@@ -777,6 +786,8 @@ against a real, multi-asset account.
   ambiguity about which environment a number belongs to.
 
 ### G. Bad-data safety
+
+> **Superseded in part by [`DESIGN_market_data.md`](DESIGN_market_data.md)** (2026-09-04): layer 3 of the bad-tick guard (gap-aware compounding tolerance, the 10x cap, `STALE_REFERENCE_TRADING_DAYS`) is **deleted** — it existed only to survive gaps that can no longer occur. Layers 1 and 2 are retained, with a tight band against a now-trustworthy reference.
 
 - Reject a live rate whose timestamp is older than a configured staleness limit. **Not yet
   implemented** — see the gate 10 note in §5 and the tracked risk in §12.
@@ -1360,6 +1371,8 @@ The host was chosen **knowing it is the highest-risk combination of the options 
 an undocumented vendor OS, running on battery rather than mains, with money at stake and a
 once-a-day window that cannot be retried. That was an explicit, informed decision. It is
 recorded here as a standing risk, not re-argued.
+
+> **Superseded in part by [`DESIGN_market_data.md`](DESIGN_market_data.md)** (2026-09-04): the two **High** risks below concerning live-rate staleness and undetected bar-history gaps are addressed there (gate 10, §6). The gap risk is **dissolved** rather than mitigated — re-derivation makes a gap inexpressible — so its 're-seed from official candles' mitigation no longer applies as written.
 
 | Risk | Severity | Mitigation |
 |---|---|---|

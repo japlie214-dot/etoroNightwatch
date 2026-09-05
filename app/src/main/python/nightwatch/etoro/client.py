@@ -29,7 +29,6 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from typing import Any, Callable, Final, Iterable, Mapping, Sequence
 
 import httpx
@@ -70,7 +69,6 @@ __all__ = [
     "TRANSACTION",
     "SETTLEMENT_TYPE",
     "MAX_ELIGIBILITY_BATCH",
-    "MAX_TRADE_HISTORY_DAYS",
     "PollResult",
     "EtoroClient",
 ]
@@ -100,8 +98,18 @@ SETTLEMENT_TYPE: Final[str] = "real"
 #: DESIGN §1.1: eligibility is queried in batches of at most 100 instruments.
 MAX_ELIGIBILITY_BATCH: Final[int] = 100
 
-#: DESIGN §1.1: trade history lookback is documented as under one year.
-MAX_TRADE_HISTORY_DAYS: Final[int] = 364
+# REMOVED 2026-09-05 (was `MAX_TRADE_HISTORY_DAYS: Final[int] = 364`, plus a
+# `get_trade_history` guard raising when a caller's window exceeded it).
+# DESIGN §1.1 documented trade-history lookback as under one year; a live
+# probe (DESIGN_market_data.md §10.5) disproved it -- a single GET with
+# MinDate=1970-01-01 returned this real account's complete 120-row
+# closed-trade history spanning 2020-12-21..2026-08-31 (nearly six years, no
+# retention cutoff found). The constant and the guard built on it enforced a
+# *false* client-side ceiling for a limit the live API does not have --
+# keeping the constant around unused would be exactly the "dead complexity
+# left behind without saying why" this correction exists to avoid. See
+# get_trade_history's docstring for what replaced it (local end_date
+# filtering, since MaxDate is separately confirmed ignored server-side).
 
 _DEFAULT_MAX_ATTEMPTS: Final[int] = 5
 _DEFAULT_BASE_DELAY: Final[float] = 1.0
@@ -314,24 +322,62 @@ class EtoroClient:
     # -- gate 6/9: auth probe + balances --------------------------------------
 
     def get_balance(self) -> Balance:
-        """``GET /balances`` (preflight gate 6 auth probe; DESIGN §4.5, §9).
+        """Compute available cash from the **portfolio** endpoint, not
+        ``/balances`` (DESIGN §4.5, §9; corrected 2026-09-05 against a
+        real-money live-account probe).
 
-        Computes ``available_cash`` with eToro's documented formula, never
-        ``totalBalance``.
+        Corrected 2026-09-05, SEVERE: this method used to call
+        ``GET /api/v1/balances`` and read ``credit``/``orders``/
+        ``ordersForOpen`` off its body. A read-only probe against this
+        operator's real account today found that ``/balances`` carries
+        **none of those fields** -- its body is just ``{"totalBalance":
+        ..., "balances": [...]}`` (a per-sub-account list, no ``credit``, no
+        pending-order arrays). The old code silently computed
+        ``available_cash = compute_available_cash(0.0, [], []) == 0.0`` with
+        no error, because ``data.get("credit", 0.0)`` treats "field absent"
+        identically to "field present and zero." Since ``broker_available_cash``
+        feeds ``sleeve_cash`` (DESIGN §4.5), this meant the app would compute
+        a permanently-zero cash sleeve and never buy -- fails closed, so not
+        a money-losing bug, but a silent one with no diagnostic pointing at
+        the cause.
 
-        Corrected 2026-09-04: this endpoint has **no** demo/real path
-        segment at all -- ``/api/v1/balances`` always, for both
-        environments. Which account it reads is determined entirely by
-        which credential pair authenticates the call. The old code called
-        ``/api/v1/demo/balances`` (a path that does not exist in eToro's
-        docs) and got a 401 that looked like an auth failure but was really
-        a routing non-issue masked by an auth-before-routing gateway.
+        The formula's real inputs -- ``credit``, ``orders``, ``ordersForOpen``
+        -- all live in the **portfolio** endpoint's ``clientPortfolio``
+        envelope instead (confirmed live today: ``credit=1514.59``,
+        ``orders`` one row amount ``250.00``, ``ordersForOpen=[]``, giving
+        ``available = 1514.59 - 250.00 = 1264.59``). That is the same
+        envelope :meth:`get_portfolio` already unwraps for ``positions``, so
+        this method now shares :meth:`_fetch_portfolio_envelope` with it
+        instead of calling a second, separate endpoint -- one round trip,
+        not two, and both callers read the one response body eToro actually
+        sends. ``/balances`` is no longer called by this method at all (it
+        is still called by :meth:`verify_environment`, an unrelated gate 7
+        probe that only wants a best-effort environment signal, not the
+        cash formula's inputs).
+
+        A missing ``credit`` key is now treated as a broker-contract change
+        and raises :class:`~nightwatch.etoro.errors.EtoroValidationError`
+        immediately, rather than silently defaulting to ``0.0`` -- this
+        codebase's repeated lesson (§10.7, HANDOFF §8) is that a silent zero
+        is worse than a crash.
+
+        ``total_balance`` is ``None`` here: the portfolio envelope's
+        confirmed live shape (DESIGN_market_data.md §10.8) does not carry a
+        ``totalBalance``-equivalent field, and nothing in this codebase
+        currently reads :attr:`Balance.total_balance` (grepped 2026-09-05) --
+        so there is no live consumer to justify a second round trip to
+        ``/balances`` just to populate a field nobody uses. If a future
+        caller needs portfolio-value display, fetch ``/balances`` there
+        explicitly rather than reintroducing it into this hot path.
         """
-        response = self._request(
-            "GET", "/api/v1/balances", request_class="read"
-        )
-        data = response.json()
-        credit = float(data.get("credit", 0.0))
+        data = self._fetch_portfolio_envelope()
+        if "credit" not in data:
+            raise EtoroValidationError(
+                "portfolio response missing 'credit' -- cannot compute "
+                "available_cash (broker contract change, not a value to "
+                f"silently default to 0; body keys seen: {sorted(data.keys())!r})"
+            )
+        credit = float(data["credit"])
         available = compute_available_cash(
             credit,
             orders_for_open=data.get("ordersForOpen", []),
@@ -339,9 +385,7 @@ class EtoroClient:
         )
         return Balance(
             credit=credit,
-            total_balance=(
-                float(data["totalBalance"]) if data.get("totalBalance") is not None else None
-            ),
+            total_balance=None,
             available_cash=available,
             raw=data,
         )
@@ -409,6 +453,31 @@ class EtoroClient:
 
     # -- gate 8, portfolio, pnl ------------------------------------------------
 
+    def _fetch_portfolio_envelope(self) -> dict[str, Any]:
+        """One ``GET`` to ``.../portfolio``, unwrapped from ``clientPortfolio``.
+
+        Shared by :meth:`get_portfolio` and :meth:`get_balance` (added
+        2026-09-05): both exist to read fields off the exact same live
+        response body -- ``positions`` for the former, ``credit``/
+        ``orders``/``ordersForOpen`` for the latter (see `get_balance`'s
+        docstring for why those last three do **not** live on ``/balances``
+        as previously assumed) -- so there is exactly one place that issues
+        the request and unwraps the envelope, not two call sites that could
+        drift apart on the unwrap logic.
+
+        Corrected 2026-09-04 (carried over from the old `get_portfolio`): a
+        live response nests everything under a ``clientPortfolio`` object --
+        ``{"clientPortfolio": {"positions": [...], "credit": ..., ...}}`` --
+        not bare top-level keys.
+        """
+        response = self._request(
+            "GET", f"/api/v1/trading/info/{self._demo()}portfolio", request_class="read"
+        )
+        data = response.json()
+        if isinstance(data, dict) and "clientPortfolio" in data:
+            data = data["clientPortfolio"]
+        return data if isinstance(data, dict) else {}
+
     def get_portfolio(self) -> list[Position]:
         """``GET /trading/info/portfolio`` (or the `/demo/` variant).
 
@@ -417,16 +486,11 @@ class EtoroClient:
         ``{"clientPortfolio": {"positions": [...], ...}}`` -- not a bare
         top-level ``positions`` key. With zero positions this bug was
         invisible (both the old and the fixed parsing return ``[]``), which
-        is exactly the "didn't error, not a pass" trap; this has not been
-        confirmed against a *non-empty* portfolio.
+        is exactly the "didn't error, not a pass" trap; this has since been
+        confirmed against a genuinely non-empty portfolio (§10.8).
         """
-        response = self._request(
-            "GET", f"/api/v1/trading/info/{self._demo()}portfolio", request_class="read"
-        )
-        data = response.json()
-        if isinstance(data, dict) and "clientPortfolio" in data:
-            data = data["clientPortfolio"]
-        positions_raw = data.get("positions", data if isinstance(data, list) else [])
+        data = self._fetch_portfolio_envelope()
+        positions_raw = data.get("positions", [])
         return [self._parse_position(p) for p in positions_raw]
 
     def get_pnl(self) -> dict[str, Any]:
@@ -439,21 +503,53 @@ class EtoroClient:
 
     @staticmethod
     def _parse_position(raw: Mapping[str, Any]) -> Position:
+        """Parse one broker position (DESIGN_market_data.md §4.2, §4.5, §10.7).
+
+        Bug found 2026-09-04, corrected 2026-09-05 (HANDOFF_2026-09-05.md §1,
+        §4): the previous version read ``currentRate``, ``invested``,
+        ``unrealizedPL``, and ``symbol`` off every position -- a live,
+        non-empty 227-position portfolio confirmed **none of those four keys
+        exist** on a broker position. None are read here any
+        more; see :class:`~nightwatch.etoro.models.Position`'s docstring for
+        why symbol resolution and mark-to-market are the caller's job
+        (through ``instrumentID`` and a fetched price, respectively) rather
+        than this parser's.
+
+        ``positionID``, ``units``, ``openRate``, and ``amount`` are the
+        fields the same live probe confirmed always present. A broker
+        response missing any of them is a contract change, not something to
+        silently default to ``0.0`` -- this raises
+        :class:`~nightwatch.etoro.errors.EtoroValidationError` instead.
+        """
+        position_id = next(
+            (raw[k] for k in ("positionID", "positionId", "id") if raw.get(k) is not None),
+            None,
+        )
+        if position_id is None:
+            raise EtoroValidationError(f"position missing positionID: {dict(raw)!r}"[:500])
+        instrument_id = raw.get("instrumentID", raw.get("instrumentId"))
+        if instrument_id is None:
+            # Not merely "one more required field". Since there is no symbol
+            # string on a position (§4.2), instrumentID is the *only* route to
+            # a symbol -- defaulting it to 0 would resurrect exactly the silent
+            # null this correction exists to remove, one level down.
+            raise EtoroValidationError(
+                f"position {position_id} missing instrumentID: {dict(raw)!r}"[:500]
+            )
+        for required in ("units", "openRate", "amount"):
+            if raw.get(required) is None:
+                raise EtoroValidationError(
+                    f"position {position_id} missing required field {required!r}: "
+                    f"{dict(raw)!r}"[:500]
+                )
         return Position(
-            position_id=str(raw.get("positionID") or raw.get("positionId") or raw.get("id")),
-            instrument_id=int(raw.get("instrumentID", raw.get("instrumentId", 0))),
-            symbol=raw.get("symbol"),
-            units=float(raw.get("units", 0.0)),
-            entry_price=float(raw.get("openRate", raw.get("entryPrice", 0.0))),
-            current_price=(
-                float(raw["currentRate"]) if raw.get("currentRate") is not None else None
-            ),
-            invested=(float(raw["invested"]) if raw.get("invested") is not None else None),
+            position_id=str(position_id),
+            instrument_id=int(instrument_id),
+            units=float(raw["units"]),
+            entry_price=float(raw["openRate"]),
+            amount=float(raw["amount"]),
             leverage=int(raw.get("leverage", 1)),
             is_buy=bool(raw.get("isBuy", True)),
-            unrealized_pnl=(
-                float(raw["unrealizedPL"]) if raw.get("unrealizedPL") is not None else None
-            ),
             open_date=raw.get("openDateTime"),
             raw=dict(raw),
         )
@@ -468,25 +564,53 @@ class EtoroClient:
         page_size: int = 200,
         max_pages: int = 50,
     ) -> list[TradeHistoryEntry]:
-        """``GET /trading/info/trade/history`` (or ``/trade/demo/history``),
-        paged, <1yr lookback enforced.
+        """``GET /trading/info/trade/history`` (or ``/trade/demo/history``), paged.
 
         Args:
-            start_date: ``YYYY-MM-DD``, inclusive.
-            end_date: ``YYYY-MM-DD``, inclusive.
+            start_date: ``YYYY-MM-DD``, inclusive. Sent to eToro as ``MinDate``,
+                which the live API genuinely enforces.
+            end_date: ``YYYY-MM-DD``, inclusive. Sent as ``MaxDate`` too (kept
+                for forward-compatibility and to mirror what the real request
+                is), but **enforced locally, in this method** -- see below.
+
+        Corrected 2026-09-05 against a real-account live probe, two related
+        fixes:
+
+        1. **Wrong query parameter names.** This sent ``startDate``/
+           ``endDate``, which the live API rejects outright with HTTP 400
+           (``"Missing required query parameter [MinDate]"``). The real
+           names are ``MinDate``/``MaxDate``.
+        2. **``MaxDate`` is silently ignored server-side.** A live
+           ``MinDate=2024-08-01, MaxDate=2025-01-01`` query still returned
+           trades closed through 2026-08-31 -- only ``MinDate`` actually
+           bounds the result. Because of this, ``end_date`` is now enforced
+           **locally**, after the fetch, by filtering on each row's
+           ``close_date`` -- the server will not do it, so this method must.
+           Do not remove this local filter on the assumption ``MaxDate``
+           will someday start working; that is a confirmed *current*
+           behaviour of the live API, not a tracked gap.
+
+        Also corrected 2026-09-05: the previous <1yr-lookback window guard
+        (``MAX_TRADE_HISTORY_DAYS``, removed -- see the comment where it
+        used to be defined) enforced a limit the live API does not actually
+        have. The same probe found the endpoint **is not windowed at all**:
+        a single call with ``MinDate=1970-01-01`` and ``pageSize=500``
+        returned this real account's complete 120-row closed-trade history,
+        earliest close 2020-12-21, latest 2026-08-31 -- nearly six years in
+        one response, no retention cutoff found. This closes
+        DESIGN_market_data.md §10.5 (was HIGH, blocked §4.6c): long-run
+        realized P&L is reconstructable from the broker alone; no second,
+        local sidecar table is needed. The page-by-``page`` loop below is
+        kept, deliberately, as a plain defensive measure in case some
+        account's full history someday exceeds ``page_size`` rows in one
+        page -- not because any windowing limit was ever confirmed to
+        require it; ``max_pages`` bounds it from ever looping forever
+        against a misbehaving server.
 
         Corrected 2026-09-04: needs the demo/real segment, same issue as
         :meth:`get_eligibility`. Note the segment sits between ``trade/`` and
         ``history``, not before ``trade``.
         """
-        start = datetime.fromisoformat(start_date).replace(tzinfo=timezone.utc)
-        end = datetime.fromisoformat(end_date).replace(tzinfo=timezone.utc)
-        if (end - start).days > MAX_TRADE_HISTORY_DAYS:
-            raise EtoroValidationError(
-                f"trade history window {start_date}..{end_date} exceeds the "
-                f"documented <1yr lookback ({MAX_TRADE_HISTORY_DAYS} days)"
-            )
-
         entries: list[TradeHistoryEntry] = []
         page = 0
         while page < max_pages:
@@ -495,8 +619,8 @@ class EtoroClient:
                 f"/api/v1/trading/info/trade/{self._demo()}history",
                 request_class="read",
                 params={
-                    "startDate": start_date,
-                    "endDate": end_date,
+                    "MinDate": start_date,
+                    "MaxDate": end_date,
                     "page": page,
                     "pageSize": page_size,
                 },
@@ -509,23 +633,75 @@ class EtoroClient:
             if len(rows) < page_size:
                 break
             page += 1
-        return entries
+        return [e for e in entries if self._closed_on_or_before(e.close_date, end_date)]
+
+    @staticmethod
+    def _closed_on_or_before(close_date: str | None, end_date: str) -> bool:
+        """True unless ``close_date`` is confirmed later than ``end_date``.
+
+        The local half of the ``MaxDate`` workaround (see
+        :meth:`get_trade_history`'s docstring): the server does not bound
+        the result by ``MaxDate``, so this client does, comparing the
+        ``YYYY-MM-DD`` date prefix. A row with no ``close_date`` at all is
+        kept, not dropped -- there is nothing to compare it against, and
+        this is a client-side display filter, not a validation gate that
+        should fail closed on missing data.
+        """
+        if close_date is None:
+            return True
+        return str(close_date)[:10] <= end_date
 
     @staticmethod
     def _parse_trade_history_entry(raw: Mapping[str, Any]) -> TradeHistoryEntry:
+        """Parse one closed-trade row (DESIGN_market_data.md §10.5).
+
+        Corrected 2026-09-05 against 120 real closed-trade rows from a live
+        account: see :class:`~nightwatch.etoro.models.TradeHistoryEntry`'s
+        docstring for the full field-name correction (including the
+        cross-endpoint casing trap -- trade history uses ``positionId``/
+        ``instrumentId``, lowercase ``d``, while the portfolio endpoint uses
+        capital ``D``) and the ``netProfit``-vs-``fees`` arithmetic.
+
+        ``positionId``, ``units``, and ``openRate`` absent is a broker-contract
+        change, not something to silently default to ``0.0`` -- matching
+        ``_parse_position``'s corrected precedent (§10.7); this raises
+        :class:`~nightwatch.etoro.errors.EtoroValidationError` instead.
+        """
+        position_id = next(
+            (raw[k] for k in ("positionId", "positionID", "id") if raw.get(k) is not None),
+            None,
+        )
+        if position_id is None:
+            raise EtoroValidationError(
+                f"trade history row missing positionId: {dict(raw)!r}"[:500]
+            )
+        instrument_id = raw.get("instrumentId", raw.get("instrumentID"))
+        if instrument_id is None:
+            raise EtoroValidationError(
+                f"trade history row {position_id} missing instrumentId: "
+                f"{dict(raw)!r}"[:500]
+            )
+        for required in ("units", "openRate"):
+            if raw.get(required) is None:
+                raise EtoroValidationError(
+                    f"trade history row {position_id} missing required field "
+                    f"{required!r}: {dict(raw)!r}"[:500]
+                )
         return TradeHistoryEntry(
-            position_id=(
-                str(raw["positionID"]) if raw.get("positionID") is not None else None
-            ),
-            instrument_id=int(raw.get("instrumentID", raw.get("instrumentId", 0))),
-            symbol=raw.get("symbol"),
-            action=str(raw.get("action", "")),
-            units=float(raw.get("units", 0.0)),
-            open_rate=(float(raw["openRate"]) if raw.get("openRate") is not None else None),
+            position_id=str(position_id),
+            instrument_id=int(instrument_id),
+            units=float(raw["units"]),
+            is_buy=bool(raw.get("isBuy", True)),
+            leverage=int(raw.get("leverage", 1)),
+            open_rate=float(raw["openRate"]),
             close_rate=(float(raw["closeRate"]) if raw.get("closeRate") is not None else None),
-            profit=(float(raw["profit"]) if raw.get("profit") is not None else None),
-            open_date=raw.get("openDateTime"),
-            close_date=raw.get("closeDateTime"),
+            profit=(float(raw["netProfit"]) if raw.get("netProfit") is not None else None),
+            investment=(
+                float(raw["investment"]) if raw.get("investment") is not None else None
+            ),
+            fees=(float(raw["fees"]) if raw.get("fees") is not None else None),
+            open_date=raw.get("openTimestamp"),
+            close_date=raw.get("closeTimestamp"),
             raw=dict(raw),
         )
 
@@ -708,17 +884,37 @@ class EtoroClient:
                 rows = candles_block[0]["candles"]
             else:
                 rows = candles_block
-        return [
-            Candle(
-                date=str(row.get("fromDate") or row.get("date") or row.get("timestamp"))[:10],
-                open=float(row.get("open", row.get("Open", 0.0))),
-                high=float(row.get("high", row.get("High", 0.0))),
-                low=float(row.get("low", row.get("Low", 0.0))),
-                close=float(row.get("close", row.get("Close", 0.0))),
-                volume=(float(row["volume"]) if row.get("volume") is not None else None),
-            )
-            for row in rows
-        ]
+        return [self._parse_candle(row, interval) for row in rows]
+
+    @staticmethod
+    def _parse_candle(row: Mapping[str, Any], interval: str) -> Candle:
+        """Parse one candle row, preserving the bar's own timestamp and interval.
+
+        Corrected 2026-09-05: the previous inline version truncated the date
+        field to ``[:10]`` for every interval, discarding the bar time on
+        anything finer than ``OneDay``. Gate 10's freshness check
+        (DESIGN_market_data.md §6, §2.11) depends on exactly that bar-level
+        timestamp, so the truncation quietly removed the signal the gate was
+        specified around. Both forms are kept now: ``date`` truncated as
+        before for existing callers, ``timestamp`` verbatim.
+
+        ``interval`` added the same day: it is ``get_candles``'s own call
+        parameter (already known, needs no guessing here) and is threaded
+        straight through onto :class:`Candle` so gate 10 can pick a
+        freshness bound that matches the bar it was actually handed instead
+        of assuming one flat bound fits every granularity.
+        """
+        raw_date = row.get("fromDate") or row.get("date") or row.get("timestamp")
+        return Candle(
+            date=str(raw_date)[:10],
+            open=float(row.get("open", row.get("Open", 0.0))),
+            high=float(row.get("high", row.get("High", 0.0))),
+            low=float(row.get("low", row.get("Low", 0.0))),
+            close=float(row.get("close", row.get("Close", 0.0))),
+            volume=(float(row["volume"]) if row.get("volume") is not None else None),
+            timestamp=(None if raw_date is None else str(raw_date)),
+            interval=interval,
+        )
 
     # -- eligibility, batched ≤100 ---------------------------------------------
 

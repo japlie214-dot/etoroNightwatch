@@ -32,6 +32,7 @@ __all__ = [
     "Intent",
     "Order",
     "Lot",
+    "LotAnnotation",
     "Bucket",
     "StrategyState",
     "BudgetRecord",
@@ -250,6 +251,51 @@ class Lot:
 
 
 @dataclass(frozen=True, slots=True)
+class LotAnnotation:
+    """One row of ``lot_annotations`` (DESIGN_market_data.md §4.4) -- the
+    split-invariant strategy sidecar that replaces ``lots`` for anything
+    the broker itself owns.
+
+    eToro is authoritative for the financial facts of a position (units,
+    entry price, cost basis); this row carries only what a split does not
+    touch: which ladder the position belongs to, its stamped SPY entry
+    context, and its re-entry bucket if any (§4.1). ``position_id`` is the
+    join key back to the broker, not a local autoincrement id.
+
+    ``entry_date``/``entry_amount`` double as the sidecar's re-link key
+    (``(instrument_id, entry_date, entry_amount)`` via the broker's
+    ``instrumentID``/``openDateTime``/``amount``) -- NOT ``units`` or
+    ``entry_price``, because a live 227-position probe (2026-09-04)
+    confirmed eToro rescales both of those on a split while preserving
+    ``amount`` exactly (§4.6). Stamped once at open, never updated.
+
+    ``origin`` is provenance only, never an access gate (§4.7): ``'app'``
+    for a position this app opened and stamped itself, ``'adopted'`` for a
+    pre-existing position whose SPY entry context was reconstructed from
+    history because nothing was ever stamped for it. Both are fully
+    managed once a row exists.
+    """
+
+    position_id: str
+    symbol: str
+    book: str
+    entry_date: str
+    entry_amount: float
+    origin: str
+    entry_reference_spy: float | None = None
+    entry_spy_ath: float | None = None
+    entry_spy_close: float | None = None
+    entry_spy_drawdown: float | None = None
+    entry_tier: int | None = None
+    bucket_id: str | None = None
+    entry_order_id: int | None = None
+    exit_order_id: int | None = None
+    is_open: bool = True
+    created_at: str | None = None
+    updated_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Bucket:
     """A deferred re-entry bucket."""
 
@@ -299,7 +345,20 @@ class BudgetRecord:
 
 @dataclass(frozen=True, slots=True)
 class SnapshotPosition:
-    """One open position inside a portfolio snapshot."""
+    """One open position inside a portfolio snapshot.
+
+    Corrected 2026-09-04 (DESIGN_market_data.md §4.2, §10.7): a broker
+    position carries no ``invested`` key -- ``amount`` (cost basis) is what
+    genuinely exists and survives a split unchanged (§4.5), so this column
+    was renamed rather than kept alongside a field that never had a source
+    (see migration ``002_position_amount.sql``). ``symbol``,
+    ``current_price``, and ``unrealized_pnl`` are still legitimate columns
+    *here* -- unlike ``etoro.models.Position``, which no longer carries them
+    at all -- but the caller building this row must supply them itself
+    (``symbol`` via ``Repo.get_instrument``, ``current_price``/
+    ``unrealized_pnl`` via ``etoro.models.mark_position``); nothing upstream
+    parses them off the broker any more.
+    """
 
     position_id: str
     symbol: str | None = None
@@ -307,7 +366,7 @@ class SnapshotPosition:
     units: float | None = None
     entry_price: float | None = None
     current_price: float | None = None
-    invested: float | None = None
+    amount: float | None = None
     leverage: int | None = None
     unrealized_pnl: float | None = None
     open_date: str | None = None
@@ -594,6 +653,51 @@ class Repo:
             metadata=_j(row["metadata_json"], {}),
             updated_at=row["updated_at"],
         )
+
+    def get_instrument_by_id(self, instrument_id: int) -> Instrument | None:
+        """Return a cached instrument by eToro ``instrumentID``, or ``None``.
+
+        The join a broker position must use to get a symbol at all
+        (DESIGN_market_data.md §4.2): a position carries no symbol string,
+        only ``instrumentID``, so this is the only correct way to resolve
+        one -- never a string comparison.
+        """
+        row = self.conn.execute(
+            "SELECT * FROM instruments WHERE instrument_id = ?", (instrument_id,)
+        ).fetchone()
+        if row is None:
+            return None
+        return Instrument(
+            symbol=row["symbol"], instrument_id=row["instrument_id"],
+            name=row["name"], exchange=row["exchange"], currency=row["currency"],
+            allow_open_position=_b(row["allow_open_position"]),
+            min_position_exposure=row["min_position_exposure"],
+            min_position_amount=row["min_position_amount"],
+            allow_partial_close=_b(row["allow_partial_close"]),
+            eligibility_checked_at=row["eligibility_checked_at"],
+            metadata=_j(row["metadata_json"], {}),
+            updated_at=row["updated_at"],
+        )
+
+    def list_instruments(self) -> list[Instrument]:
+        """Return every cached instrument, ticker order."""
+        rows = self.conn.execute(
+            "SELECT * FROM instruments ORDER BY symbol"
+        ).fetchall()
+        return [
+            Instrument(
+                symbol=r["symbol"], instrument_id=r["instrument_id"],
+                name=r["name"], exchange=r["exchange"], currency=r["currency"],
+                allow_open_position=_b(r["allow_open_position"]),
+                min_position_exposure=r["min_position_exposure"],
+                min_position_amount=r["min_position_amount"],
+                allow_partial_close=_b(r["allow_partial_close"]),
+                eligibility_checked_at=r["eligibility_checked_at"],
+                metadata=_j(r["metadata_json"], {}),
+                updated_at=r["updated_at"],
+            )
+            for r in rows
+        ]
 
     # -- sessions ----------------------------------------------------------
 
@@ -1086,6 +1190,206 @@ class Repo:
             realized_pnl=row["realized_pnl"],
         )
 
+    # -- lot annotations (DESIGN_market_data.md §4.4) -----------------------
+
+    def get_lot_annotation(self, position_id: str) -> LotAnnotation | None:
+        """Return a sidecar row by broker ``position_id``, or ``None``."""
+        row = self.conn.execute(
+            "SELECT * FROM lot_annotations WHERE position_id = ?", (position_id,)
+        ).fetchone()
+        return self._lot_annotation(row) if row else None
+
+    def list_lot_annotations(
+        self,
+        *,
+        book: str | None = None,
+        symbol: str | None = None,
+        origin: str | None = None,
+        is_open: bool | None = None,
+    ) -> list[LotAnnotation]:
+        """Return sidecar rows, optionally filtered.
+
+        Used by gate 11's membership check (DESIGN_market_data.md §4.5) and
+        by anything reporting on the adopted set specifically
+        (``origin='adopted'``, §4.7).
+        """
+        clauses: list[str] = []
+        params: list[Any] = []
+        if book is not None:
+            clauses.append("book = ?")
+            params.append(book)
+        if symbol is not None:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        if origin is not None:
+            clauses.append("origin = ?")
+            params.append(origin)
+        if is_open is not None:
+            clauses.append("is_open = ?")
+            params.append(int(is_open))
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self.conn.execute(
+            f"SELECT * FROM lot_annotations {where} ORDER BY entry_date, position_id",
+            tuple(params),
+        ).fetchall()
+        return [self._lot_annotation(r) for r in rows]
+
+    def open_lot_annotation_position_ids(self) -> set[str]:
+        """Return every open sidecar row's ``position_id`` — gate 11
+        invariant 2's side of the membership check (DESIGN_market_data.md
+        §4.5): every open sidecar row must have a live broker position.
+        """
+        rows = self.conn.execute(
+            "SELECT position_id FROM lot_annotations WHERE is_open = 1"
+        ).fetchall()
+        return {r["position_id"] for r in rows}
+
+    @staticmethod
+    def _validate_lot_annotation(annotation: "LotAnnotation") -> None:
+        """Raise ``ValueError`` on a ``book``/``origin`` the table's own
+        ``CHECK`` constraints would reject.
+
+        This duplicates those two ``CHECK`` clauses in Python deliberately:
+        ``INSERT OR IGNORE`` (the write path :meth:`insert_lot_annotations`
+        needs for idempotency) resolves a ``CHECK`` violation by silently
+        skipping the row -- confirmed against this SQLite build, no
+        exception, ``rowcount`` simply 0 -- unlike a ``FOREIGN KEY``
+        violation, which still raises even under ``OR IGNORE``. A silent
+        skip is exactly the "didn't error, not a pass" failure mode this
+        project's own history keeps flagging, so a bad ``book``/``origin``
+        must be caught here, in Python, before it ever reaches SQL.
+        """
+        if annotation.book not in ("catapult", "reentry"):
+            raise ValueError(
+                f"lot_annotations.book must be 'catapult' or 'reentry', got "
+                f"{annotation.book!r} (position_id={annotation.position_id!r})"
+            )
+        if annotation.origin not in ("app", "adopted"):
+            raise ValueError(
+                f"lot_annotations.origin must be 'app' or 'adopted', got "
+                f"{annotation.origin!r} (position_id={annotation.position_id!r})"
+            )
+
+    def insert_lot_annotation(self, annotation: LotAnnotation) -> None:
+        """Insert one sidecar row. Raises ``sqlite3.IntegrityError`` if
+        ``position_id`` already has one -- annotations are stamped once at
+        open and never overwritten (§4.3), so a caller that expects to
+        possibly re-run should use :meth:`insert_lot_annotations` instead,
+        which is idempotent by construction. Raises ``ValueError`` on an
+        invalid ``book``/``origin`` (see :meth:`_validate_lot_annotation`).
+        """
+        self._validate_lot_annotation(annotation)
+        now = utcnow()
+        self.conn.execute(
+            """
+            INSERT INTO lot_annotations (
+                position_id, symbol, book, entry_reference_spy, entry_spy_ath,
+                entry_spy_close, entry_spy_drawdown, entry_tier, bucket_id,
+                entry_order_id, exit_order_id, entry_date, entry_amount,
+                is_open, origin, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                annotation.position_id, annotation.symbol, annotation.book,
+                annotation.entry_reference_spy, annotation.entry_spy_ath,
+                annotation.entry_spy_close, annotation.entry_spy_drawdown,
+                annotation.entry_tier, annotation.bucket_id,
+                annotation.entry_order_id, annotation.exit_order_id,
+                annotation.entry_date, annotation.entry_amount,
+                int(annotation.is_open), annotation.origin,
+                annotation.created_at or now, annotation.updated_at or now,
+            ),
+        )
+        self.conn.commit()
+
+    def insert_lot_annotations(self, annotations: Iterable[LotAnnotation]) -> int:
+        """Insert many sidecar rows in one all-or-nothing transaction.
+
+        Built for the §4.7 one-shot adoption backfill
+        (DESIGN_market_data.md §4.7, §10.10), whose task brief requires both
+        properties this method gives:
+
+        * **Idempotent.** ``INSERT OR IGNORE`` keyed on ``position_id``
+          (the table's primary key) -- an annotation already present is left
+          completely untouched, never updated, matching §4.3's "stamp once,
+          never overwrite" rule. Running this twice with the same rows
+          inserts nothing the second time; §10.10 notes a straggler fill may
+          need exactly this re-run.
+        * **Atomic.** Every row is written under the connection's one
+          implicit transaction (``isolation_level="DEFERRED"``, opened by
+          the first ``INSERT`` below) and committed together, or none of
+          them are: any exception rolls back the whole batch rather than
+          leaving a partially-adopted sidecar, which the task brief calls
+          worse than no backfill at all (a half-satisfied gate 11 invariant
+          1 halts every future session exactly like a fully-unsatisfied one,
+          but with no clean starting point to retry from).
+
+        Returns the number of rows actually inserted (excludes position_ids
+        that already had a row).
+
+        Raises:
+            ValueError: If ANY row has an invalid ``book``/``origin`` --
+                checked for every row before any ``INSERT`` is issued, since
+                (see :meth:`_validate_lot_annotation`) that specific mistake
+                would otherwise be swallowed silently by ``OR IGNORE``
+                rather than raised, which is exactly the failure mode this
+                method exists to avoid.
+        """
+        annotations = list(annotations)
+        for annotation in annotations:
+            self._validate_lot_annotation(annotation)
+
+        now = utcnow()
+        inserted = 0
+        try:
+            for annotation in annotations:
+                cur = self.conn.execute(
+                    """
+                    INSERT OR IGNORE INTO lot_annotations (
+                        position_id, symbol, book, entry_reference_spy,
+                        entry_spy_ath, entry_spy_close, entry_spy_drawdown,
+                        entry_tier, bucket_id, entry_order_id, exit_order_id,
+                        entry_date, entry_amount, is_open, origin,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        annotation.position_id, annotation.symbol,
+                        annotation.book, annotation.entry_reference_spy,
+                        annotation.entry_spy_ath, annotation.entry_spy_close,
+                        annotation.entry_spy_drawdown, annotation.entry_tier,
+                        annotation.bucket_id, annotation.entry_order_id,
+                        annotation.exit_order_id, annotation.entry_date,
+                        annotation.entry_amount, int(annotation.is_open),
+                        annotation.origin, annotation.created_at or now,
+                        annotation.updated_at or now,
+                    ),
+                )
+                if cur.rowcount == 1:
+                    inserted += 1
+        except Exception:
+            self.conn.rollback()
+            raise
+        else:
+            self.conn.commit()
+        return inserted
+
+    @staticmethod
+    def _lot_annotation(row: sqlite3.Row) -> LotAnnotation:
+        return LotAnnotation(
+            position_id=row["position_id"], symbol=row["symbol"],
+            book=row["book"], entry_reference_spy=row["entry_reference_spy"],
+            entry_spy_ath=row["entry_spy_ath"],
+            entry_spy_close=row["entry_spy_close"],
+            entry_spy_drawdown=row["entry_spy_drawdown"],
+            entry_tier=row["entry_tier"], bucket_id=row["bucket_id"],
+            entry_order_id=row["entry_order_id"],
+            exit_order_id=row["exit_order_id"], entry_date=row["entry_date"],
+            entry_amount=row["entry_amount"], is_open=bool(row["is_open"]),
+            origin=row["origin"], created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
     # -- buckets -----------------------------------------------------------
 
     def upsert_bucket(self, bucket: Bucket) -> None:
@@ -1300,14 +1604,14 @@ class Repo:
                 """
                 INSERT INTO portfolio_snapshot_positions
                     (snapshot_id, position_id, symbol, instrument_id, units,
-                     entry_price, current_price, invested, leverage,
+                     entry_price, current_price, amount, leverage,
                      unrealized_pnl, open_date)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot_id, position.position_id, position.symbol,
                     position.instrument_id, position.units, position.entry_price,
-                    position.current_price, position.invested, position.leverage,
+                    position.current_price, position.amount, position.leverage,
                     position.unrealized_pnl, position.open_date,
                 ),
             )
@@ -1326,7 +1630,7 @@ class Repo:
                 position_id=p["position_id"], symbol=p["symbol"],
                 instrument_id=p["instrument_id"], units=p["units"],
                 entry_price=p["entry_price"], current_price=p["current_price"],
-                invested=p["invested"], leverage=p["leverage"],
+                amount=p["amount"], leverage=p["leverage"],
                 unrealized_pnl=p["unrealized_pnl"], open_date=p["open_date"],
             )
             for p in self.conn.execute(

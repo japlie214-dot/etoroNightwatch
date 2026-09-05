@@ -39,6 +39,8 @@ __all__ = [
     "TelegramConfig",
     "WebappConfig",
     "RiskConfig",
+    "TiingoConfig",
+    "MarketDataConfig",
     "Config",
     "TIER_CAPS",
     "TIER_DRAWDOWN_BOUNDS",
@@ -396,6 +398,112 @@ class WebappConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class TiingoConfig:
+    """Tiingo market-data credentials and network settings.
+
+    Tiingo is the source of record for daily adjusted history and the
+    provisional-close cross-check (DESIGN_market_data.md §2.7, §3.1, §9) --
+    never eToro's rates endpoint, which §2.9 proves unsafe to read for a
+    current price. The key is supplied as an ``Authorization: Token <key>``
+    header, never a URL query parameter, so it cannot leak through server
+    access logs or a copy-pasted URL.
+    """
+
+    base_url: str = "https://api.tiingo.com"
+    #: Every network call gets an explicit per-call timeout (DESIGN_market_data
+    #: §8 gotchas: a probe hung for exactly this reason last session).
+    timeout_seconds: float = 10.0
+    #: Raw secret mapping; excluded from repr so nothing leaks.
+    secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
+
+    @property
+    def api_key(self) -> str:
+        """``TIINGO_KEY`` from ``.secrets.env``. Raises if absent."""
+        key = self.secrets.get("TIINGO_KEY", "")
+        if not key:
+            raise MissingCredentialError("missing TIINGO_KEY in config/.secrets.env")
+        return key
+
+    @property
+    def has_key(self) -> bool:
+        """True when ``TIINGO_KEY`` is present, without raising."""
+        return bool(self.secrets.get("TIINGO_KEY"))
+
+
+@dataclass(frozen=True, slots=True)
+class MarketDataConfig:
+    """Preflight gate 10 tolerances (DESIGN_market_data.md §6, §10.4).
+
+    **These are provisional placeholders, not calibrated numbers.** §10.4 is
+    explicit that the real values must come from the forward test's observed
+    per-symbol daily-return distribution, not be guessed. The defaults below
+    are chosen only to sit between the two magnitudes this session's live
+    evidence established (DESIGN_market_data.md §2.9, §2.11(C)): eToro's own
+    candle-vs-rates venue/timing noise is ~0.1%, while the UPRO rates-freeze
+    bug measured +1.322%/+19.0h -- both tolerances below are set to catch the
+    latter while tolerating the former, pending real calibration.
+    """
+
+    #: Max age of ``Rate.timestamp`` before a live quote is considered stale,
+    #: cross-checked against eToro's own candles (DESIGN_market_data §6 gate
+    #: 10 item 1, §2.9's UPRO evidence: ~1140 minutes stale vs ~0 for a fresh
+    #: quote). 15 minutes is comfortably above ordinary poll-to-poll gaps and
+    #: comfortably below any real staleness incident observed so far.
+    max_rate_age_minutes: float = 15.0
+    #: Max fractional deviation between eToro's rate price and eToro's own
+    #: candle close for the same symbol at the same time (the "free internal
+    #: cross-check", DESIGN_market_data §5, §6 gate 10 item 1). 0.75% sits
+    #: above the ~0.1% venue/timing noise §2.11(C) measured and below the
+    #: 1.322% UPRO freeze error §2.9 measured.
+    rate_vs_candle_deviation_pct: float = 0.0075
+    #: Max fractional deviation between the provisional close actually used
+    #: (Tiingo IEX primary, or eToro candle fallback) and eToro's own candle,
+    #: when both are available to cross-check (DESIGN_market_data §3.1, §5.1,
+    #: §8). Same magnitude reasoning as above.
+    provisional_close_deviation_pct: float = 0.0075
+    #: Max age of ``Candle.timestamp`` before an **intraday** candle
+    #: (``OneMinute``, ``FiveMinutes``, ... ``FourHours`` --
+    #: ``engine.preflight.INTRADAY_CANDLE_INTERVALS``) is considered stale
+    #: (added 2026-09-05, closing the hole where the candle was the trusted
+    #: reference by construction with its own freshness never checked).
+    #: §10.4 applies here too -- provisional, pending forward-test
+    #: calibration.
+    #:
+    #: This bound applies **only** to intraday intervals. It intentionally
+    #: has no ``OneDay`` counterpart: a ``OneDay`` bar is legitimately hours
+    #: old at T-30 relative to the *prior* session's close, and even eToro's
+    #: own live-updating daily bar (§2.11 shows its close tracking the
+    #: current price intraday) may carry a date-only timestamp with no
+    #: intraday time component at all. Timestamp age is therefore not a
+    #: meaningful freshness signal for a ``OneDay`` candle -- there is no
+    #: honest minutes-based number to put here for it. Gate 10 instead
+    #: relies on the existing value-agreement check (``_check_provisional_
+    #: close`` comparing the provisional close to ``candle.close``) for that
+    #: case; see ``engine/preflight.py``'s ``_check_candle_freshness`` for
+    #: where that branch happens and what it does and does not guarantee.
+    #: An unrecognised or missing ``Candle.interval`` fails closed rather
+    #: than falling back to this bound by default -- guessing the wrong
+    #: bound is worse than refusing to guess.
+    max_candle_age_minutes_intraday: float = 20.0
+
+    def __post_init__(self) -> None:
+        if self.max_rate_age_minutes <= 0:
+            raise ConfigError("market_data.max_rate_age_minutes must be positive")
+        if not 0.0 < self.rate_vs_candle_deviation_pct < 1.0:
+            raise ConfigError(
+                "market_data.rate_vs_candle_deviation_pct must be in (0, 1)"
+            )
+        if not 0.0 < self.provisional_close_deviation_pct < 1.0:
+            raise ConfigError(
+                "market_data.provisional_close_deviation_pct must be in (0, 1)"
+            )
+        if self.max_candle_age_minutes_intraday <= 0:
+            raise ConfigError(
+                "market_data.max_candle_age_minutes_intraday must be positive"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class RiskConfig:
     """Hard caps enforced by preflight gate 12 (DESIGN §5)."""
 
@@ -425,6 +533,8 @@ class Config:
     telegram: TelegramConfig
     webapp: WebappConfig
     risk: RiskConfig
+    tiingo: TiingoConfig = field(default_factory=TiingoConfig)
+    market_data: MarketDataConfig = field(default_factory=MarketDataConfig)
     #: Source paths, for ``status`` output and diagnostics.
     config_path: Path | None = None
     secrets_path: Path | None = None
@@ -651,6 +761,25 @@ def load_config(
         min_battery_percent=int(rk.get("min_battery_percent", 40)),
     )
 
+    tg_market = _table(data, "tiingo")
+    tiingo = TiingoConfig(
+        base_url=str(tg_market.get("base_url", "https://api.tiingo.com")).rstrip("/"),
+        timeout_seconds=float(tg_market.get("timeout_seconds", 10.0)),
+        secrets=secrets,
+    )
+
+    md = _table(data, "market_data")
+    market_data = MarketDataConfig(
+        max_rate_age_minutes=float(md.get("max_rate_age_minutes", 15.0)),
+        rate_vs_candle_deviation_pct=float(md.get("rate_vs_candle_deviation_pct", 0.0075)),
+        provisional_close_deviation_pct=float(
+            md.get("provisional_close_deviation_pct", 0.0075)
+        ),
+        max_candle_age_minutes_intraday=float(
+            md.get("max_candle_age_minutes_intraday", 20.0)
+        ),
+    )
+
     return Config(
         mode=mode,
         etoro=etoro,
@@ -659,6 +788,8 @@ def load_config(
         telegram=telegram,
         webapp=webapp,
         risk=risk,
+        tiingo=tiingo,
+        market_data=market_data,
         config_path=config_path,
         secrets_path=secrets_path,
         arm_flag_present=bool(environ.get(ARM_ENV_VAR, "").strip()),

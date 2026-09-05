@@ -15,6 +15,7 @@ from nightwatch.db.repo import (
     Instrument,
     Intent,
     Lot,
+    LotAnnotation,
     Notification,
     Order,
     PortfolioSnapshot,
@@ -251,6 +252,140 @@ def test_open_lots_filters_by_book_and_symbol(repo: Repo) -> None:
     assert len(repo.open_lots(symbol="UPRO", book="reentry")) == 1
 
 
+# -- lot annotations (DESIGN_market_data.md §4.4) -------------------------
+
+
+def _annotation(position_id: str, **overrides: object) -> LotAnnotation:
+    fields: dict[str, object] = dict(
+        position_id=position_id,
+        symbol="SCHG",
+        book="catapult",
+        entry_date="2024-09-03T10:15:00+00:00",
+        entry_amount=10.0,
+        origin="adopted",
+        entry_spy_ath=110.0,
+        entry_spy_close=104.5,
+        entry_spy_drawdown=-0.05,
+        entry_tier=0,
+    )
+    fields.update(overrides)
+    return LotAnnotation(**fields)  # type: ignore[arg-type]
+
+
+def test_lot_annotation_round_trip(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-1"))
+    row = repo.get_lot_annotation("pos-1")
+    assert row is not None
+    assert row.symbol == "SCHG"
+    assert row.book == "catapult"
+    assert row.origin == "adopted"
+    assert row.entry_amount == 10.0
+    assert row.entry_tier == 0
+    assert row.is_open is True
+    assert row.bucket_id is None
+    assert row.created_at is not None
+
+
+def test_insert_lot_annotation_rejects_duplicate_position_id(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-1"))
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_lot_annotation(_annotation("pos-1"))
+
+
+def test_insert_lot_annotation_rejects_bad_book_or_origin(repo: Repo) -> None:
+    with pytest.raises(ValueError, match="book"):
+        repo.insert_lot_annotation(_annotation("pos-bad-book", book="not-a-book"))
+    with pytest.raises(ValueError, match="origin"):
+        repo.insert_lot_annotation(_annotation("pos-bad-origin", origin="legacy"))
+    assert repo.list_lot_annotations() == []
+
+
+def test_list_lot_annotations_filters(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-schg-catapult", symbol="SCHG", book="catapult"))
+    repo.insert_lot_annotation(_annotation("pos-upro-reentry", symbol="UPRO", book="reentry"))
+    repo.insert_lot_annotation(_annotation("pos-upro-catapult", symbol="UPRO", book="catapult", origin="app"))
+
+    assert len(repo.list_lot_annotations()) == 3
+    assert {a.position_id for a in repo.list_lot_annotations(symbol="UPRO")} == {
+        "pos-upro-reentry", "pos-upro-catapult",
+    }
+    assert [a.position_id for a in repo.list_lot_annotations(book="reentry")] == ["pos-upro-reentry"]
+    assert [a.position_id for a in repo.list_lot_annotations(origin="app")] == ["pos-upro-catapult"]
+
+
+def test_open_lot_annotation_position_ids(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-open", is_open=True))
+    repo.insert_lot_annotation(_annotation("pos-closed", is_open=False))
+    assert repo.open_lot_annotation_position_ids() == {"pos-open"}
+
+
+def test_insert_lot_annotations_bulk_is_idempotent(repo: Repo) -> None:
+    rows = [_annotation("pos-1"), _annotation("pos-2", symbol="UPRO")]
+    inserted_first = repo.insert_lot_annotations(rows)
+    assert inserted_first == 2
+    assert len(repo.list_lot_annotations()) == 2
+
+    # Re-running with the same rows (plus a genuinely new one) must insert
+    # only the new one -- INSERT OR IGNORE keyed on position_id, never an
+    # overwrite of the two already present (§4.3: stamp once, never update).
+    inserted_second = repo.insert_lot_annotations([*rows, _annotation("pos-3", symbol="UPRO")])
+    assert inserted_second == 1
+    assert len(repo.list_lot_annotations()) == 3
+
+
+def test_insert_lot_annotations_bulk_rejects_bad_book_before_writing_anything(repo: Repo) -> None:
+    """A bad ``book``/``origin`` must raise -- and must raise BEFORE any
+    row is written, not merely leave the row silently unwritten.
+
+    This is a real correctness gap that would otherwise exist:
+    ``INSERT OR IGNORE`` (the mechanism idempotency needs) resolves a
+    ``CHECK`` violation by silently skipping the row, with no exception --
+    confirmed directly against this SQLite build. Left uncaught, a bad
+    ``book`` would vanish into ``rowcount == 0`` rather than surface as an
+    error, which is exactly the "didn't error, not a pass" failure mode this
+    project's history keeps flagging. ``Repo._validate_lot_annotation``
+    exists specifically to catch this in Python first.
+    """
+    rows = [
+        _annotation("pos-good-1"),
+        _annotation("pos-good-2", symbol="UPRO"),
+        _annotation("pos-bad", book="not-a-real-book"),
+    ]
+    with pytest.raises(ValueError, match="not-a-real-book"):
+        repo.insert_lot_annotations(rows)
+
+    # Nothing from the batch landed -- validated before the first INSERT.
+    assert repo.list_lot_annotations() == []
+
+
+def test_insert_lot_annotations_bulk_is_atomic_on_a_foreign_key_violation(repo: Repo) -> None:
+    """A genuine SQL-level failure partway through a batch (here: a
+    ``bucket_id`` that does not exist -- unlike a bad ``book``/``origin``,
+    a FOREIGN KEY violation is NOT swallowed by ``OR IGNORE``, confirmed
+    directly against this SQLite build) must roll back the ENTIRE batch,
+    including the rows before it that were individually valid -- 'prefer
+    one transaction that either completes or rolls back' (§4.7 migration
+    task brief)."""
+    rows = [
+        _annotation("pos-good-1"),
+        _annotation("pos-good-2", symbol="UPRO"),
+        _annotation("pos-bad", bucket_id="no-such-bucket"),
+    ]
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_lot_annotations(rows)
+
+    # Nothing from the batch landed -- not even the two good rows that were
+    # inserted before the bad one blew up mid-loop.
+    assert repo.list_lot_annotations() == []
+    assert repo.get_lot_annotation("pos-good-1") is None
+    assert repo.get_lot_annotation("pos-good-2") is None
+
+    # The connection must still be usable afterwards (rollback did not
+    # poison it) -- a fresh, valid write succeeds.
+    repo.insert_lot_annotation(_annotation("pos-after-rollback"))
+    assert repo.get_lot_annotation("pos-after-rollback") is not None
+
+
 # -- buckets ---------------------------------------------------------------
 
 
@@ -312,12 +447,23 @@ def test_budget_history_round_trip(repo: Repo) -> None:
 
 
 def test_portfolio_snapshot_round_trip_with_positions(repo: Repo) -> None:
+    # symbol/current_price/unrealized_pnl are caller-supplied here (resolved
+    # via Repo.get_instrument / computed via etoro.models.mark_position),
+    # never parsed off the broker (DESIGN_market_data.md §4.2, §10.7) -- this
+    # test exercises the snapshot round-trip, not the resolution/computation
+    # itself, so the values are just hand-supplied.
     session = repo.create_session("2026-01-02", mode="dry_run", environment="demo", armed=False)
     snapshot_id = repo.insert_snapshot(
         PortfolioSnapshot(
             session_id=session.id, taken_at="2026-01-02T15:50:00+00:00",
             equity=10000.0, cash=500.0, available_cash=450.0,
-            positions=[SnapshotPosition(position_id="pos-1", symbol="UPRO", units=2.0)],
+            positions=[
+                SnapshotPosition(
+                    position_id="pos-1", symbol="UPRO", units=2.0,
+                    entry_price=75.0, current_price=80.0, amount=150.0,
+                    leverage=1, unrealized_pnl=10.0, open_date="2026-01-02T00:00:00Z",
+                )
+            ],
         )
     )
     got = repo.get_snapshot(snapshot_id)
@@ -325,6 +471,9 @@ def test_portfolio_snapshot_round_trip_with_positions(repo: Repo) -> None:
     assert got.equity == 10000.0
     assert len(got.positions) == 1
     assert got.positions[0].symbol == "UPRO"
+    assert got.positions[0].amount == 150.0
+    assert got.positions[0].current_price == 80.0
+    assert got.positions[0].unrealized_pnl == 10.0
 
     assert repo.latest_snapshot().id == snapshot_id
 

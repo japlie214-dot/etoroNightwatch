@@ -54,3 +54,6 @@ android-probe/.cxx/
 android-probe/**/.cxx/
 *.keystore
 *.jks
+
+# --- android build deps (445MB local cache, never commit) ---
+android-probe-deps/
