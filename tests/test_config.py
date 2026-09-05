@@ -12,6 +12,7 @@ from nightwatch.config import (
     ConfigError,
     EtoroEnvironment,
     MissingCredentialError,
+    StrategyConfig,
     TradingMode,
     load_config,
 )
@@ -64,6 +65,35 @@ def test_forbidden_manual_override_of_derived_fields(
     )
     with pytest.raises(ConfigError):
         load_config(config_path=config_path, secrets_path=secrets_path, env={}, host=host)
+
+
+def test_cone_center_mode_mid_rejected() -> None:
+    """"mid" was accepted by StrategyConfig.__post_init__'s old validation
+    tuple ("close", "mid") despite having no implementation anywhere --
+    strategy/cone.py only implements the "close" rule, and the reference
+    indicator this signal was ported from (expected_move_cone.py) supports
+    ("ema", "close"), not "mid" at all. Setting cone_center_mode="mid" used
+    to pass validation and then silently compute "close" anyway -- this
+    project's recurring silent-wrong-value failure mode. It must now raise.
+    """
+    with pytest.raises(ConfigError):
+        StrategyConfig(cone_center_mode="mid")
+
+
+def test_cone_center_mode_ema_rejected() -> None:
+    """"ema" is not accepted either -- no centering rule for it exists in
+    strategy/cone.py, and the live config only ever sets "close". Accepting
+    "ema" now, with no implementation behind it, would just recreate the
+    same silent-wrong-value trap under a different string.
+    """
+    with pytest.raises(ConfigError):
+        StrategyConfig(cone_center_mode="ema")
+
+
+def test_cone_center_mode_close_accepted() -> None:
+    """The one implemented, live value must keep working."""
+    config = StrategyConfig(cone_center_mode="close")
+    assert config.cone_center_mode == "close"
 
 
 def test_missing_credential_raised_on_access_not_on_load(

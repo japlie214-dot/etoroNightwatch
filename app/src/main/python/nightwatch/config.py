@@ -291,8 +291,22 @@ class StrategyConfig:
             raise ConfigError("strategy.max_lots must be positive")
         if self.reentry_tranches <= 0:
             raise ConfigError("strategy.reentry_tranches must be positive")
-        if self.cone_center_mode not in ("close", "mid"):
-            raise ConfigError("strategy.cone_center_mode must be 'close' or 'mid'")
+        if self.cone_center_mode not in ("close",):
+            # "mid" was accepted here historically but has never had an
+            # implementation anywhere in this codebase -- strategy/cone.py
+            # only implements the "close" rule, and the reference indicator
+            # this signal was ported from
+            # (etoro_trader/indicators/volatility/expected_move_cone.py)
+            # supports ("ema", "close"), not "mid" at all. Accepting "mid"
+            # here let it pass validation and then silently compute "close"
+            # anyway -- exactly this project's recurring silent-wrong-value
+            # failure mode. "ema" is deliberately not accepted either: no
+            # centering rule for it exists yet, and the live config
+            # (std_band_ladder_martingale) only ever sets "close" -- adding
+            # "ema" now would just recreate the same trap with a different
+            # string. Extend this tuple only alongside a real "ema"
+            # implementation in strategy/cone.py.
+            raise ConfigError("strategy.cone_center_mode must be 'close'")
         if self.exit_mode not in ("fixed", "trailing"):
             raise ConfigError("strategy.exit_mode must be 'fixed' or 'trailing'")
         if self.budget_override_usd is not None and self.budget_override_usd <= 0:

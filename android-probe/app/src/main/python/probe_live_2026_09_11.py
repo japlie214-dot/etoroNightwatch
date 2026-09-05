@@ -34,6 +34,14 @@ reporting; see ``run_section``'s thread-based timeout):
         ``section_e2_real_money_order``, AND a typed interactive
         confirmation. Never runs as part of ``run_all``'s default section
         list.
+  F  -- Live-window assembly (READ-ONLY): exercises ``market.window``'s
+        ``fetch_symbol_window``/``validate_window_completeness``/
+        ``compute_fingerprint``/``resolve_provisional_close``/
+        ``assemble_spy_signal`` end-to-end against a real Tiingo response
+        and (where SPY resolves) real eToro SPY candles -- every prior
+        section only ever handed those functions hand-built fixtures. Does
+        not place, modify, or close anything; only Tiingo EOD/IEX GETs and
+        eToro candle GETs.
 
 Every network call below carries an explicit timeout (DESIGN_market_data.md
 §8's gotcha: the last Chaquopy probe hung on exactly this). Every print goes
@@ -52,7 +60,7 @@ import statistics
 import sys
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
@@ -908,6 +916,243 @@ def section_e2_real_money_order(
 
 
 # ---------------------------------------------------------------------------
+# Section F -- live-window assembly (market.window), end-to-end, real data
+# ---------------------------------------------------------------------------
+
+
+def section_f_window_assembly(client: Any, config: Any, output_dir: Path) -> None:
+    """Task requirement (this session): exercise ``market.window`` and
+    ``strategy.cone`` against LIVE payloads for the first time. Both modules
+    were built and unit-tested only against hand-built ``EodBar``/
+    ``IexQuote``/``Candle`` fixtures (see ``market/window.py``'s own module
+    docstring, "Untested against a live payload") -- this project has found
+    five eToro parser bugs in three days, and the most recent one
+    (``get_trade_history``) survived a test suite whose fixture and code
+    encoded the *same* wrong assumption. A real payload is the only thing
+    that breaks that tie.
+
+    READ-ONLY: one Tiingo EOD history GET, one Tiingo IEX GET, and (only if
+    SPY resolves) one eToro candles GET. Nothing here places, modifies, or
+    closes anything.
+    """
+    from nightwatch.market.source import TiingoClient
+    from nightwatch.market.window import (
+        WindowAssemblyError,
+        assemble_spy_signal,
+        compute_fingerprint,
+        fetch_symbol_window,
+        resolve_provisional_close,
+        validate_window_completeness,
+    )
+    from nightwatch.probes.live_window import diff_required_keys
+
+    if not config.tiingo.has_key:
+        _p(
+            "F: TIINGO_KEY is not present in config/.secrets.env -- cannot "
+            "run section F at all (needs a real Tiingo call). Nothing else "
+            "in this section ran."
+        )
+        return
+
+    trading_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    tiingo = TiingoClient(config.tiingo)
+    try:
+        # --- 1: raw Tiingo EOD response, saved BEFORE any parsing --------
+        start_date = (datetime.now(timezone.utc).date() - timedelta(days=400)).isoformat()
+        try:
+            raw_resp = tiingo._request("/tiingo/daily/SPY/prices", {"startDate": start_date})
+            raw_eod_json = raw_resp.json()
+            _save_json(output_dir, "section_f_tiingo_eod_raw", raw_eod_json)
+            _p(f"F: raw Tiingo EOD response saved, {len(raw_eod_json)} rows")
+        except Exception as e:
+            _p(f"F: raw Tiingo EOD fetch FAILED: {_fmt_exc(e)} -- aborting section F")
+            return
+
+        # Key-diff against market/source.py's get_eod_history (required vs
+        # fallback/optional -- see diff_required_keys's own docstring for
+        # why this distinction matters, unlike section C's diff_keys).
+        if raw_eod_json:
+            row_keys = set(raw_eod_json[0].keys())
+            eod_diff = diff_required_keys(row_keys, "get_eod_history")
+            _p(
+                f"F: get_eod_history key-diff -- "
+                f"missing_required={[sorted(g) for g in eod_diff.missing_groups]} "
+                f"unused_in_payload={sorted(eod_diff.unused_in_payload)}"
+            )
+
+        # --- 1b: the real fetch_symbol_window code path (a second, fresh
+        # Tiingo call -- deliberately not reusing the raw response above, so
+        # this exercises the actual function under test, not a hand-spliced
+        # substitute for it) ------------------------------------------------
+        try:
+            history = fetch_symbol_window(tiingo, "SPY")
+            _p(
+                f"F: fetch_symbol_window(SPY) OK -- {len(history)} bars, "
+                f"{history[0].date}..{history[-1].date}"
+            )
+        except WindowAssemblyError as e:
+            _p(f"F: fetch_symbol_window(SPY) FAILED: {_fmt_exc(e)} -- aborting section F")
+            return
+
+        # --- 2: validate_window_completeness, full mismatch lists --------
+        completeness = validate_window_completeness("SPY", history)
+        _p(
+            f"F: completeness verdict={completeness.passed} "
+            f"bar_count={completeness.bar_count} "
+            f"window={completeness.window_start}..{completeness.window_end}"
+        )
+        if completeness.missing_sessions:
+            _p(
+                f"F: missing_sessions -- FULL list, {len(completeness.missing_sessions)} "
+                f"date(s): {list(completeness.missing_sessions)}"
+            )
+        if completeness.unexpected_dates:
+            _p(
+                f"F: unexpected_dates -- FULL list, {len(completeness.unexpected_dates)} "
+                f"date(s): {list(completeness.unexpected_dates)}"
+            )
+        if not completeness.missing_sessions and not completeness.unexpected_dates:
+            _p("F: date-set matches exchange_calendars exactly -- no mismatch to report")
+        _save_json(output_dir, "section_f_completeness", dataclasses.asdict(completeness))
+
+        # --- 3: compute_fingerprint ---------------------------------------
+        fingerprint = compute_fingerprint("SPY", history, trading_date=trading_date)
+        _p(
+            f"F: fingerprint sha256={fingerprint.series_sha256} "
+            f"bar_count={fingerprint.bar_count} "
+            f"window={fingerprint.window_start}..{fingerprint.window_end}"
+        )
+        _save_json(output_dir, "section_f_fingerprint", dataclasses.asdict(fingerprint))
+
+        # --- 4: real eToro SPY candles -- do NOT assume SPY resolves ------
+        spy_instrument_id = None
+        try:
+            spy_instrument_id = client.resolve_instrument_id("SPY")
+            _p(f"F: SPY RESOLVED to eToro instrument_id={spy_instrument_id}")
+        except Exception as e:
+            _p(
+                f"F: SPY DID NOT RESOLVE to an eToro instrument id "
+                f"({_fmt_exc(e)}). SPY is signal-only and has never been "
+                f"fetched from eToro in this project -- this is itself a "
+                f"finding: it means resolve_provisional_close's eToro-candle "
+                f"fallback path can never be exercised for SPY if SPY cannot "
+                f"be resolved at all, and any caller relying on that "
+                f"fallback for SPY specifically would silently have no "
+                f"fallback at all."
+            )
+
+        etoro_candles: list[Any] = []
+        if spy_instrument_id is not None:
+            try:
+                candle_resp = client._request(
+                    "GET",
+                    f"/api/v1/market-data/instruments/{spy_instrument_id}/"
+                    f"history/candles/desc/OneDay/400",
+                    request_class="market_data",
+                )
+                raw_candles = candle_resp.json()
+                _save_json(output_dir, "section_f_etoro_candles_raw", raw_candles)
+                etoro_candles = client.get_candles(
+                    spy_instrument_id, direction="backward", interval="OneDay", count=400
+                )
+                _p(f"F: fetched {len(etoro_candles)} real eToro SPY candles")
+                rows = _extract_candle_rows(raw_candles)
+                if rows:
+                    candle_diff = diff_required_keys(set(rows[0].keys()), "_parse_candle")
+                    _p(
+                        f"F: _parse_candle key-diff (SPY candles) -- "
+                        f"missing_required={[sorted(g) for g in candle_diff.missing_groups]} "
+                        f"unused_in_payload={sorted(candle_diff.unused_in_payload)}"
+                    )
+            except Exception as e:
+                _p(f"F: fetching real eToro SPY candles FAILED: {_fmt_exc(e)}")
+
+        # --- 5: resolve_provisional_close + assemble_spy_signal, real data
+        iex_quote = None
+        try:
+            iex_resp = tiingo._request("/iex/", {"tickers": "SPY"})
+            raw_iex = iex_resp.json()
+            _save_json(output_dir, "section_f_tiingo_iex_raw", raw_iex)
+            if raw_iex:
+                iex_diff = diff_required_keys(set(raw_iex[0].keys()), "get_iex_quotes")
+                _p(
+                    f"F: get_iex_quotes key-diff -- "
+                    f"missing_required={[sorted(g) for g in iex_diff.missing_groups]} "
+                    f"unused_in_payload={sorted(iex_diff.unused_in_payload)}"
+                )
+            iex_quote = tiingo.get_iex_quote("SPY")
+            if iex_quote is not None:
+                _p(f"F: Tiingo IEX SPY tngoLast={iex_quote.tngo_last}")
+            else:
+                _p("F: Tiingo IEX returned no usable quote row for SPY")
+        except Exception as e:
+            _p(f"F: Tiingo IEX quote fetch FAILED: {_fmt_exc(e)}")
+
+        etoro_daily_candle = etoro_candles[0] if etoro_candles else None
+        try:
+            provisional = resolve_provisional_close(
+                "SPY", iex_quote=iex_quote, etoro_daily_candle=etoro_daily_candle
+            )
+            _p(f"F: provisional close -- source={provisional.source} value={provisional.value}")
+        except WindowAssemblyError as e:
+            _p(f"F: resolve_provisional_close FAILED: {_fmt_exc(e)}")
+
+        try:
+            signal = assemble_spy_signal(
+                tiingo,
+                trading_date=trading_date,
+                iex_quote=iex_quote,
+                etoro_daily_candle=etoro_daily_candle,
+                enforce_completeness=False,
+            )
+            _p(
+                f"F: assemble_spy_signal -- cone_5_z={signal.cone_5_z} "
+                f"ath={signal.spy_context.ath} close={signal.spy_context.close} "
+                f"drawdown={signal.spy_context.drawdown} tier={signal.spy_context.tier}"
+            )
+            _save_json(output_dir, "section_f_assembled_signal", dataclasses.asdict(signal))
+        except Exception as e:
+            _p(f"F: assemble_spy_signal FAILED: {_fmt_exc(e)}")
+
+        # --- 6: cross-check Tiingo vs eToro closes over overlapping dates -
+        if etoro_candles:
+            tiingo_by_date = {bar.date: bar.close for bar in history}
+            etoro_by_date = {c.date: c.close for c in etoro_candles}
+            common_dates = sorted(set(tiingo_by_date) & set(etoro_by_date))
+            if common_dates:
+                devs = {d: abs(tiingo_by_date[d] - etoro_by_date[d]) for d in common_dates}
+                dev_values = list(devs.values())
+                _p(
+                    f"F: Tiingo vs eToro SPY close cross-check over "
+                    f"{len(common_dates)} overlapping date(s): "
+                    f"max_abs_dev={max(dev_values):.6f} "
+                    f"mean_abs_dev={statistics.mean(dev_values):.6f}"
+                )
+                _save_json(
+                    output_dir,
+                    "section_f_tiingo_vs_etoro_cross_check",
+                    {
+                        "common_dates": common_dates,
+                        "tiingo_close": {d: tiingo_by_date[d] for d in common_dates},
+                        "etoro_close": {d: etoro_by_date[d] for d in common_dates},
+                        "abs_dev": devs,
+                    },
+                )
+            else:
+                _p(
+                    "F: Tiingo history and eToro candles share NO overlapping "
+                    "dates -- cannot cross-check closes"
+                )
+        else:
+            _p(
+                "F: no eToro SPY candles available (SPY did not resolve, or "
+                "the candle fetch failed) -- Tiingo/eToro cross-check skipped"
+            )
+    finally:
+        tiingo.close()
+
+
+# ---------------------------------------------------------------------------
 # Orchestration
 # ---------------------------------------------------------------------------
 
@@ -916,8 +1161,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument(
-        "--sections", default="A,C,D,E1,B",
-        help="comma-separated subset of A,B,C,D,E1 to run (E2 is never in this list, see --e2)",
+        "--sections", default="A,C,D,E1,F,B",
+        help="comma-separated subset of A,B,C,D,E1,F to run (E2 is never in this list, see --e2)",
     )
     parser.add_argument("--section-timeout", type=float, default=300.0, help="seconds per section")
     parser.add_argument("--poll-count", type=int, default=6, help="section B: number of rate polls")
@@ -984,6 +1229,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         run_section("D", section_d_sleeve_arithmetic, read_client, output_dir, timeout_s=args.section_timeout)
     if "E1" in requested:
         run_section("E1", section_e1_fee_readonly, read_client, output_dir, timeout_s=args.section_timeout)
+    if "F" in requested:
+        run_section(
+            "F", section_f_window_assembly, read_client, config, output_dir,
+            timeout_s=args.section_timeout,
+        )
     if "B" in requested:
         run_section(
             "B", section_b_upro_rates_freeze, read_client, output_dir,
@@ -1019,7 +1269,7 @@ def run_all() -> None:
     ``Python.getInstance().getModule("probe_live_2026_09_11").callAttr("run_all")``
     if this file is copied into an on-device probe harness's Python source set
     under that module name. Runs with every default (read-only sections A/C/D/
-    E1/B; E2 never runs from this entry point).
+    E1/F/B; E2 never runs from this entry point).
     """
     main([])
 

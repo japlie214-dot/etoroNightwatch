@@ -62,7 +62,7 @@ object PyBridge {
 
     /**
      * Tonight's device-probe wiring (doc/RUNBOOK_DEVICE_PROBE.md): runs
-     * probe_live_2026_09_11.py's sections A, C, D, E1 (read-only, market-independent) plus the
+     * probe_live_2026_09_11.py's sections A, C, D, E1, F (read-only, market-independent) plus the
      * sharpened E1 per-trade fee audit (nightwatch.probes.fee_audit). Section B (needs an open
      * US market) is deliberately never requested from here; section E2 (places a real order) is
      * not reachable through this function at all -- see probe/probe_runner.py's own docstring.

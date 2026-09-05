@@ -346,7 +346,7 @@ class MainActivity : AppCompatActivity() {
         binding.listEvents.adapter = MonospaceLogAdapter(this, filtered.map { it.formatted() })
     }
 
-    // --- Live device probe (doc/RUNBOOK_DEVICE_PROBE.md): sections A, C, D, E1 + the sharpened
+    // --- Live device probe (doc/RUNBOOK_DEVICE_PROBE.md): sections A, C, D, E1, F + the sharpened
     // E1 fee audit. Read-only. Section B (needs an open market) and E2 (real money) are never
     // reachable from this button -- see PyBridge.runLiveProbe's own docstring. ---
     private fun runLiveProbeNow() {

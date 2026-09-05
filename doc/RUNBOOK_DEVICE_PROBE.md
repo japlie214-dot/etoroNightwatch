@@ -8,13 +8,21 @@ entry point that already has network + credential access. Use *this* runbook if 
 invocation path is not available tonight and the `android-probe` app is the only thing on the phone
 that can run Python at all.
 
-**Scope tonight: sections A, C, D, E1 only, plus the sharpened E1 per-trade fee audit.**
+**Scope tonight: sections A, C, D, E1, F, plus the sharpened E1 per-trade fee audit.**
 Section B (UPRO rates-freeze polling) needs an open US market — it is Saturday 2026-09-05, the
 market is closed, so B is wired up in the underlying script but **is not requested by this app's
 button and will not run**. Section E2 (places one real $50 SCHG order) is **not reachable from
 this app at all** — there is no button for it, and the Kotlin bridge (`PyBridge.runLiveProbe`)
 never calls it. If E2 is ever wanted, it stays a separate, deliberate, command-line-only decision
 per §5 of `RUNBOOK_LIVE_WINDOW_2026-09-11.md` — not something this APK can trigger by accident.
+
+**Section F, added this session:** exercises `market.window` (`fetch_symbol_window`,
+`validate_window_completeness`, `compute_fingerprint`, `resolve_provisional_close`,
+`assemble_spy_signal`) and `strategy.cone` end-to-end against a **real** Tiingo response and (where
+SPY resolves) real eToro SPY candles. Every prior test of these two modules used hand-built
+`EodBar`/`IexQuote`/`Candle` fixtures only — this is the first time either has seen a live payload.
+Read-only: one Tiingo EOD GET, one Tiingo IEX GET, and (if SPY resolves) one eToro candles GET.
+Does not need an open market — daily bars and instrument metadata are static on a weekend.
 
 ---
 
@@ -35,6 +43,15 @@ per §5 of `RUNBOOK_LIVE_WINDOW_2026-09-11.md` — not something this APK can tr
 - `PyBridge.kt` / `MainActivity.kt` / `activity_main.xml` — one new button, "Run live probe now (A,
   C, D, E1)", that calls into the above from a background coroutine.
 - `tests/test_probes_fee_audit.py` — 21 new offline unit tests for `fee_audit.py`.
+- **This session:** `tools/probe_live_2026-09-11.py` / the on-device copy
+  `android-probe/app/src/main/python/probe_live_2026_09_11.py` — added section F
+  (`section_f_window_assembly`), the first live-payload exercise of `market/window.py` and
+  `strategy/cone.py`. `app/src/main/python/nightwatch/probes/live_window.py` — added
+  `diff_required_keys`/`PARSER_REQUIRED_KEY_GROUPS`/`PARSER_OPTIONAL_KEYS`, a required-vs-fallback
+  key diff (section C's own `diff_keys` over-reports "missing" keys for any field read through an
+  `or`-chain). `probe/probe_runner.py` now requests `--sections A,C,D,E1,F`. Also fixed
+  `config.py`'s `cone_center_mode` validation (accepted an unimplemented `"mid"` value; now only
+  `"close"`).
 
 ---
 
@@ -135,7 +152,7 @@ disk outside the gitignored `config/` directory.
 
 ## 4. Trigger the run
 
-Open the app on the phone, tap **"Run live probe now (A, C, D, E1: read-only, no order ever
+Open the app on the phone, tap **"Run live probe now (A, C, D, E1, F: read-only, no order ever
 placed)"**. The status line updates to `RUNNING`; this can take **several minutes** — do not close
 the app. Nothing here can block the UI thread indefinitely: the call runs on a background
 coroutine (`Dispatchers.IO`) with its own 25-minute Kotlin-side timeout on top of the Python
@@ -144,8 +161,8 @@ somehow still hung, the UI would report a timeout rather than freeze.
 
 What actually happens, in order:
 
-1. `probe_live_2026_09_11.main(["--sections", "A,C,D,E1", "--output-dir", <output_dir>])` — **B is
-   never in this list**; E2 is never reachable from this call at all.
+1. `probe_live_2026_09_11.main(["--sections", "A,C,D,E1,F", "--output-dir", <output_dir>])` — **B
+   is never in this list**; E2 is never reachable from this call at all.
 2. The new fee-audit-plus report (`nightwatch.probes.fee_audit`, via `probe/probe_runner.py`) —
    full per-trade table, groupings, correlations, dividend-field scan, reconciliation (see §... note
    below).
@@ -166,8 +183,40 @@ it runs.
 | D | Sleeve arithmetic re-measured *right now*, diffed against the documented figures | seconds |
 | E1 | eToro's own read-only fee-adjacent fields (`get_costs`) plus the original aggregate fee-by-instrument summary | seconds |
 | **E1-plus** | **The full per-trade fee audit** — see below | seconds to low tens of seconds (one paged trade-history call, up to 500 rows) |
+| **F** | **`market.window`/`strategy.cone` exercised end-to-end against a real Tiingo response (and real eToro SPY candles, if SPY resolves) for the first time** — see below | tens of seconds (2-3 Tiingo calls, 1 eToro candles call) |
 | B | *(excluded tonight — needs an open US market)* | not run |
 | E2 | *(excluded — not reachable from this app; real money)* | not run |
+
+### F, what it proves and what to send back
+
+- Whether `fetch_symbol_window(SPY)` against the **real** Tiingo API returns a usable window at
+  all, and the raw Tiingo EOD/IEX responses that produced it (`section_f_tiingo_eod_raw`,
+  `section_f_tiingo_iex_raw`) — saved **before** any parsing, so a field-name surprise is provable
+  from the file, not just from this session's own report of it.
+- `validate_window_completeness`'s verdict, bar count, and the **full** missing/unexpected date
+  lists (not truncated to "N mismatches") — a calendar disagreement here is exactly the kind of
+  thing that gets argued about later, so both lists are printed and saved in full
+  (`section_f_completeness`).
+- `compute_fingerprint`'s SHA-256 and window bounds (`section_f_fingerprint`).
+- Whether **SPY resolves to an eToro instrument id at all** — SPY is signal-only and has never
+  been fetched from eToro in this project before; a `NOT RESOLVED` line here is itself a finding
+  (it means the eToro-candle fallback in `resolve_provisional_close` has no fallback for SPY).
+  If it does resolve, the raw eToro candle payload is saved before parsing
+  (`section_f_etoro_candles_raw`).
+- `resolve_provisional_close` and `assemble_spy_signal`'s real `cone_5_z`, ATH, drawdown, and tier
+  (`section_f_assembled_signal`).
+- The Tiingo-vs-eToro close cross-check over any overlapping dates — max/mean absolute deviation
+  (`section_f_tiingo_vs_etoro_cross_check`); a large divergence is a finding to report, not a
+  failure to hide.
+- Required-vs-fallback key-diffs against `market/source.py`'s `get_eod_history`/`get_iex_quotes`
+  and `_parse_candle` (`nightwatch.probes.live_window.diff_required_keys`) — deliberately distinct
+  from section C's own `diff_keys`, which has a high false-positive rate against `or`-chain
+  fallback fields (it once flagged `_parse_candle` for six "missing" keys that were entirely
+  correct). A genuine `missing_required` entry here is real; `unused_in_payload` is informational.
+
+**Send back everything under `section_f_*` in the pulled output, plus whichever PROBE: F lines
+came out of the console log** — especially the SPY-resolution verdict and any `missing_required`
+key-diff entries.
 
 ### E1-plus, the priority tonight
 

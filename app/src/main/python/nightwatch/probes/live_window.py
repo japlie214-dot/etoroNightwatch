@@ -25,6 +25,10 @@ __all__ = [
     "PARSER_READ_KEYS",
     "KeyDiff",
     "diff_keys",
+    "PARSER_REQUIRED_KEY_GROUPS",
+    "PARSER_OPTIONAL_KEYS",
+    "RequiredKeyDiff",
+    "diff_required_keys",
     "InstrumentFeeSummary",
     "partition_trades_by_instrument",
     "SleeveMismatch",
@@ -155,6 +159,156 @@ def diff_keys(payload_keys: Iterable[str], parser_name: str) -> KeyDiff:
         unused_in_payload=payload_key_set - parser_keys,
         payload_keys=payload_key_set,
         parser_keys=parser_keys,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Required-vs-fallback key diff (§F) -- fixes diff_keys's false-positive rate
+# ---------------------------------------------------------------------------
+
+#: Groups of alternative key names, per parser, where AT LEAST ONE member of
+#: each inner ``frozenset`` must be present in a real payload for that field
+#: to be considered satisfied. This is the fix for ``diff_keys``'s high
+#: false-positive rate against an ``or``/``.get(..., .get(...))`` fallback
+#: chain: section C's own probe run flagged ``_parse_candle`` for six
+#: "missing" keys that are entirely correct, because each flagged name is one
+#: alternative among several (e.g. ``date``/``timestamp`` are both fallbacks
+#: for ``fromDate``, and a real payload satisfying ``fromDate`` alone is not
+#: missing anything). ``diff_keys``/``PARSER_READ_KEYS`` is left as-is
+#: (still used by section C) -- this is a separate, additive registry for
+#: section F, not a fix applied retroactively to section C's own audit.
+PARSER_REQUIRED_KEY_GROUPS: dict[str, list[frozenset[str]]] = {
+    # _parse_candle (client.py ~910): raw_date = row.get("fromDate") or
+    # row.get("date") or row.get("timestamp") -- one date-shaped key
+    # required, any of the three satisfies it. OHLC each have a plain/
+    # capitalised fallback pair.
+    "_parse_candle": [
+        frozenset({"fromDate", "date", "timestamp"}),
+        frozenset({"open", "Open"}),
+        frozenset({"high", "High"}),
+        frozenset({"low", "Low"}),
+        frozenset({"close", "Close"}),
+    ],
+    # get_rates (client.py ~824): instrument id has a three-way casing
+    # fallback (the exact bug §2.9/§C found: a live response used a fourth,
+    # unhandled casing); bid/ask each have a plain/capitalised fallback.
+    "get_rates": [
+        frozenset({"instrumentID", "instrumentId", "InstrumentID"}),
+        frozenset({"bid", "Bid"}),
+        frozenset({"ask", "Ask"}),
+    ],
+    # get_eligibility (client.py ~941): envelope key has a two-way fallback;
+    # instrumentId/instrumentID likewise.
+    "get_eligibility": [
+        frozenset({"eligibilities", "eligibility"}),
+        frozenset({"instrumentId", "instrumentID"}),
+    ],
+    # get_eod_history (market/source.py get_eod_history): no fallback chain
+    # at all -- each of these is read via a single dict-index/key, so each
+    # is its own singleton "group" (still expressed as a group so the same
+    # function/shape handles both cases uniformly).
+    "get_eod_history": [
+        frozenset({"date"}),
+        frozenset({"close"}),
+        frozenset({"adjClose"}),
+    ],
+    # get_iex_quotes (market/source.py get_iex_quotes): `ticker`/`tngoLast`
+    # are the only two fields the parser actually requires (a row missing
+    # either is skipped entirely, deliberately, per that method's own
+    # docstring -- "a missing key is no data, never a zero price").
+    "get_iex_quotes": [
+        frozenset({"ticker"}),
+        frozenset({"tngoLast"}),
+    ],
+}
+
+#: Keys a parser reads (or could read) but which may legitimately be absent
+#: from a real payload with no defect implied -- a genuinely optional field
+#: the code already treats as ``None``/a safe default on absence, not a
+#: fallback alternative for some other required field. Not reported as
+#: "missing" by :func:`diff_required_keys`; still surfaced as "known but
+#: optional" so nothing about the payload is silently ignored.
+PARSER_OPTIONAL_KEYS: dict[str, frozenset[str]] = {
+    "_parse_candle": frozenset({"volume"}),
+    "get_rates": frozenset({"lastExecution", "date", "timestamp", "dateTime"}),
+    "get_eligibility": frozenset(
+        {
+            "allowOpenPosition", "minPositionExposure", "minPositionAmount",
+            "allowPartialClosePosition", "allowPartialClose", "leverageConfigs",
+            "settlementType", "direction",
+        }
+    ),
+    "get_eod_history": frozenset({"splitFactor", "divCash"}),
+    "get_iex_quotes": frozenset(
+        {"timestamp", "lastSaleTimestamp", "quoteTimestamp", "prevClose"}
+    ),
+}
+
+
+@dataclass(frozen=True, slots=True)
+class RequiredKeyDiff:
+    """Result of :func:`diff_required_keys` -- distinguishes a genuinely
+    missing required field (every alternative in its group absent from the
+    payload) from a satisfied fallback chain (at least one alternative
+    present), the distinction ``diff_keys`` does not make.
+    """
+
+    parser_name: str
+    missing_groups: tuple[frozenset[str], ...]
+    """Groups where NONE of the alternatives are present in the payload --
+    a genuine gap, the same defect class HANDOFF_2026-09-05.md §4 names."""
+    satisfied_groups: tuple[tuple[frozenset[str], str], ...]
+    """(group, key_that_satisfied_it) for every group with >=1 key present."""
+    unused_in_payload: frozenset[str]
+    """Payload keys that are neither part of a required group nor a
+    documented optional key for this parser -- present, and currently
+    ignored entirely."""
+    payload_keys: frozenset[str]
+
+    @property
+    def is_clean(self) -> bool:
+        """True iff every required group has at least one alternative
+        present. Says nothing about ``unused_in_payload``."""
+        return not self.missing_groups
+
+
+def diff_required_keys(payload_keys: Iterable[str], parser_name: str) -> RequiredKeyDiff:
+    """Compare a live (flat, single-row) payload's keys against
+    ``PARSER_REQUIRED_KEY_GROUPS[parser_name]``, crediting any one member of
+    each alternative group as satisfying it -- unlike ``diff_keys``, which
+    flags every alternative name individually and so over-reports "missing"
+    keys for any field read through an ``or``/``.get(..., .get(...))`` chain.
+
+    Raises ``KeyError`` if ``parser_name`` is not in the registry,
+    deliberately, for the same reason ``diff_keys`` does: a silently-empty
+    diff for an unregistered parser would prove nothing.
+    """
+    if parser_name not in PARSER_REQUIRED_KEY_GROUPS:
+        raise KeyError(
+            f"{parser_name!r} is not in PARSER_REQUIRED_KEY_GROUPS -- add it "
+            "before auditing it, or this diff proves nothing"
+        )
+    groups = PARSER_REQUIRED_KEY_GROUPS[parser_name]
+    optional = PARSER_OPTIONAL_KEYS.get(parser_name, frozenset())
+    payload_key_set = frozenset(payload_keys)
+
+    missing: list[frozenset[str]] = []
+    satisfied: list[tuple[frozenset[str], str]] = []
+    for group in groups:
+        present = sorted(group & payload_key_set)
+        if present:
+            satisfied.append((group, present[0]))
+        else:
+            missing.append(group)
+
+    known = optional.union(*groups) if groups else frozenset(optional)
+    unused = payload_key_set - known
+    return RequiredKeyDiff(
+        parser_name=parser_name,
+        missing_groups=tuple(missing),
+        satisfied_groups=tuple(satisfied),
+        unused_in_payload=unused,
+        payload_keys=payload_key_set,
     )
 
 

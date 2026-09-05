@@ -6,10 +6,13 @@ Runs, in order:
    agent's ``tools/probe_live_2026-09-11.py`` -- see that file's own
    docstring, which explicitly anticipates being "copied into an on-device
    probe harness's Python source set" this way) restricted to
-   ``--sections A,C,D,E1`` -- section B (needs an open US market, closed
+   ``--sections A,C,D,E1,F`` -- section B (needs an open US market, closed
    tonight, Saturday 2026-09-05) is deliberately excluded from this call, and
    section E2 (places a real order) is never reachable from anything this
-   module exposes at all.
+   module exposes at all. Section F (added 2026-09-05, read-only) exercises
+   ``market.window``/``strategy.cone`` end-to-end against real Tiingo/eToro
+   payloads for the first time -- see that section's own docstring in the
+   copied probe script.
 2. The sharpened E1 fee audit (``nightwatch.probes.fee_audit``), which goes
    beyond that copied script's own read-only ``section_e1_fee_readonly``
    (an aggregate only) to a full per-trade table, groupings by instrument and
@@ -67,7 +70,7 @@ def _save_json(output_dir: Path, name: str, obj: Any) -> Path:
 
 
 def run_default(config_dir: str, output_dir: str) -> str:
-    """Kotlin entry point. Runs sections A, C, D, E1, then the E1-plus fee
+    """Kotlin entry point. Runs sections A, C, D, E1, F, then the E1-plus fee
     audit. Never runs B (market closed) or E2 (real money) -- neither is
     reachable from here.
 
@@ -110,9 +113,9 @@ def run_default(config_dir: str, output_dir: str) -> str:
         _p(buf, traceback.format_exc())
         return "\n".join(buf)
 
-    _p(buf, "=== sections A, C, D, E1 (B excluded: market closed; E2 never runs from here) ===")
+    _p(buf, "=== sections A, C, D, E1, F (B excluded: market closed; E2 never runs from here) ===")
     try:
-        probe.main(["--output-dir", str(out), "--sections", "A,C,D,E1"])
+        probe.main(["--output-dir", str(out), "--sections", "A,C,D,E1,F"])
     except SystemExit as e:
         _p(buf, f"probe_live_2026_09_11.main() exited with code {e.code!r} (argparse error or explicit return)")
     except Exception as e:
