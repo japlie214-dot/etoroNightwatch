@@ -1175,3 +1175,80 @@ def test_mark_position_computes_value_and_pnl_against_supplied_price() -> None:
     assert mark.position_id == position.position_id
     assert mark.current_value == pytest.approx(position.units * 30.0)
     assert mark.unrealized_pnl == pytest.approx(position.units * 30.0 - position.amount)
+
+
+def test_trade_history_accepts_a_bare_list_body_as_the_live_api_returns() -> None:
+    """The live endpoint returns a bare JSON *list*, not an ``{"items": ...}``
+    envelope -- proven on-device 2026-09-05, where the previous code raised
+    ``AttributeError: 'list' object has no attribute 'get'`` and aborted the
+    whole fee audit.
+
+    The old line read ``data.get("items", data if isinstance(data, list)
+    else [])``, which *looks* like it handles a list and cannot: ``data.get``
+    is evaluated before the fallback expression is ever considered. Every
+    pre-existing trade-history test wrapped its rows in ``{"items": ...}``,
+    so the real shape was never exercised -- the fixture encoded the wrong
+    assumption rather than testing it. This test asserts the live shape
+    directly.
+    """
+    rows = [
+        {
+            "positionId": 3000000001,
+            "instrumentId": 100001,
+            "isBuy": True,
+            "leverage": 1,
+            "units": 2.0,
+            "openRate": 20.0,
+            "closeRate": 25.0,
+            "netProfit": 10.0,
+            "investment": 40.0,
+            "fees": -0.5,
+            "openTimestamp": "2024-01-02T14:30:00Z",
+            "closeTimestamp": "2024-06-03T14:30:00Z",
+        }
+    ]
+    scripted = ScriptedTransport([httpx.Response(200, json=rows)])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    entries = client.get_trade_history(start_date="2020-01-01", end_date="2026-12-31")
+    assert len(entries) == 1
+    assert entries[0].position_id == "3000000001"
+    assert entries[0].fees == -0.5
+
+
+def test_trade_history_still_accepts_the_items_envelope() -> None:
+    """The list fix must not break the envelope form -- it is unknown whether
+    eToro returns one shape on one endpoint/version and the other elsewhere,
+    and this project has already been burned by assuming a convention
+    transfers (HANDOFF_2026-09-05.md §9, the positionID/positionId casing
+    trap)."""
+    rows = [
+        {
+            "positionId": 42,
+            "instrumentId": 100001,
+            "isBuy": True,
+            "leverage": 1,
+            "units": 1.0,
+            "openRate": 10.0,
+            "closeRate": 11.0,
+            "netProfit": 1.0,
+            "investment": 10.0,
+            "fees": 0.0,
+            "openTimestamp": "2024-01-02T14:30:00Z",
+            "closeTimestamp": "2024-06-03T14:30:00Z",
+        }
+    ]
+    scripted = ScriptedTransport([httpx.Response(200, json={"items": rows})])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    entries = client.get_trade_history(start_date="2020-01-01", end_date="2026-12-31")
+    assert len(entries) == 1
+    assert entries[0].position_id == "42"
+
+
+def test_trade_history_raises_on_a_body_that_is_neither_list_nor_object() -> None:
+    """A silent empty list here would report "no trade history" for an account
+    with 120 closed trades -- the exact silent-default failure mode this
+    client has now been bitten by five times. Fail loudly instead."""
+    scripted = ScriptedTransport([httpx.Response(200, json="unexpected")])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(EtoroValidationError):
+        client.get_trade_history(start_date="2020-01-01", end_date="2026-12-31")

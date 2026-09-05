@@ -626,7 +626,27 @@ class EtoroClient:
                 },
             )
             data = response.json()
-            rows = data.get("items", data if isinstance(data, list) else [])
+            # The live trade-history body is a bare JSON *list*, not an
+            # envelope.  The previous form of this line -- ``data.get("items",
+            # data if isinstance(data, list) else [])`` -- looked like it
+            # handled exactly that, but could not: ``data.get`` is evaluated
+            # before the ``isinstance`` fallback is ever considered, so a list
+            # raised ``AttributeError: 'list' object has no attribute 'get'``
+            # and the fallback was dead code. Found on-device 2026-09-05, the
+            # fifth bug of this family (HANDOFF_2026-09-05.md §4) and the
+            # first where the wrong assumption was about the *envelope* rather
+            # than a field inside it. Branch explicitly, and raise on a shape
+            # that is neither -- a silent empty list here would report "no
+            # trade history" for an account that has 120 closed trades.
+            if isinstance(data, list):
+                rows = data
+            elif isinstance(data, dict):
+                rows = data.get("items", [])
+            else:
+                raise EtoroValidationError(
+                    "trade history: expected a JSON list or an object with "
+                    f"'items', got {type(data).__name__}"
+                )
             if not rows:
                 break
             entries.extend(self._parse_trade_history_entry(r) for r in rows)

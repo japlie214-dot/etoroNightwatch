@@ -57,3 +57,7 @@ android-probe/**/.cxx/
 
 # --- android build deps (445MB local cache, never commit) ---
 android-probe-deps/
+
+# --- pulled live payloads: real account data, never commit ---
+pulled_probe_output/
+_device_config_tmp/
