@@ -1380,7 +1380,7 @@ minimums, and injectable failures (timeout after submit, rejection, partial fill
 6. Every preflight gate is triggered at least once by fault injection and aborts cleanly.
 7. Budget rolls across a calendar year boundary, including the empty-prior-year fallback.
 8. A mid-run deposit is absorbed correctly with no special handling.
-9. **T-10 vs T-30 provisional-close divergence.** Replay the strategy using provisional closes sampled at T-10 and at T-30 against the official close series, and report the divergence in `cone_5_z` and in the resulting trade decisions — the measurement backing the §4.2 signal-fidelity cost.
+9. **T-10 vs T-30 provisional-close divergence.** *(Timing DECIDED 2026-09-05: **T-30 stays.** The original reason for T-30 -- absorbing ~8 min of the rejected Windows host's S4 resume latency -- died with the host change, which reopened the question; the operator reviewed it and confirmed T-30. This replay is therefore no longer a decision input, but is still worth running as a measurement of the signal-fidelity cost §4.2 quantifies, and §4.2a now removes the one decision where that cost was actually adverse.)* Replay the strategy using provisional closes sampled at T-10 and at T-30 against the official close series, and report the divergence in `cone_5_z` and in the resulting trade decisions — the measurement backing the §4.2 signal-fidelity cost.
 10. Then a **live demo-account run** against real eToro demo endpoints — the only way to settle the "does the API accept orders 30 minutes before close" unknown.
 
 ---
