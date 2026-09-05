@@ -132,7 +132,7 @@ class SpyContext:
     ``adjClose`` drives ATH/drawdown/tier). ATH/drawdown/tier are LEVELS --
     compared against traded prices, and the entry_tier this produces is
     used exactly like a live-derived one (``market.window``'s
-    ``_spy_context_with_provisional``, same basis) -- never RETURNS, so the
+    ``spy_context_from_history``, same basis) -- never RETURNS, so the
     ``adjClose`` reasoning that correctly governs ``cone_5_z`` does not apply
     here. An adopted position's reconstructed SPY context is on the same
     footing as a live one's, not a different, ad hoc calculation -- and now

@@ -452,38 +452,38 @@ def test_assemble_spy_signal_ath_floor_degrades_to_rolling_ath_with_no_open_lots
     assert signal.spy_context.tier == 0
 
 
-def test_spy_context_with_provisional_floor_arithmetic():
-    from nightwatch.market.window import _spy_context_with_provisional
+def testspy_context_from_history_floor_arithmetic():
+    from nightwatch.market.window import spy_context_from_history
 
     history = [_bar("2024-01-02", 100.0), _bar("2024-06-03", 90.0)]
 
     # No open lots: floor is just the rolling max including the
     # provisional close (zero open lots degrades cleanly) -- but the caller
-    # must say so explicitly (see test_spy_context_with_provisional_
+    # must say so explicitly (see testspy_context_from_history_
     # requires_explicit_open_lot_ath below); there is no default.
-    ctx = _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[])
+    ctx = spy_context_from_history(history, 95.0, open_lot_entry_spy_ath=[])
     assert ctx.ath == 100.0
     assert ctx.drawdown == pytest.approx((95.0 - 100.0) / 100.0)
 
     # One open lot stamped above the rolling max: the floor wins.
-    ctx2 = _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[150.0])
+    ctx2 = spy_context_from_history(history, 95.0, open_lot_entry_spy_ath=[150.0])
     assert ctx2.ath == 150.0
     assert ctx2.drawdown == pytest.approx((95.0 - 150.0) / 150.0)
 
     # Multiple open lots: the floor is the max across all of them and the
     # rolling ATH -- a lot stamped BELOW the rolling ATH must not pull it down.
-    ctx3 = _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[80.0, 120.0])
+    ctx3 = spy_context_from_history(history, 95.0, open_lot_entry_spy_ath=[80.0, 120.0])
     assert ctx3.ath == 120.0
 
 
-def test_spy_context_with_provisional_raises_on_bad_open_lot_ath():
-    from nightwatch.market.window import _spy_context_with_provisional
+def testspy_context_from_history_raises_on_bad_open_lot_ath():
+    from nightwatch.market.window import spy_context_from_history
 
     history = [_bar("2024-01-02", 100.0)]
     with pytest.raises(WindowAssemblyError):
-        _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[float("nan")])
+        spy_context_from_history(history, 95.0, open_lot_entry_spy_ath=[float("nan")])
     with pytest.raises(WindowAssemblyError):
-        _spy_context_with_provisional(history, 95.0, open_lot_entry_spy_ath=[-10.0])
+        spy_context_from_history(history, 95.0, open_lot_entry_spy_ath=[-10.0])
 
 
 # ---------------------------------------------------------------------------
@@ -493,21 +493,21 @@ def test_spy_context_with_provisional_raises_on_bad_open_lot_ath():
 
 
 def test_spy_context_uses_raw_close_not_adj_close_for_ath():
-    from nightwatch.market.window import _spy_context_with_provisional
+    from nightwatch.market.window import spy_context_from_history
 
     # A bar whose adjClose is materially lower than its raw close, as a
     # real post-ex-dividend-adjustment SPY bar would be (FINDINGS_window_
     # live_2026-09-05.md §3: ~0.95% apart on the oldest bar of a real
     # payload). ATH/drawdown/tier must track the raw value.
     history = [_bar("2024-01-02", adj_close=90.0, close=100.0)]
-    ctx = _spy_context_with_provisional(history, 100.0, open_lot_entry_spy_ath=[])
+    ctx = spy_context_from_history(history, 100.0, open_lot_entry_spy_ath=[])
     assert ctx.ath == 100.0  # raw close, not the lower adjClose (90.0)
     assert ctx.drawdown == 0.0
 
 
 # ---------------------------------------------------------------------------
 # The "silently inert" defect (task brief, 2026-09-05): open_lot_entry_spy_ath
-# used to default to () in both _spy_context_with_provisional and
+# used to default to () in both spy_context_from_history and
 # assemble_spy_signal, so a caller could omit it and get a plain
 # rolling-window ATH with no indication the floor was never engaged. No
 # production caller (the session engine is still unbuilt) ever passed a
@@ -518,12 +518,12 @@ def test_spy_context_uses_raw_close_not_adj_close_for_ath():
 # ---------------------------------------------------------------------------
 
 
-def test_spy_context_with_provisional_requires_explicit_open_lot_ath():
-    from nightwatch.market.window import _spy_context_with_provisional
+def testspy_context_from_history_requires_explicit_open_lot_ath():
+    from nightwatch.market.window import spy_context_from_history
 
     history = [_bar("2024-01-02", 100.0)]
     with pytest.raises(TypeError):
-        _spy_context_with_provisional(history, 95.0)  # type: ignore[call-arg]
+        spy_context_from_history(history, 95.0)  # type: ignore[call-arg]
 
 
 def test_assemble_spy_signal_requires_explicit_open_lot_ath():

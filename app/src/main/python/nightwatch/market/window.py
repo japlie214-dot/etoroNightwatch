@@ -93,6 +93,7 @@ __all__ = [
     "validate_window_completeness",
     "compute_fingerprint",
     "resolve_provisional_close",
+    "spy_context_from_history",
     "assemble_spy_signal",
 ]
 
@@ -448,7 +449,7 @@ def resolve_provisional_close(
     )
 
 
-def _spy_context_with_provisional(
+def spy_context_from_history(
     history: Sequence[EodBar],
     provisional_close: float,
     *,
@@ -597,13 +598,13 @@ def assemble_spy_signal(
             defaulted-empty version of this parameter was found to be
             silently inert in production (no caller ever passed a non-empty
             value, so the floor never engaged; see
-            :func:`_spy_context_with_provisional`'s docstring). The caller
+            :func:`spy_context_from_history`'s docstring). The caller
             (the session engine, not yet built) MUST pass either
             ``[a.entry_spy_ath for a in repo.list_lot_annotations(is_open=
             True) if a.entry_spy_ath is not None]`` or an explicit ``[]``
             when there genuinely are no open lots -- omitting the argument
             is now a ``TypeError``, not a silent no-op. See
-            :func:`_spy_context_with_provisional` for the full reasoning.
+            :func:`spy_context_from_history` for the full reasoning.
 
     Raises:
         WindowAssemblyError: on any fetch, completeness (when enforced), or
@@ -637,11 +638,11 @@ def assemble_spy_signal(
     # for; see the module/task report for that explicit gap. Do NOT reuse
     # `closes` for the ATH/tier computation below -- that is a LEVEL, and
     # §4 decides raw `close` for every LEVEL; see
-    # `_spy_context_with_provisional`'s own docstring for the full basis
+    # `spy_context_from_history`'s own docstring for the full basis
     # split.
     closes = [bar.adj_close for bar in history] + [provisional.value]
     z = cone_5_z(closes, horizon=cone_horizon)
-    spy_context = _spy_context_with_provisional(
+    spy_context = spy_context_from_history(
         history, provisional.value, open_lot_entry_spy_ath=open_lot_entry_spy_ath
     )
 

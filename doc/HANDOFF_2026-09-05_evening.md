@@ -195,6 +195,44 @@ ladder's exit logic will make sell decisions about these positions using reconst
 Whoever builds `ladder.py` should revisit this section and state plainly whether a too-shallow or
 too-deep `entry_tier` is the more dangerous error — the answer may change the Case-3 default.
 
+**ANSWERED, 2026-09-05, by the session that built `strategy/ladder.py`/`strategy/state.py`.**
+Tracing the mechanism first: `entry_tier` — the discrete, stamped field — is not read by any
+trading decision in this port, and it never was in the source either: the source's own `LadderLot`
+dataclass (`std_band_ladder.py`) has no `entry_tier` field at all. Sell decisions
+(`_sell_profitable_lots`) are governed purely by profitability and the `cone_z` sell-threshold
+crossing — no tier of any kind enters an exit decision, in the source or in this port. The one
+tier-shaped quantity that gates a decision at all is used only for the BUY budget gate
+(`_deployed_amount`), and it is recomputed every bar from the *continuous* `entry_reference_spy`
+against the *live* ATH — never from the discrete stamped `entry_tier`. `entry_tier` is exactly as
+inert here as `entry_spy_close` is: reporting/provenance metadata, nothing more.
+
+Restated in terms of the field that actually is load-bearing (a lot's effective entry drawdown, as
+recomputed live against today's ATH — the same direction `entry_tier` itself points, since deeper
+drawdown means a higher tier number both ways): a lot whose effective entry looks artificially
+SHALLOWER than truth gets counted against the live UPRO budget cap at MORE (shallower) current
+drawdown levels than it truly should — the strategy sees more of its tier-0/1 budget as already
+consumed than is real, and permits FEWER new buys at those levels. This is self-favouring in the
+same sense `DESIGN.md` §4.2a already uses that word: it costs opportunity, never principal — the
+strategy never buys or holds more UPRO than the calibrated schedule intends, only less. A lot
+whose effective entry looks artificially DEEPER than truth escapes that same budget count at
+intermediate current-tier levels where, correctly measured, it should still be counted — the
+strategy under-counts its own deployed capital and permits MORE new buys than the tier-cap schedule
+(`DESIGN.md` §1.4's table, calibrated against the real 2022 −47.15% drawdown) was designed to
+allow, at a shallower drawdown than the schedule was calibrated for. Only the second direction lets
+the strategy commit MORE real capital than intended.
+
+**Answer: a too-DEEP `entry_tier` (or the effective-entry value behind it read as deeper than
+truth) is the dangerous error — it lets the strategy over-commit real capital sooner and in
+greater size than its own calibrated schedule allows. A too-SHALLOW `entry_tier` is the safe-side
+error — it only ever makes the strategy MORE conservative, never less.** This CONFIRMS, rather
+than reverses, this section's existing Case-3 default of preferring tier 0 over tier 1 when data
+is missing for an out-of-window position — "when in doubt, assign the shallowest plausible tier"
+was already the right instinct; this is the mechanism-level reasoning that was missing to justify
+it. See `strategy/ladder.py`'s module docstring and `_deployed_amount`'s docstring for the code
+this traces, and `strategy/ladder.py`'s own note on why the `new_ath_sale` bucket-vs-cash
+classification (the other place a stamped ATH-shaped value is read) does not change this
+conclusion — it gates which pool proceeds land in, not how much new UPRO exposure gets opened.
+
 ---
 
 ## 4. BUG 2 — which price basis. Decided; not yet implemented.
