@@ -1,0 +1,231 @@
+"""On-device orchestration entry point for tonight's read-only probe run.
+
+Runs, in order:
+
+1. ``probe_live_2026_09_11.main()`` (a byte-for-byte copy of the concurrent
+   agent's ``tools/probe_live_2026-09-11.py`` -- see that file's own
+   docstring, which explicitly anticipates being "copied into an on-device
+   probe harness's Python source set" this way) restricted to
+   ``--sections A,C,D,E1`` -- section B (needs an open US market, closed
+   tonight, Saturday 2026-09-05) is deliberately excluded from this call, and
+   section E2 (places a real order) is never reachable from anything this
+   module exposes at all.
+2. The sharpened E1 fee audit (``nightwatch.probes.fee_audit``), which goes
+   beyond that copied script's own read-only ``section_e1_fee_readonly``
+   (an aggregate only) to a full per-trade table, groupings by instrument and
+   by leverage/short, the complete fee-bearing subset, correlation checks,
+   a dividend/account-field exposure scan, and a strict reconciliation
+   against the two known account-wide totals.
+
+Called from Kotlin via ``PyBridge.runLiveProbe`` -- see
+``doc/RUNBOOK_DEVICE_PROBE.md`` for the exact adb commands this depends on
+(pushing ``config.toml``/``.secrets.env`` onto the device beforehand under
+``<config_dir>/config/``, and pulling the saved JSON payloads back after).
+
+Every network call this makes goes through ``nightwatch.etoro.client``,
+which already carries its own timeouts (``config.etoro.timeout_seconds``);
+nothing here adds an untimed call. Every line printed goes through ``_p``,
+flushed immediately, mirroring the copied probe's own gotcha-avoidance.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+import os
+import sys
+import traceback
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+_HERE = Path(__file__).resolve()
+# This file lives at .../android-probe/app/src/main/python/probe/probe_runner.py.
+# Its parent's parent is the python source ROOT (.../src/main/python), where
+# the copied probe_live_2026_09_11.py sits as a top-level module. Chaquopy's
+# own source-set wiring already puts that root on sys.path, but this is a
+# no-op-safe belt-and-suspenders insert, the same pattern
+# probe_live_2026_09_11.py itself uses for the nightwatch package.
+_SOURCE_ROOT = _HERE.parents[1]
+if str(_SOURCE_ROOT) not in sys.path:
+    sys.path.insert(0, str(_SOURCE_ROOT))
+
+
+def _p(buf: list[str], msg: str) -> None:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    line = f"{ts} RUNNER: {msg}"
+    print(line, flush=True)
+    buf.append(line)
+
+
+def _save_json(output_dir: Path, name: str, obj: Any) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    path = output_dir / f"{ts}_{name}.json"
+    path.write_text(json.dumps(obj, indent=2, default=str), encoding="utf-8")
+    return path
+
+
+def run_default(config_dir: str, output_dir: str) -> str:
+    """Kotlin entry point. Runs sections A, C, D, E1, then the E1-plus fee
+    audit. Never runs B (market closed) or E2 (real money) -- neither is
+    reachable from here.
+
+    Args:
+        config_dir: a directory containing a ``config/`` subfolder with
+            ``config.toml`` and ``.secrets.env`` (pushed onto the device by
+            the operator beforehand -- see the runbook). Passed through as
+            ``NIGHTWATCH_HOME`` so :func:`nightwatch.host.repo_root` resolves
+            to it instead of trying to compute a desktop repo path that does
+            not exist on-device.
+        output_dir: where every raw payload and report this run produces is
+            written, so the operator can ``adb pull`` it back afterward.
+
+    Returns a short summary string (also printed line-by-line as it runs, so
+    Chaquopy's logcat has it even if this function itself is later killed).
+    Never raises -- every failure is caught and reported in the returned
+    string, so a crash partway through still surfaces whatever ran before it
+    rather than losing everything silently (mirrors the copied probe's own
+    per-section isolation, one level up).
+    """
+    buf: list[str] = []
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    os.environ["NIGHTWATCH_HOME"] = config_dir
+    _p(buf, f"NIGHTWATCH_HOME set to {config_dir!r}")
+    _p(buf, f"output_dir={out}")
+    _p(
+        buf,
+        "NOTE: NIGHTWATCH_HOME is only read the first time nightwatch.host is "
+        "imported in this process. If you need to point at a different "
+        "config_dir, force-stop and relaunch the app first so a fresh "
+        "process picks up the new value.",
+    )
+
+    try:
+        import probe_live_2026_09_11 as probe
+    except Exception as e:
+        _p(buf, f"FATAL: cannot import copied probe_live_2026_09_11: {e!r}")
+        _p(buf, traceback.format_exc())
+        return "\n".join(buf)
+
+    _p(buf, "=== sections A, C, D, E1 (B excluded: market closed; E2 never runs from here) ===")
+    try:
+        probe.main(["--output-dir", str(out), "--sections", "A,C,D,E1"])
+    except SystemExit as e:
+        _p(buf, f"probe_live_2026_09_11.main() exited with code {e.code!r} (argparse error or explicit return)")
+    except Exception as e:
+        _p(buf, f"probe_live_2026_09_11.main() raised: {e!r}")
+        _p(buf, traceback.format_exc())
+
+    _p(buf, "=== E1-plus: full per-trade fee audit (nightwatch.probes.fee_audit) ===")
+    try:
+        _run_fee_audit_plus(buf, out)
+    except Exception as e:
+        _p(buf, f"E1-plus FAILED: {e!r}")
+        _p(buf, traceback.format_exc())
+
+    _p(buf, "=== run_default finished -- see output_dir for every saved file ===")
+    return "\n".join(buf)
+
+
+def _run_fee_audit_plus(buf: list[str], output_dir: Path) -> None:
+    """The sharpened E1 analysis: HANDOFF's fuller brief for tonight, built
+    on top of (not instead of) the copied probe's own read-only
+    ``section_e1_fee_readonly``. See ``nightwatch.probes.fee_audit`` for the
+    pure arithmetic; this function only does I/O and reporting.
+    """
+    from nightwatch.config import load_config
+    from nightwatch.etoro.client import EtoroClient
+    from nightwatch.host import get_host
+    from nightwatch.probes.fee_audit import (
+        build_fee_audit_rows,
+        check_dividend_or_account_fee_exposure,
+        correlate_fees_with,
+        fee_bearing_rows,
+        group_fees_by_instrument,
+        group_fees_by_leverage,
+        reconcile_account_totals,
+    )
+
+    config = load_config(host=get_host())
+    _p(buf, f"E1+: config: {config.describe()}")
+    if config.environment.value == "real":
+        _p(buf, "E1+: this config points at the REAL account -- every call below is read-only regardless.")
+
+    client = EtoroClient(config.etoro, role="read")
+    try:
+        symbol_by_id: dict[int, str] = {}
+        for symbol in ("SCHG", "UPRO"):
+            try:
+                iid = client.resolve_instrument_id(symbol)
+                symbol_by_id[iid] = symbol
+            except Exception as e:
+                _p(buf, f"E1+: could not resolve {symbol} (cosmetic only, audit still runs on instrument_id): {e!r}")
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        trades = client.get_trade_history(start_date="1970-01-01", end_date=today, page_size=500)
+        _p(buf, f"E1+: fetched {len(trades)} closed-trade rows")
+        trade_dicts = [dataclasses.asdict(t) for t in trades]
+        _save_json(output_dir, "e1plus_trade_history_raw", trade_dicts)
+
+        rows = build_fee_audit_rows(trade_dicts, symbol_by_instrument_id=symbol_by_id)
+        _save_json(output_dir, "e1plus_per_trade_table", [dataclasses.asdict(r) for r in rows])
+        _p(buf, f"E1+: per-trade table saved, {len(rows)} rows")
+
+        by_instrument = group_fees_by_instrument(rows)
+        _save_json(output_dir, "e1plus_by_instrument", [dataclasses.asdict(g) for g in by_instrument])
+        for g in by_instrument:
+            label = g.symbol or f"instrument_id={g.instrument_id}"
+            _p(
+                buf,
+                f"E1+: BY INSTRUMENT {label}: n={g.count} sum(fees)=${g.sum_fees:,.2f} "
+                f"sum(investment)=${g.sum_investment:,.2f} any_nonzero_fee={g.any_nonzero_fee}",
+            )
+            if label == "SCHG" and g.any_nonzero_fee:
+                _p(buf, "E1+: !!! a plain-ETF (SCHG) trade carried a nonzero fee -- see e1plus_fee_bearing_rows_full !!!")
+
+        by_leverage = group_fees_by_leverage(rows)
+        _save_json(output_dir, "e1plus_by_leverage", {k: dataclasses.asdict(v) for k, v in by_leverage.items()})
+        for key, g in by_leverage.items():
+            _p(
+                buf,
+                f"E1+: BY LEVERAGE/SHORT {key}: n={g.count} sum(fees)=${g.sum_fees:,.2f} "
+                f"sum(investment)=${g.sum_investment:,.2f} any_nonzero_fee={g.any_nonzero_fee}",
+            )
+
+        bearing = fee_bearing_rows(rows)
+        _save_json(output_dir, "e1plus_fee_bearing_rows_full", [dataclasses.asdict(r) for r in bearing])
+        _p(
+            buf,
+            f"E1+: {len(bearing)} of {len(rows)} rows carry a nonzero fee "
+            "-- full list below and in e1plus_fee_bearing_rows_full:",
+        )
+        for r in bearing:
+            _p(
+                buf,
+                f"E1+:   FEE ROW pos={r.position_id} instrument={r.symbol or r.instrument_id} "
+                f"open={r.open_date} close={r.close_date} investment={r.investment} "
+                f"fees={r.fees} leveraged_or_short={r.is_leveraged_or_short} holding_days={r.holding_days}",
+            )
+
+        corr_duration = correlate_fees_with(rows, "holding_days")
+        corr_investment = correlate_fees_with(rows, "investment")
+        _save_json(
+            output_dir,
+            "e1plus_correlations",
+            {"holding_days": dataclasses.asdict(corr_duration), "investment": dataclasses.asdict(corr_investment)},
+        )
+        _p(buf, f"E1+: correlation(fees, holding_days) = {corr_duration.pearson_r} ({corr_duration.note})")
+        _p(buf, f"E1+: correlation(fees, investment)   = {corr_investment.pearson_r} ({corr_investment.note})")
+
+        dividend_check = check_dividend_or_account_fee_exposure([t.get("raw", {}) for t in trade_dicts])
+        _save_json(output_dir, "e1plus_dividend_account_field_check", dataclasses.asdict(dividend_check))
+        _p(buf, f"E1+: dividend/account field exposure check: {dividend_check.verdict}")
+
+        recon = reconcile_account_totals(rows)
+        _save_json(output_dir, "e1plus_reconciliation", dataclasses.asdict(recon))
+        _p(buf, f"E1+: RECONCILIATION: {recon.verdict}")
+    finally:
+        client.close()

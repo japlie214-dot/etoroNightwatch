@@ -30,6 +30,7 @@ import com.nightwatch.etoro.probe.databinding.ActivityMainBinding
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.io.FileOutputStream
 import java.text.SimpleDateFormat
@@ -159,6 +160,8 @@ class MainActivity : AppCompatActivity() {
                 binding.txtStatus.text = "Snapshot push attempted — see event log"
             }
         }
+
+        binding.btnRunLiveProbe.setOnClickListener { runLiveProbeNow() }
 
         binding.btnShareLog.setOnClickListener { shareLog() }
 
@@ -341,6 +344,49 @@ class MainActivity : AppCompatActivity() {
         val all = store.recent(500) // already newest-first (EventStore orders by id DESC)
         val filtered = if (currentFilter == "ALL") all else all.filter { it.type == currentFilter }
         binding.listEvents.adapter = MonospaceLogAdapter(this, filtered.map { it.formatted() })
+    }
+
+    // --- Live device probe (doc/RUNBOOK_DEVICE_PROBE.md): sections A, C, D, E1 + the sharpened
+    // E1 fee audit. Read-only. Section B (needs an open market) and E2 (real money) are never
+    // reachable from this button -- see PyBridge.runLiveProbe's own docstring. ---
+    private fun runLiveProbeNow() {
+        val configDir = File(filesDir, "nightwatch_config").absolutePath
+        val outputDir = File(filesDir, "nightwatch_probe_output").absolutePath
+        binding.txtLiveProbeStatus.text =
+            "Live probe: RUNNING (this can take several minutes; do not close the app) -- " +
+                "config_dir=$configDir output_dir=$outputDir"
+        store.log("LIVE_PROBE_START", "config_dir=$configDir output_dir=$outputDir")
+        lifecycleScope.launch {
+            // Kotlin-side safety net on top of the Python side's own per-section thread
+            // timeouts (run_section in probe_live_2026_09_11.py): this call runs on
+            // Dispatchers.IO so the UI thread is never blocked regardless, and
+            // withTimeoutOrNull guarantees this coroutine surfaces SOMETHING (a timeout
+            // message, not silence) even if a bug somehow let a call escape every timeout on
+            // the Python side. 25 minutes is generous: four ~300s-capped sections plus the E1+
+            // fee audit's own network calls, run sequentially.
+            val result = withTimeoutOrNull(25 * 60 * 1000L) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        PyBridge.runLiveProbe(this@MainActivity, configDir, outputDir)
+                    } catch (e: Exception) {
+                        "EXCEPTION calling PyBridge.runLiveProbe: ${e.javaClass.simpleName}: ${e.message}"
+                    }
+                }
+            }
+            val summary = result
+                ?: "TIMED OUT after 25 minutes waiting for the live probe to return -- " +
+                    "partial output (if any) is still in $outputDir; check the copied " +
+                    "probe_live_2026_09_11.py's own per-section timeouts and this device's logcat."
+            store.log("LIVE_PROBE_DONE", summary.take(2000))
+            binding.txtLiveProbeStatus.text = "Live probe: DONE -- see event log below and " +
+                "adb pull $outputDir (doc/RUNBOOK_DEVICE_PROBE.md)"
+            if (result == null) {
+                NotificationHelper.postFailure(this@MainActivity, "Live probe timed out", summary)
+            } else {
+                NotificationHelper.post(this@MainActivity, "Live probe finished", "See event log + $outputDir")
+            }
+            refreshEventList()
+        }
     }
 
     private fun shareLog() {

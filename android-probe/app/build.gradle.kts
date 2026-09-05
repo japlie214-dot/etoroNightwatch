@@ -112,6 +112,46 @@ chaquopy {
             // both. Expect the APK to grow ~30 MB — that is fine and expected, not a regression.
             install("numpy")
             install("pandas")
+
+            // Tonight's device-probe wiring (doc/RUNBOOK_DEVICE_PROBE.md, section A): the real
+            // app's nightwatch.etoro.client uses httpx for every HTTP call, and
+            // probe_live_2026_09_11.py's own section A imports exchange_calendars to prove it
+            // resolves the XNYS calendar on-device. Neither was previously in this pip block —
+            // section A existing to prove exactly these imports work at runtime would otherwise
+            // fail on the very first line.
+            install("httpx==0.27.2")
+            // NOT 4.13.2 (this repo's desktop venv version, and requirements.txt's pin): a REAL
+            // build attempt here failed --
+            //   "Cannot install exchange-calendars==4.13.2 and numpy because these package
+            //   versions have conflicting dependencies... exchange-calendars 4.13.2 depends on
+            //   numpy>=1.26.4" -- while Chaquopy's own pypi index (chaquo.com/pypi-13.1) only
+            //   ever offers a prebuilt numpy wheel at 1.26.2 for cp313/arm64-v8a (confirmed by
+            //   listing that index directly). exchange_calendars tightened its numpy floor to
+            //   >=1.26.4 starting at 4.12; 4.11.1 is the newest release before that tightening
+            //   (confirmed against PyPI's own per-version requires_dist), and its other
+            //   dependencies (pyluach, toolz, korean_lunar_calendar) are pure Python, resolvable
+            //   from pypi.org directly. This makes the desktop venv (exchange_calendars==4.13.2,
+            //   numpy 2.5.2) and this on-device pin (4.11.1, numpy 1.26.2) DIFFERENT VERSIONS on
+            //   each side -- a real, reported divergence, not swept under the "keep them in sync"
+            //   convention every other pin in this file follows. Revisit if Chaquopy ever ships
+            //   a newer numpy wheel.
+            install("exchange_calendars==4.11.1")
+        }
+    }
+    // The real nightwatch package (this repo's app/src/main/python) is not otherwise part
+    // of this APK's Chaquopy source set — there is no buildable Android project under
+    // app/ yet, only this probe. Adding it as an extra python source dir makes
+    // `import nightwatch...` work on-device without copying/duplicating the package.
+    // probe_live_2026_09_11.py (a byte-for-byte copy of tools/probe_live_2026-09-11.py —
+    // see that file's own docstring, which anticipates exactly this deployment) and
+    // probe/probe_runner.py under this project's own src/main/python are unaffected;
+    // this only adds nightwatch itself. (chaquopy's own sourceSets container, NOT
+    // android.sourceSets — Chaquopy exposes ChaquopyExtension.sourceSets as a sibling of
+    // defaultConfig, confirmed against the installed com.chaquo.python:gradle:17.0.0 plugin
+    // classes since no doc page for this exact DSL shape was open to check against.)
+    sourceSets {
+        getByName("main") {
+            srcDir("../../app/src/main/python")
         }
     }
 }

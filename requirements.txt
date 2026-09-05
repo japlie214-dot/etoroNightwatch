@@ -14,6 +14,21 @@ httpx==0.27.2
 # pooling and a testable transport seam (needed for forward_test's fake
 # broker to intercept calls) without hand-rolling retry/pooling logic.
 
+# --- market calendar gate (DESIGN_market_data.md §6 gate 9) -----------------
+exchange_calendars==4.13.2
+# XNYS session calendar for preflight gate 9 and probe_live_2026_09_11.py's
+# section A (Chaquopy runtime import check). Was already installed in this
+# repo's desktop venv and already imported by the probe script; recorded here
+# for the desktop venv/forward-test side.
+#
+# NOT the same version as the Chaquopy `pip { install(...) }` block
+# (android-probe/app/build.gradle.kts): a real on-device build attempt found
+# exchange_calendars>=4.12 requires numpy>=1.26.4, but Chaquopy's own pypi
+# index only offers a prebuilt numpy wheel at 1.26.2 for cp313/arm64-v8a --
+# the Android build is pinned to exchange_calendars==4.11.1 instead (the
+# newest release before that numpy floor tightened). A genuine, reported
+# divergence between desktop and on-device, not an oversight.
+
 # --- step 8: embedded dashboard ---------------------------------------------
 fastapi==0.115.6
 # The ASGI framework DESIGN §8 specifies by name ("FastAPI ... embedded via

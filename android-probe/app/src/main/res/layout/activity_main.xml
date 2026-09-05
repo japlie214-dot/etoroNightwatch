@@ -214,6 +214,32 @@
 
         <View style="@style/Divider" />
 
+        <!-- doc/RUNBOOK_DEVICE_PROBE.md: read-only sections A, C, D, E1 (plus the sharpened E1
+             per-trade fee audit) only. Section B (needs an open US market) is never triggered
+             from this button; section E2 (places a real order) is not reachable from the UI at
+             all: it exists only behind probe_live_2026_09_11.py's own e2 CLI flag, which
+             nothing in this app ever passes. -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Live device probe (sections A, C, D, E1 -- read-only)"
+            android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btnRunLiveProbe"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Run live probe now (A, C, D, E1: read-only, no order ever placed)" />
+
+        <TextView
+            android:id="@+id/txtLiveProbeStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:text="Live probe: (not yet run)" />
+
+        <View style="@style/Divider" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
