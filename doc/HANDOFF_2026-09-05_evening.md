@@ -97,6 +97,70 @@ Oct 2007, not regained until roughly Mar 2013 — about 65 months) or 2000–200
 would have understated drawdown through 2011–2013. If a 2008-scale event is in scope, only full
 history is safe. Stated, accepted limit — not an oversight.
 
+### 3a. What happens when a position sits ABOVE the rolling ATH
+
+**Operator question, 2026-09-05:** *"what if the positions now become above the rolling ATH? How
+should the app handle it? should we just lump it to tier 1?"*
+
+The right answer depends on **which** of three cases you are in, and only two of them need a
+policy at all. 39 months is a reprieve, not a permanent fix — SCHG is a long-hold core book, so
+today's positions age past *any* fixed window eventually.
+
+**Case 1 — a position ages past the window after the app bought it. NOT A PROBLEM.**
+`DESIGN_market_data.md` §4.3 requires `entry_spy_ath`/`entry_spy_close`/`entry_spy_drawdown`/
+`entry_tier` to be **stamped at entry and never re-derived** (the stamped value is the provisional
+T-30 close; re-deriving from official closes would silently shift a *discrete* field). Those
+values live in `lot_annotations` permanently. The fetch window is irrelevant to them. This is
+precisely what "stamp at entry, keep forever" buys, and it means the window question does **not**
+recur for app-created positions.
+
+**Case 2 — a stamped `entry_spy_ath` EXCEEDS the current rolling ATH. Real, and cheap to fix.**
+Once an entry peak ages out of the window, a lot can carry a stamped ATH higher than the app
+currently believes the ATH to be, and any logic comparing the two is incoherent.
+
+**Decision: floor the current ATH with the open lots' own stamped values.**
+
+```
+current_ath = max(rolling_window_ath, max(entry_spy_ath for every OPEN lot))
+```
+
+This is not the accumulated price history §2.2 forbids — it is derived from the sidecar the app
+already maintains and already trusts. It is also monotone-correct: an ATH is a running max that
+by definition never decreases, and we *know* SPY traded at each stamped level because we bought
+there. So the floor can only move the ATH **toward** truth, never away from it. Cost: nothing —
+no extra fetch, no extra state, no new failure mode. Caveat: stamped values came from provisional
+T-30 closes and may sit ~0.1% off the official ATH; since this is only a floor, the error is
+small and one-directional.
+
+**Case 3 — a position being ADOPTED whose `open_date` predates the fetched window.** Zero of the
+209 fall here at 39 months (§3), but it recurs if the migration is delayed, re-run later, or the
+window is ever shortened.
+
+**Decision: HALT loudly; do not silently assign a tier.** A guessed tier that is indistinguishable
+from a measured one is this project's exact pathology — a plausible number sitting beside a real
+one and being trusted by association. `market/adopt.py` is already atomic and all-or-nothing, so
+it must refuse the whole backfill and name the offending positions rather than fabricate context
+for them.
+
+**If the operator chooses to override and lump anyway, the tier should be 0, not 1.** A position
+opened above every price in the window was, by definition, bought at a **high** — its drawdown at
+entry was ~0, which *is* tier 0. Assigning tier 1 would assert a −10%-to−15% entry drawdown that
+the available data actively contradicts. (Recorded as a disagreement with the operator's initial
+suggestion of tier 1, with the reasoning, so it can be overruled deliberately rather than by
+default.)
+
+**Whichever is chosen, the annotation must carry its own provenance** — e.g.
+`entry_context_source IN ('derived', 'assumed_out_of_window')`. The tier value matters less than
+the ability to tell a reconstructed lot from a measured one later. §4.7 already accepts that
+adopted lots use reconstructed rather than stamped context; a lot with *no* recoverable context at
+all is a third category and must not be silently folded into the second.
+
+**Unresolved, and it gates how much any of this matters:** `strategy/ladder.py` is a stub, so the
+*direction* of harm from a wrong `entry_tier` cannot be determined yet. §4.7 says only that "the
+ladder's exit logic will make sell decisions about these positions using reconstructed context."
+Whoever builds `ladder.py` should revisit this section and state plainly whether a too-shallow or
+too-deep `entry_tier` is the more dangerous error — the answer may change the Case-3 default.
+
 ---
 
 ## 4. BUG 2 — which price basis. Decided; not yet implemented.
@@ -161,9 +225,13 @@ first real distribution available.
 
 1. **Fix the ATH window to 39 months / 819 bars** (§3). Highest priority: it silently
    under-deploys capital in crashes *and* strands 72 positions from the migration.
-2. **Implement the basis split** (§4): `adjClose` for `cone_5_z`, raw `close` for ATH/tier and
+2. **Implement §3a's ATH floor** — `current_ath = max(rolling_window_ath, max(entry_spy_ath of
+   every open lot))`. Free, monotone-correct, and closes the case where a lot sits above the
+   rolling ATH. Also add `entry_context_source` provenance to `lot_annotations`, and make
+   `market/adopt.py` HALT rather than guess a tier when a position predates the window.
+3. **Implement the basis split** (§4): `adjClose` for `cone_5_z`, raw `close` for ATH/tier and
    every eToro cross-check. Audit `window.py` and `adopt.py` for mixed use.
-3. **Re-set `provisional_close_deviation_pct`** from §4's measured distribution instead of the
+4. **Re-set `provisional_close_deviation_pct`** from §4's measured distribution instead of the
    documented placeholder.
 
 **The product**
