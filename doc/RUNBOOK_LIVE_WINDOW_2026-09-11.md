@@ -208,3 +208,125 @@ actually verified before Friday, and what was not:
 Do not read a clean `py_compile` or a successful off-device dry run as proof this works end to end
 on the phone. It proves the parts that could be checked without eToro were checked. The rest is
 what Friday is for.
+
+---
+
+## 8. Session items folded in from `DESIGN_session.md` (updated 2026-09-06)
+
+Friday 2026-09-11's open-market session gains one item beyond section B's existing UPRO
+rates-freeze re-poll: the order-latency measurement, item (b) below. **A second item, added
+2026-09-05 (a read-only `allowPartialClosePosition` eligibility check), was removed on
+2026-09-06** once the operator decided partial close is live by direct statement rather than
+pending that probe's answer — see §8(c) below for what it was and why it is gone, kept as a
+recorded note rather than silently deleted.
+
+**Neither remaining item is built into `tools/probe_live_2026-09-11.py` as of this writing** —
+item (b) is specified here as an exact sequence of calls against
+`nightwatch.etoro.client.EtoroClient`, to run by hand (REPL, adb shell into the app's Chaquopy
+process, or added to the probe script by whoever picks this up next — this document does not
+itself modify any Python).
+
+### 8(a). The existing UPRO rates-freeze re-poll
+
+Unchanged — this is section B of this runbook (§1/§3 above), `DESIGN_market_data.md` §10.6(a).
+Run it as already specified; nothing about it changes with this update.
+
+### 8(b). Order latency measurement — DEMO account only, no real money
+
+**Why:** `DESIGN_session.md`'s two-phase session (§3) commits to **two broker round-trips
+inside the T-30 window** — phase A's sells must reach a terminal status before phase B reads
+settled cash and decides its buys. Live order latency has **never been measured**
+(`DESIGN.md` §1.1's own standing highest-risk unknown). This item measures it for the first
+time, cheaply and with no financial risk, by using the DEMO account.
+
+**Updated 2026-09-06: also time a PARTIAL close, not just a full close.** Partial close is now
+the primary SCHG-close mechanism (`DESIGN_session.md` §4.6.1, §4.8's sell-to-target loop), and
+the design's viability inside the T-30 window depends on partial-close latency specifically —
+not just full-open/full-close latency. Measure both in the same session (step 4b, below).
+
+**Precondition:** `config/config.toml`'s `etoro.environment` must read `"demo"` for this
+measurement (confirm before running — do not run this against `"real"`). This is the one
+item in this update that must never run against the real account.
+
+**Exact sequence, using existing client methods (`etoro/client.py`), each of the following
+timestamped to wall-clock time:**
+
+1. `t0 = now()`; call `client.place_buy_order(request_id, SCHG_INSTRUMENT_ID, amount_usd=50.0)`
+   (small, deliberately — this is a latency probe, not a position). Record the returned
+   `order_id` and `t1 = now()` (time to HTTP 200/accepted).
+2. Call `client.poll_order_to_terminal(order_id=order_id, ...)` — do **not** treat its
+   internal polling as opaque for this measurement: instrument or wrap it (or poll manually
+   via `client.lookup_order(order_id=order_id)` in a loop) so that **every observed status
+   change** is timestamped, not just the final terminal one. Record, for each transition
+   observed: the status string (`pending`/`sent`/`WaitingForMarket`/`Filled`/etc. — use
+   whatever `OrderResult.status` actually reports), and the wall-clock time it was first
+   observed at.
+3. `t_terminal = now()` when a terminal status is reached. Report `t_terminal - t0` as
+   "time to terminal" for the buy leg.
+4. Once terminal (and only if filled, not rejected), call `client.close_position(request_id,
+   position_id, instrument_id)` for the position just opened — a **full** close, as
+   `close_position` supports today. Repeat the same per-transition timestamping (steps 1-3)
+   for the close leg.
+4b. **NEW, 2026-09-06 — also time a PARTIAL close, on a separate demo position.** Open a
+   second small DEMO SCHG position the same way (step 1), let it reach terminal, then submit a
+   partial close for roughly half its `amount` (never leaving a remainder below eToro's own
+   $10 `minPositionExposure`/`minPositionAmount` floor — e.g. a $50 position, close $25 of it,
+   leaving $25... **note this itself is below the $10 floor's safety margin only in the sense
+   that $25 remains well above $10, not that this is a boundary test** — do not use this
+   measurement to also boundary-test the $10 floor, keep the two concerns separate).
+   **`close_position` does not accept a partial-close parameter today** (`etoro/client.py`
+   line ~1112, `UnitsToDeduct: null` hardcoded, `CloseRequest` refuses a non-`None` unit count
+   — `DESIGN_session.md` §4.6.1 specifies exactly what must change, but this document may not
+   edit Python, and this measurement should not wait for that change to land). **For this
+   measurement only**, construct the partial-close HTTP request directly (bypassing
+   `close_position`/`CloseRequest`, the same `POST /market-close-orders/positions/{positionId}`
+   endpoint, with a non-null `UnitsToDeduct` computed the same way §4.6.1 specifies —
+   `units_to_deduct = fraction * lot.units`) using the same authenticated session/credential
+   `client` already holds, and apply the identical per-transition timestamping (steps 1-3) to
+   it. Record explicitly, in the write-up, that this leg used a hand-built request because the
+   production client does not support partial close yet — this is a measurement of the
+   broker's behavior, not a demonstration that the shipped code can do this.
+5. **Repeat the whole buy-then-close cycle 3-5 times** (a few repeats, not one) — the task
+   is explicit that variance across repeats matters, not just a single sample. Use a fresh
+   `request_id` each time (the idempotency anchor, DESIGN §6.H, requires this regardless).
+6. **Record and report, for the buy leg, the full-close leg, and the partial-close leg
+   (step 4b), across all repeats:**
+   - Time from submission to each individual status transition observed (not just the final
+     one).
+   - Time to terminal status, for each repeat.
+   - Whether any repeat produced a `PartiallyFilled` status (`OrderStatus` 5) rather than a
+     clean full fill/close — DESIGN_session.md §3.4 already specifies how the app must
+     handle this if it occurs; this measurement is what would first reveal whether it occurs
+     in practice at all.
+   - The variance (spread, not just the mean) across the 3-5 repeats — a single fast run and
+     a single slow run tell a materially different story about whether the two-phase
+     session's T-30 budget (`DESIGN_session.md` §3.2/§14 item 6) is safe "usually" or "only
+     under good conditions."
+7. **Clean up:** confirm no DEMO position or pending order is left open at the end of the
+   measurement (the final close in the last repeat should leave the book flat) — this is a
+   measurement exercise, not a standing position.
+
+### 8(c). REMOVED, 2026-09-06 — the operator has answered this question directly
+
+**What this item was:** a read-only check of `client.get_eligibility([UPRO_INSTRUMENT_ID,
+SCHG_INSTRUMENT_ID])`'s `Eligibility.allow_partial_close` field, to determine whether SCHG
+(and UPRO) allow partial position closes at all — the fork `DESIGN_session.md` §4.5/§4.6
+(as it stood 2026-09-05) depended on before the executor's SCHG-close path could be built.
+
+**Why it is no longer part of Friday's session:** the operator decided, 2026-09-06, that
+partial close is live and is now the primary SCHG-close mechanism (`DESIGN_session.md` §0/§4,
+updated) — directly, not contingent on this probe's answer. Friday's session no longer needs
+this item to unblock the lot-selection build. **This is recorded here, not silently deleted,**
+so a future reader who sees an old reference to "the allowPartialClosePosition check" (in this
+document's own git history, or in `DESIGN_session.md`'s superseded 2026-09-05 text) knows what
+it was and why it stopped being necessary, rather than re-deriving the need for it. If a future
+session still wants empirical, broker-side confirmation that eToro's API actually accepts a
+non-null `UnitsToDeduct` for SCHG/UPRO before this ships against the real account, that is a
+legitimate **pre-launch verification step** in its own right (distinct from this now-removed
+eligibility-field read, which only checks a permission flag, not whether a partial-close
+request is actually honoured) — flagged as a residual, lower-stakes risk in
+`DESIGN_session.md` §16, not reinstated here as a Friday requirement.
+
+**Friday's session is therefore TWO items, not three:** §8(a) (the UPRO rates-freeze re-poll)
+and §8(b) (the order-latency measurement, below — now extended to also time a partial close,
+since the design's viability depends on partial-close latency specifically).
