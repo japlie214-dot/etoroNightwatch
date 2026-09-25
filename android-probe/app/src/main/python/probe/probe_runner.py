@@ -69,12 +69,77 @@ def _save_json(output_dir: Path, name: str, obj: Any) -> Path:
     return path
 
 
-def run_default(config_dir: str, output_dir: str) -> str:
-    """Kotlin entry point. Runs sections A, C, D, E1, F, then the E1-plus fee
-    audit. Never runs B (market closed) or E2 (real money) -- neither is
-    reachable from here.
+#: The sections ``run_default`` requests when the caller names none. Exactly
+#: the literal this module hardcoded before 2026-09-11, so every existing
+#: caller (``PyBridge.runLiveProbe``, the UI button) keeps its old behaviour
+#: byte-for-byte: B excluded (market was closed when this was written),
+#: E2 never present.
+DEFAULT_SECTIONS = "A,C,D,E1,F"
+
+#: Sections this module refuses to request under any circumstances, whatever
+#: the caller passes. E2 places a REAL order with REAL money and is not
+#: authorised from any on-device route; ``--e2`` (the copied probe's separate
+#: opt-in flag) is likewise never constructed anywhere in this file. This is
+#: a fail-closed allowlist-complement: an unrecognised token is passed
+#: through to the probe's own argparse (which rejects it loudly), but a
+#: forbidden one is stripped and reported here, before any import happens.
+FORBIDDEN_SECTIONS = frozenset({"E2"})
+
+
+def _sanitize_sections(buf: list[str], sections: str | None) -> str:
+    """Normalise a caller-supplied ``--sections`` string and strip anything in
+    :data:`FORBIDDEN_SECTIONS`.
+
+    Returns the sanitized comma-joined string. An empty/None input falls back
+    to :data:`DEFAULT_SECTIONS`; an input that consisted ONLY of forbidden
+    sections also falls back to the default rather than passing an empty
+    ``--sections`` through (which the probe's argparse would read as "no
+    sections", a silent no-op that looks like success).
+    """
+    if not sections or not sections.strip():
+        _p(buf, f"sections not specified; using default {DEFAULT_SECTIONS!r}")
+        return DEFAULT_SECTIONS
+
+    requested = [tok.strip().upper() for tok in sections.split(",") if tok.strip()]
+    kept = [tok for tok in requested if tok not in FORBIDDEN_SECTIONS]
+    dropped = [tok for tok in requested if tok in FORBIDDEN_SECTIONS]
+    for tok in dropped:
+        _p(
+            buf,
+            f"REFUSED section {tok!r}: it is on this module's FORBIDDEN_SECTIONS list "
+            "(real money / not authorised from any on-device route). Stripped from the request.",
+        )
+    if not kept:
+        _p(buf, f"nothing left after sanitizing {sections!r}; falling back to {DEFAULT_SECTIONS!r}")
+        return DEFAULT_SECTIONS
+    result = ",".join(kept)
+    _p(buf, f"sections requested={sections!r} -> sanitized={result!r}")
+    return result
+
+
+def run_sections(config_dir: str, output_dir: str, sections: str | None = None) -> str:
+    """Explicitly-named sibling of :func:`run_default`, for callers that want
+    the parameter to be obvious at the call site. Identical behaviour; see
+    :func:`run_default` for the contract.
+    """
+    return run_default(config_dir, output_dir, sections)
+
+
+def run_default(config_dir: str, output_dir: str, sections: str | None = None) -> str:
+    """Kotlin entry point. Runs the requested sections (default A, C, D, E1,
+    F), then the E1-plus fee audit. Never runs E2 (real money) -- it is
+    stripped by :func:`_sanitize_sections` whatever the caller asks for, and
+    the copied probe's separate ``--e2`` opt-in flag is never constructed
+    here at all.
 
     Args:
+        sections: comma-separated section list passed through to the copied
+            probe's ``--sections``. ``None``/empty means
+            :data:`DEFAULT_SECTIONS` (``"A,C,D,E1,F"``), which is exactly
+            what this function did unconditionally before 2026-09-11 -- so
+            existing callers see no behaviour change. Section B needs an OPEN
+            US market and can take ~25 minutes; callers requesting it must
+            raise their own timeout accordingly.
         config_dir: a directory containing a ``config/`` subfolder with
             ``config.toml`` and ``.secrets.env`` (pushed onto the device by
             the operator beforehand -- see the runbook). Passed through as
@@ -98,6 +163,7 @@ def run_default(config_dir: str, output_dir: str) -> str:
     os.environ["NIGHTWATCH_HOME"] = config_dir
     _p(buf, f"NIGHTWATCH_HOME set to {config_dir!r}")
     _p(buf, f"output_dir={out}")
+    resolved_sections = _sanitize_sections(buf, sections)
     _p(
         buf,
         "NOTE: NIGHTWATCH_HOME is only read the first time nightwatch.host is "
@@ -113,9 +179,9 @@ def run_default(config_dir: str, output_dir: str) -> str:
         _p(buf, traceback.format_exc())
         return "\n".join(buf)
 
-    _p(buf, "=== sections A, C, D, E1, F (B excluded: market closed; E2 never runs from here) ===")
+    _p(buf, f"=== sections {resolved_sections} (E2 never runs from here; --e2 is never passed) ===")
     try:
-        probe.main(["--output-dir", str(out), "--sections", "A,C,D,E1,F"])
+        probe.main(["--output-dir", str(out), "--sections", resolved_sections])
     except SystemExit as e:
         _p(buf, f"probe_live_2026_09_11.main() exited with code {e.code!r} (argparse error or explicit return)")
     except Exception as e:

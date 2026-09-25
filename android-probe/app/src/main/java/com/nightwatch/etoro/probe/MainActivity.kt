@@ -175,6 +175,12 @@ class MainActivity : AppCompatActivity() {
 
         maybeRunAdoptionFetchFromIntent(intent)
         maybeRunWindowBenchFromIntent(intent)
+        maybeRunLiveProbeFromIntent(intent)
+        maybeRunOrderLatencyFromIntent(intent)
+        maybeRunEnvProbeFromIntent(intent)
+        maybeRunDemoCleanupFromIntent(intent)
+        maybeRunTakeProfitProbeFromIntent(intent)
+        maybeRunPayloadGapsFromIntent(intent)
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -184,6 +190,12 @@ class MainActivity : AppCompatActivity() {
         // works regardless of whether the app was already open.
         maybeRunAdoptionFetchFromIntent(intent)
         maybeRunWindowBenchFromIntent(intent)
+        maybeRunLiveProbeFromIntent(intent)
+        maybeRunOrderLatencyFromIntent(intent)
+        maybeRunEnvProbeFromIntent(intent)
+        maybeRunDemoCleanupFromIntent(intent)
+        maybeRunTakeProfitProbeFromIntent(intent)
+        maybeRunPayloadGapsFromIntent(intent)
     }
 
     override fun onResume() {
@@ -241,6 +253,241 @@ class MainActivity : AppCompatActivity() {
     private fun maybeRunWindowBenchFromIntent(intent: Intent?) {
         if (intent == null || !intent.getBooleanExtra("run_window_bench", false)) return
         runWindowBenchNow()
+    }
+
+    // -- Live probe, adb-only route with a CALLER-CHOSEN section list (2026-09-11). Mirrors
+    // maybeRunAdoptionFetchFromIntent above exactly: no new exported component (HANDOFF
+    // 2026-09-06 §11 forbids an exported receiver outright), handling added inside the
+    // already-exported MainActivity, everything visible in logcat ("LIVEPROBE: ...") and the
+    // event log, every file under outputDir for `adb pull`.
+    //
+    // Why this exists: probe_runner.run_default hardcoded "A,C,D,E1,F", so section B -- which
+    // needs an OPEN US market -- was unreachable from the device. The `sections` string extra
+    // is optional; omitted, it behaves exactly as the old route did.
+    //
+    // SAFETY: section E2 places a REAL order and is NOT authorised. It is stripped on the Python
+    // side by probe_runner._sanitize_sections whatever is passed here, and the copied probe's
+    // separate `--e2` opt-in flag is never constructed anywhere in this app. There is
+    // deliberately no intent extra that can reach it.
+    //
+    // Timeout: 60 minutes, NOT the adoption fetch's 5. Section B polls the market on its own
+    // schedule for ~25 minutes; a 5-minute ceiling would truncate it mid-run and report a
+    // timeout that was purely an artifact of this wrapper.
+    //
+    //   adb shell am start -n com.nightwatch.etoro/com.nightwatch.etoro.probe.MainActivity \
+    //     --ez run_live_probe true --es sections "A,C,D,E1,B"
+    private fun maybeRunLiveProbeFromIntent(intent: Intent?) {
+        if (intent == null || !intent.getBooleanExtra("run_live_probe", false)) return
+        val sections = intent.getStringExtra("sections") ?: ""
+        val configDir = File(filesDir, "nightwatch_config").absolutePath
+        val outputDir = File(filesDir, "nightwatch_live_probe_output").absolutePath
+        android.util.Log.i("LIVEPROBE", "starting: config_dir=$configDir output_dir=$outputDir sections='$sections'")
+        store.log("LIVE_PROBE_START", "config_dir=$configDir output_dir=$outputDir sections='$sections'")
+        lifecycleScope.launch {
+            val result = withTimeoutOrNull(60 * 60 * 1000L) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        PyBridge.runLiveProbeSections(this@MainActivity, configDir, outputDir, sections)
+                    } catch (e: Exception) {
+                        "EXCEPTION calling PyBridge.runLiveProbeSections: ${e.javaClass.simpleName}: ${e.message}"
+                    }
+                }
+            }
+            val summary = result ?: "TIMED OUT after 60 minutes waiting for the live probe to return."
+            android.util.Log.i("LIVEPROBE", "done: $summary")
+            store.log("LIVE_PROBE_DONE", summary.take(4000))
+            refreshEventList()
+        }
+    }
+
+    // -- Order-latency harness, adb-only route (2026-09-11; RUNBOOK_LIVE_WINDOW_2026-09-11 §8(b)).
+    // Same pattern as the two handlers above -- no new exported component.
+    //
+    // SAFETY: this is the only route in this app that can place an order at all, and it is
+    // fail-closed on the Python side. probe/order_latency_runner.py forwards no flag that could
+    // weaken the harness's demo confirmation, and the harness refuses to place anything unless
+    // the configured environment, the derived credential label, AND a live /balances signal all
+    // POSITIVELY confirm demo. "Unable to confirm" is refused exactly like "confirmed real".
+    // Against a device whose config says environment = "real" this prints every check it ran and
+    // returns having traded nothing -- that refusal is the expected, correct outcome.
+    //
+    // Timeout: 60 minutes. The run shape is repeats(4) x 3 legs x up to 90s poll timeout, plus
+    // order settle time, instrument resolution and the balances probe -- ~18 minutes of pure
+    // poll ceiling in the worst case, so 60 leaves generous slack without being unbounded.
+    //
+    // The optional `repeats` int extra overrides the harness's default of 4 (RUNBOOK §8(b));
+    // omitted or <= 0 means "use the harness default". It only changes how many times the same
+    // demo-gated cycle runs -- it cannot widen what the harness is permitted to do.
+    //
+    //   adb shell am start -n com.nightwatch.etoro/com.nightwatch.etoro.probe.MainActivity \
+    //     --ez run_order_latency true --ei repeats 2
+    private fun maybeRunOrderLatencyFromIntent(intent: Intent?) {
+        if (intent == null || !intent.getBooleanExtra("run_order_latency", false)) return
+        val configDir = File(filesDir, "nightwatch_config").absolutePath
+        val outputDir = File(filesDir, "nightwatch_order_latency_output").absolutePath
+        val repeats = intent.getIntExtra("repeats", 0)
+        android.util.Log.i("LATENCY", "starting: config_dir=$configDir output_dir=$outputDir repeats=$repeats")
+        store.log("ORDER_LATENCY_START", "config_dir=$configDir output_dir=$outputDir repeats=$repeats")
+        lifecycleScope.launch {
+            val result = withTimeoutOrNull(60 * 60 * 1000L) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        PyBridge.runOrderLatency(this@MainActivity, configDir, outputDir, repeats)
+                    } catch (e: Exception) {
+                        "EXCEPTION calling PyBridge.runOrderLatency: ${e.javaClass.simpleName}: ${e.message}"
+                    }
+                }
+            }
+            val summary = result ?: "TIMED OUT after 60 minutes waiting for the order-latency harness to return."
+            android.util.Log.i("LATENCY", "done: $summary")
+            store.log("ORDER_LATENCY_DONE", summary.take(4000))
+            refreshEventList()
+        }
+    }
+
+    // -- DEMO-ONLY position reader/closer, adb-only route (2026-09-11). Added because the
+    // _parse_order_result bug stranded demo positions that NO route in this app could close --
+    // the latency harness only closes what it opened in the same process.
+    //
+    // SAFETY: probe/demo_cleanup.py reuses the latency harness's own demo gate verbatim.
+    // `lookup_close_ids` invokes the dedicated close-order GET only and is mutually exclusive with
+    // `close_ids`, which is the separate full-close path. Against a real config, the gate refuses.
+    //
+    //   adb shell am start -n com.nightwatch.etoro/com.nightwatch.etoro.probe.MainActivity --ez run_demo_cleanup true --es lookup_close_ids "382354058"
+    private fun maybeRunDemoCleanupFromIntent(intent: Intent?) {
+        if (intent == null || !intent.getBooleanExtra("run_demo_cleanup", false)) return
+        val configDir = File(filesDir, "nightwatch_config").absolutePath
+        val outputDir = File(filesDir, "nightwatch_demo_cleanup_output").absolutePath
+        val closeIds = intent.getStringExtra("close_ids") ?: ""
+        val lookupCloseIds = intent.getStringExtra("lookup_close_ids") ?: ""
+        val lookupOpenIds = intent.getStringExtra("lookup_open_ids") ?: ""
+        android.util.Log.i("CLEANUP", "starting: output_dir=$outputDir close_ids=$closeIds lookup_close_ids=$lookupCloseIds lookup_open_ids=$lookupOpenIds")
+        store.log("DEMO_CLEANUP_START", "output_dir=$outputDir close_ids=$closeIds lookup_close_ids=$lookupCloseIds lookup_open_ids=$lookupOpenIds")
+        lifecycleScope.launch {
+            val result = withTimeoutOrNull(15 * 60 * 1000L) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        PyBridge.runDemoCleanup(this@MainActivity, configDir, outputDir, closeIds, lookupCloseIds, lookupOpenIds)
+                    } catch (e: Exception) {
+                        "EXCEPTION calling PyBridge.runDemoCleanup: ${e.javaClass.simpleName}: ${e.message}"
+                    }
+                }
+            }
+            val summary = result ?: "TIMED OUT after 15 minutes waiting for the demo cleanup."
+            android.util.Log.i("CLEANUP", "done: $summary")
+            store.log("DEMO_CLEANUP_DONE", summary.take(4000))
+            refreshEventList()
+        }
+    }
+
+    // -- READ-ONLY environment-payload capture, adb-only route (2026-09-11). Same pattern as the
+    // handlers above: no new exported component, handling added inside the already-exported
+    // MainActivity, everything visible in logcat ("ENVPROBE: ...") and the event log, every file
+    // under outputDir for `adb pull`.
+    //
+    // Why: EtoroClient._detect_environment only ever looked for its marker keys at the TOP LEVEL
+    // of the /balances body, which carries none of them -- so it returned null unconditionally and
+    // verify_environment() has been a silent no-op on the REAL account as well as on demo. Writing
+    // a correct detector needs the payload eToro actually sends, which this captures.
+    //
+    // SAFETY: probe/env_probe.py issues GETs only, with role="read" (the read-scoped credential),
+    // and imports no order-placing/modifying/closing method at all. There is no order path from
+    // this route, on either the demo or the real config.
+    //
+    // Timeout: 5 minutes, matching the adoption fetch -- this is a handful of GETs, not a poll loop.
+    //
+    //   adb shell am start -n com.nightwatch.etoro/com.nightwatch.etoro.probe.MainActivity \
+    //     --ez run_env_probe true
+    private fun maybeRunEnvProbeFromIntent(intent: Intent?) {
+        if (intent == null || !intent.getBooleanExtra("run_env_probe", false)) return
+        val configDir = File(filesDir, "nightwatch_config").absolutePath
+        val outputDir = File(filesDir, "nightwatch_env_probe_output").absolutePath
+        android.util.Log.i("ENVPROBE", "starting: config_dir=$configDir output_dir=$outputDir")
+        store.log("ENV_PROBE_START", "config_dir=$configDir output_dir=$outputDir")
+        lifecycleScope.launch {
+            val result = withTimeoutOrNull(5 * 60 * 1000L) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        PyBridge.runEnvProbe(this@MainActivity, configDir, outputDir)
+                    } catch (e: Exception) {
+                        "EXCEPTION calling PyBridge.runEnvProbe: ${e.javaClass.simpleName}: ${e.message}"
+                    }
+                }
+            }
+            val summary = result ?: "TIMED OUT after 5 minutes waiting for the env probe to return."
+            android.util.Log.i("ENVPROBE", "done: $summary")
+            store.log("ENV_PROBE_DONE", summary.take(4000))
+            refreshEventList()
+        }
+    }
+
+    // -- T6: one explicitly authorized real $10 SCHG buy to inspect broker TP defaults.
+    // This is only an intent route in the existing exported MainActivity; no component or UI
+    // was added. The Python runner independently rejects every non-exact confirmation and
+    // requires a one-use token from app-private files before verifying the live credential.
+    // It allows one submit attempt per app-data directory, never retries the order, and leaves
+    // any filled probe position open.
+    //
+    //   adb shell am start -n com.nightwatch.etoro/com.nightwatch.etoro.probe.MainActivity \
+    //     --ez run_take_profit_probe true --es confirmation 'PLACE REAL $10 SCHG ORDER'
+    private fun maybeRunTakeProfitProbeFromIntent(intent: Intent?) {
+        if (intent == null || !intent.getBooleanExtra("run_take_profit_probe", false)) return
+        val confirmation = intent.getStringExtra("confirmation") ?: ""
+        val approvalToken = intent.getStringExtra("approval_token") ?: ""
+        val configDir = File(filesDir, "nightwatch_config").absolutePath
+        val outputDir = File(filesDir, "nightwatch_take_profit_probe_output").absolutePath
+        android.util.Log.i("TPPROBE", "starting: output_dir=$outputDir confirmation_present=${confirmation.isNotEmpty()}")
+        store.log("TP_PROBE_START", "output_dir=$outputDir confirmation_present=${confirmation.isNotEmpty()}")
+        lifecycleScope.launch {
+            val result = withTimeoutOrNull(20 * 60 * 1000L) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        PyBridge.runTakeProfitProbe(
+                            this@MainActivity,
+                            configDir,
+                            outputDir,
+                            confirmation,
+                            approvalToken
+                        )
+                    } catch (e: Exception) {
+                        "EXCEPTION calling PyBridge.runTakeProfitProbe: ${e.javaClass.simpleName}"
+                    }
+                }
+            }
+            val summary = result ?: "TIMED OUT after 20 minutes waiting for the TP probe."
+            android.util.Log.i("TPPROBE", "done: $summary")
+            store.log("TP_PROBE_DONE", summary.take(4000))
+            refreshEventList()
+        }
+    }
+
+    // T7 captures search, portfolio, and rejected-order payloads. Python reuses the
+    // order-latency harness's positive demo gate and refuses before HTTP on a real config.
+    // Its at-most-once marker and max_attempts=1 prevent a write retry.
+    //
+    //   adb shell am start -n com.nightwatch.etoro/com.nightwatch.etoro.probe.MainActivity \
+    //     --ez run_payload_gaps true
+    private fun maybeRunPayloadGapsFromIntent(intent: Intent?) {
+        if (intent == null || !intent.getBooleanExtra("run_payload_gaps", false)) return
+        val configDir = File(filesDir, "nightwatch_config").absolutePath
+        val outputDir = File(filesDir, "nightwatch_payload_gaps_output").absolutePath
+        android.util.Log.i("PAYLOADGAPS", "starting: output_dir=$outputDir")
+        store.log("PAYLOAD_GAPS_START", "output_dir=$outputDir")
+        lifecycleScope.launch {
+            val result = withTimeoutOrNull(15 * 60 * 1000L) {
+                withContext(Dispatchers.IO) {
+                    try {
+                        PyBridge.runPayloadGaps(this@MainActivity, configDir, outputDir)
+                    } catch (e: Exception) {
+                        "EXCEPTION calling PyBridge.runPayloadGaps: ${e.javaClass.simpleName}"
+                    }
+                }
+            }
+            val summary = result ?: "TIMED OUT after 15 minutes waiting for T7 payload capture."
+            android.util.Log.i("PAYLOADGAPS", "done: $summary")
+            store.log("PAYLOAD_GAPS_DONE", summary.take(4000))
+            refreshEventList()
+        }
     }
 
     // --- Edge-to-edge (task Problem 2): pad for systemBars() + displayCutout(), top and bottom ---

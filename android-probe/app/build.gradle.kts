@@ -35,8 +35,8 @@ android {
         targetSdk = 36
         // v2: upgrade over the v1 APK already installed on the phone (adb install -r).
         // Same applicationId + signing config as v1 — only the version bumps.
-        versionCode = 4
-        versionName = "0.4-probe"
+        versionCode = 7
+        versionName = "0.7-probe"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 

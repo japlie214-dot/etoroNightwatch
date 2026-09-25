@@ -85,6 +85,106 @@ object PyBridge {
     }
 
     /**
+     * 2026-09-11: same as [runLiveProbe] but with the section list chosen by the caller instead
+     * of probe_runner's hardcoded "A,C,D,E1,F". Added so section B -- which needs an OPEN US
+     * market and was therefore unreachable from any on-device route until today -- can be run
+     * during a live window.
+     *
+     * Section E2 is NOT reachable through this: probe_runner._sanitize_sections strips it from
+     * whatever string arrives here, and the copied probe's separate `--e2` opt-in flag is never
+     * constructed anywhere in the Kotlin or Python of this project. Passing `sections` does not
+     * widen what this app can do with real money.
+     *
+     * MUST be called from a background thread/coroutine. Section B alone can run ~25 minutes;
+     * callers must size their own timeout well above that (see MainActivity's
+     * maybeRunLiveProbeFromIntent, which allows 60).
+     */
+    @Synchronized
+    fun runLiveProbeSections(context: Context, configDir: String, outputDir: String, sections: String): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.probe_runner")
+        return module.callAttr("run_sections", configDir, outputDir, sections).toString()
+    }
+
+    /**
+     * 2026-09-11 order-latency measurement harness (RUNBOOK_LIVE_WINDOW_2026-09-11.md §8(b)) --
+     * the DEMO-only harness that times real order round-trips. See
+     * android-probe/app/src/main/python/probe/order_latency_runner.py's own docstring.
+     *
+     * This path is FAIL-CLOSED on the Python side and this function adds no way around it: the
+     * harness refuses to place any order unless the configured environment, the derived
+     * credential label, AND a live /balances signal all positively confirm demo. Run against a
+     * device whose config says environment = "real", it prints every check it performed and
+     * returns without trading.
+     *
+     * MUST be called from a background thread/coroutine -- a full run is
+     * repeats x 3 legs x up to pollTimeout seconds each, plus order settle time.
+     *
+     * `repeats` <= 0 means "use the harness's own documented default" (4, RUNBOOK §8(b)); any
+     * positive value overrides it. Nothing here can widen what the harness is allowed to do --
+     * repeats only changes how many times the same demo-gated cycle runs.
+     */
+    @Synchronized
+    fun runOrderLatency(context: Context, configDir: String, outputDir: String, repeats: Int = 0): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.order_latency_runner")
+        return if (repeats > 0) {
+            module.callAttr("run", configDir, outputDir, repeats).toString()
+        } else {
+            module.callAttr("run", configDir, outputDir).toString()
+        }
+    }
+
+    /**
+     * 2026-09-11 DEMO-ONLY position reader/closer. See
+     * android-probe/app/src/main/python/probe/demo_cleanup.py's docstring.
+     *
+     * Reuses the order-latency harness's own fail-closed demo gate verbatim. `lookupCloseIds`
+     * selects the dedicated close-order GET poll; it is mutually exclusive with `closeIds`,
+     * the existing full-close path.
+     *
+     * MUST be called from a background thread/coroutine.
+     */
+    @Synchronized
+    fun runDemoCleanup(
+        context: Context,
+        configDir: String,
+        outputDir: String,
+        closeIds: String,
+        lookupCloseIds: String = "",
+        lookupOpenIds: String = "",
+    ): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.demo_cleanup")
+        return module.callAttr("run", configDir, outputDir, closeIds, 2.0, 90.0, lookupCloseIds, lookupOpenIds).toString()
+    }
+
+    /**
+     * 2026-09-11 READ-ONLY environment-payload capture. Fetches the raw `/balances` body (plus a
+     * handful of sibling GET endpoints) and writes them untouched to `outputDir` for an
+     * `adb pull`, so that EtoroClient._detect_environment can be written against the payload
+     * eToro actually sends instead of against a guess.
+     *
+     * See android-probe/app/src/main/python/probe/env_probe.py's own docstring: every call it
+     * makes is a GET issued with role="read" (the read-scoped credential), it opens no database,
+     * and no order-placing/modifying/closing method is imported anywhere in it. This function
+     * cannot place an order.
+     *
+     * `configDir`/`outputDir` follow the same convention as [runAdoptionFetch] above.
+     * MUST be called from a background thread/coroutine.
+     */
+    @Synchronized
+    fun runEnvProbe(context: Context, configDir: String, outputDir: String): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.env_probe")
+        return module.callAttr("run", configDir, outputDir).toString()
+    }
+
+    /**
      * On-device measurement task (2026-09-05): the cost of parsing a FULL-HISTORY SPY payload
      * through the REAL market/window.py + strategy/cone.py code path, vs the previously-used
      * 276-bar window -- both payload files must already be on-device (pushed via adb beforehand;
@@ -115,6 +215,32 @@ object PyBridge {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.adopt_fetch")
+        return module.callAttr("run", configDir, outputDir).toString()
+    }
+
+    /** One-off real $10 SCHG TP probe. Python enforces the exact confirmation and
+     * positively verifies the real:write credential before its sole order submission. */
+    @Synchronized
+    fun runTakeProfitProbe(
+        context: Context,
+        configDir: String,
+        outputDir: String,
+        confirmation: String,
+        approvalToken: String
+    ): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.take_profit_probe")
+        return module.callAttr("run", configDir, outputDir, confirmation, approvalToken).toString()
+    }
+
+    /** T7 demo-only payload capture. Its Python runner refuses non-demo config/credentials and
+     * never retries its single deliberately subminimum order write. */
+    @Synchronized
+    fun runPayloadGaps(context: Context, configDir: String, outputDir: String): String {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val module = py.getModule("probe.payload_gaps")
         return module.callAttr("run", configDir, outputDir).toString()
     }
 }

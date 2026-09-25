@@ -10,7 +10,7 @@ ever ... the dev machine cannot reach eToro at all"), the eToro portfolio
 fetch and the migration's resolution are kept in two different processes on
 two different machines: this file does ONLY the on-device half (the only
 half that can reach eToro, per the Kominfo DNS sinkhole recorded in
-HANDOFF_2026-09-04_market_data.md §2.8); the resolution runs on the PC
+board nightwatch/handoff-2026-09-04-market-data.md §2.8); the resolution runs on the PC
 against the JSON this file saves (``tools/adopt_backfill_runner.py``),
 where Tiingo (unlike eToro) IS reachable.
 
