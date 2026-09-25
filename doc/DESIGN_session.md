@@ -6,7 +6,7 @@ other stubs this design orchestrates. `strategy/ladder.py`/`strategy/state.py` a
 treated here as a fixed, pure interface (`decide(inputs, state, config) -> LadderDecision`).
 
 **Written:** 2026-09-05. Supersedes DESIGN.md §4.1's step list where the two disagree (flagged
-inline, never silently reconciled) and HANDOFF_2026-09-05_evening.md §6 item 13's stale-comment
+inline, never silently reconciled) and board nightwatch/handoff-2026-09-05-evening.md §6 item 13's stale-comment
 observation. Concurrent, out of scope: `android-probe/` — not read, not touched.
 
 **Updated:** 2026-09-05 (later the same day), folding in the operator's SCHG lot-selection
@@ -62,8 +62,40 @@ not a stored field anywhere; it must be computed fresh each session as `units ×
 §4.3, §4.4, §4.6.1, §4.8, §14, and §16 are corrected below for this; nothing else in this
 document is touched by this pass.
 
-**Read in full before this:** DESIGN.md §3.1/§4.1–§4.5, DESIGN_market_data.md §3.3/§4.3/§4.4/
-§4.7/§10.x, HANDOFF_2026-09-05_evening.md, DESIGN_sandbox.md, `strategy/ladder.py`,
+**Updated once more: 2026-09-06 (a fourth pass, per board nightwatch/handoff-2026-09-06.md §1's rule that a
+document disagreeing with the code or with a resolved operator decision is the same class of
+defect as the code being wrong).** Three corrections, all against the same day's operator
+decisions:
+
+- **§16 item 9's cumulative-ratchet claim is RETRACTED — checked directly against
+  `strategy/ladder.py:926-929`/`:769`/`:909-917` and found factually wrong.** A too-large
+  sell-to-target buffer does not erode the core floor further session after session; the sell
+  is already netted against existing cash and skipped once cash covers `cash_target`, so
+  overshoot is a float that either shrinks next session's `need` or, past `order_size`, funds a
+  buy-back via the "cash to core" path. The undershoot half of item 9 is unchanged and is now
+  the dominant asymmetry. See the corrected §16 item 9 for the full trace and the residual
+  (smaller, different) costs of a too-large buffer.
+- **`max_orders_per_session` is retired, replaced by a latency-derived time gate** — full
+  reasoning lands in DESIGN.md §6.C (this document only cross-references it, at §4.9/§14 item 5)
+  — `engine/order_budget.py` is the concurrent implementation. **Stated there in terms this
+  document repeats because it matters: the replacement is deliberately simple scaffolding, not
+  a settled architecture, and may be redesigned at any time without ceremony.**
+- **`N` (§3.4/§14 item 2) no longer escalates a persistently non-terminal order to an
+  auto-halt.** The app must be fully automatic; there is no cancel endpoint anywhere in
+  `etoro/client.py` (grep-verified), so the only automatic resolution available is state-based —
+  mark the order abandoned after the polling horizon and resolve against observed position/cash,
+  with a narrow, provenance-backed auto-adopt path for a later fill matching one of our own
+  recorded abandoned intents (distinguished explicitly from DESIGN.md §1.4 fix #3's
+  fabricate-a-lot bug by that provenance). Halts remain reserved for money-losing ambiguity,
+  never bookkeeping ambiguity.
+
+§3.4, §4.9, §14 (items 2 and 5), and §16 (item 9) are corrected below for this; nothing else in
+this document is touched by this pass. Per this project's audit-trail practice, none of the
+retracted/superseded text is deleted — it is struck and dated in place.
+
+**Read in full before this:** DESIGN.md §3.1/§4.1–§4.5/§6.C, DESIGN_market_data.md §3.3/§4.3/§4.4/
+§4.7/§10.x, board nightwatch/handoff-2026-09-05-evening.md, board nightwatch/handoff-2026-09-06.md §1/§9, DESIGN_sandbox.md,
+`strategy/ladder.py`,
 `strategy/state.py`, `market/window.py`, `market/adopt.py`, `engine/preflight.py`,
 `etoro/client.py`, `db/repo.py`, `tools/adopt_backfill_runner.py`.
 
@@ -312,10 +344,52 @@ improvement, not an oversight.
   `recover_by_reference_id` before doing anything else: if it is now terminal, book the fill
   (or the rejection) exactly as phase A would have, then proceed normally with fresh cash
   that already reflects it — no special "catch-up phase B" needed, because the *next*
-  session's own phase A will read post-settlement cash as a matter of course. If it is
-  **still** non-terminal after N consecutive sessions (config-driven, see §14), this is
-  escalated as an auto-halt condition (DESIGN.md §6.I) rather than polled forever — an order
-  that has not settled in N trading days is no longer "in flight," it is anomalous.
+  session's own phase A will read post-settlement cash as a matter of course.
+
+  **UPDATED, operator decision 2026-09-06 — retracts the auto-halt escalation this paragraph
+  previously specified. ~~If it is **still** non-terminal after N consecutive sessions
+  (config-driven, see §14), this is escalated as an auto-halt condition (DESIGN.md §6.I) rather
+  than polled forever — an order that has not settled in N trading days is no longer "in
+  flight," it is anomalous.~~ The operator's stated requirement: the app must be fully
+  automatic, and a halt requiring manual resolution is not acceptable for this failure mode.**
+
+  The facts that drive the replacement design:
+  - Every order this app places is a **market** order, never a limit order, so a genuinely
+    non-terminal order should be very rare in the first place — this is not a failure mode the
+    design expects to trigger often, only one it must not depend on a human to close out when
+    it does.
+  - **There is no cancel path.** `etoro/client.py` exposes `recover_by_reference_id` (line 1196)
+    for exactly this kind of recovery, but grepping the whole client for a cancel/DELETE
+    endpoint (`cancel`, `DELETE`, `delete` — checked 2026-09-06) finds **none anywhere in the
+    file**. A stuck order cannot be retracted; the only automatic resolution available is
+    state-based, not order-based.
+  - **Therefore: stop treating the order itself as an entity that must reach a terminal
+    status.** The order is a *means*; the **position and the cash are the truth**, and the
+    session already re-reads both every night regardless (§0/§2). After the polling horizon
+    (still governed by `N`, below), the order is marked **abandoned** and the session resolves
+    against observed account state instead of continuing to wait on the order.
+  - **The one thing that would otherwise force a human back in:** if an abandoned order later
+    fills anyway, gate 11 (§6) sees an unmatched broker position and fails closed, exactly as
+    designed for an unexplained position. The fix is a **narrow auto-adopt path**: a broker
+    position that matches one of our **own recorded abandoned intents** (same instrument, same
+    size, same `referenceId`) is adopted automatically rather than failing the gate. **This is
+    NOT the fabricate-a-lot bug DESIGN.md §1.4 fix #3 exists to prevent** — bug #3 invented a
+    lot from nothing, with no record anywhere that it should exist; this auto-adopt path only
+    ever matches a position against a lot **we ourselves already persisted** as an abandoned
+    intent, complete with its instrument, size and reference id. **Provenance is the whole
+    distinction.** A bare unmatched broker position with **no** matching abandoned intent of
+    ours still fails gate 11 exactly as today — this path narrows one specific, provenance-
+    backed case out of an otherwise-unchanged fail-closed gate, it does not weaken the gate
+    generally.
+  - **`N` therefore changes role: it is no longer "sessions until a human is needed."** It is
+    now "sessions we keep polling before switching from order-based to state-based
+    resolution" — see §14 item 2 for the value itself, still open.
+  - **Principle worth stating explicitly, since it should govern future decisions of this
+    shape too: halts are reserved for money-losing ambiguity, never for bookkeeping
+    ambiguity.** A non-terminal market order with no cancel path is a bookkeeping question
+    (what does our ledger say happened, and can we reconcile it against the broker's own
+    state) — not a question of whether real money is at risk in a way only a human can assess,
+    which is what a halt exists to gate.
 
 **Partial closes and partial fills — UPDATED 2026-09-06: partial close is now LIVE and
 designed-for, not an out-of-scope broker anomaly.**
@@ -780,15 +854,29 @@ book fills with more $50-origin lots over the strategy's life, the *same* dollar
 `sell_amount` will touch roughly 10 lots instead — an order-count (and therefore
 round-trip-count, and therefore latency) growth that is **structural**, not transient, and
 that **multiplies the still-unmeasured per-order latency** (§4.8/RUNBOOK §8(b)) as the book
-ages. **This document connects that risk to the open `max_orders_per_session` decision
-(§14, DESIGN.md §6.C, currently unset):** `max_orders_per_session` is the concrete mechanism
-that bounds how many close orders a single sell-to-target pass (§4.8) may place before the
-session must stop and accept whatever shortfall remains — mirroring how the iteration cap
-bounds *passes* while `max_orders_per_session` must independently bound *orders within and
-across passes*. **Both caps are needed; neither substitutes for the other.** No numeric value
-is proposed here (no operator statement exists to derive one from, and it depends on measured
-per-order latency this project does not have yet) — flagged as needing to be set with this
-growth pattern in mind, not sized only against today's ~2-3-lot typical case (§14).
+ages.
+
+**UPDATED, operator decision 2026-09-06: `max_orders_per_session` is retired, replaced by a
+latency-derived time gate — see DESIGN.md §6.C for the full reasoning.** An arbitrary order-count
+cap was the wrong mechanism: buying is already bounded by the sleeve-cash re-check (DESIGN.md
+§6.B), selling is already bounded by the core-floor check (`strategy/ladder.py:926-929`), and
+with both dollar totals capped, order *count* is implied by `sleeve_cash / min_order_size` — a
+second count cap added no safety. The only thing genuinely unbounded was **wall-clock time**
+inside the T-30 window, and a count is a poor proxy for time. The replacement — before each order,
+require `now + measured_p95_latency < hard_deadline`, else stop and accept the shortfall — is
+exactly the mechanism this section's scaling risk needed: it bounds *time* directly rather than
+bounding *count* and hoping count tracks time, so it self-adjusts as the book's growth (this
+section's own finding) changes how many orders a given `sell_amount` touches, without needing a
+human to re-tune a constant as that growth plays out. `tools/probe_order_latency_2026-09-11.py`'s
+`project_session_budget` function computes exactly this projection against the 2-3-lots-today /
+~10-lots-mature curve documented above. **DESIGN.md §6.C states plainly that this time gate is
+deliberately simple scaffolding — expected to be redesigned, not a settled architecture** — that
+caveat applies here too: this section's scaling risk is what the gate exists to answer, not
+something this document considers closed by the gate's current shape. A separate small integer
+circuit-breaker against a bug-driven absurd intent count may still exist, sized off `MAX_LOTS`,
+explicitly not a tuning knob (DESIGN.md §6.C). This retires the corresponding half of §14 item 5
+below — see that item for what remains open (`max_notional_per_session_usd`, `max_open_lots`, the
+daily loss guard, all untouched by this decision).
 ---
 
 ## 5. The session sequence
@@ -883,7 +971,7 @@ T-15min  Wake, foreground service starts, PARTIAL_WAKE_LOCK acquired (released i
    session and is never persisted"). DESIGN.md §3.1 was never updated to remove this step.
    This design's sequence above has **no** settle step, matching the newer, market-data
    document — DESIGN.md §3.1 is the party that is wrong here.
-2. **HANDOFF_2026-09-05_evening.md §6 item 13 says `engine/session.py`'s step [5] comment is
+2. **board nightwatch/handoff-2026-09-05-evening.md §6 item 13 says `engine/session.py`'s step [5] comment is
    stale against §3.1's actual sequence** — confirmed directly: `engine/session.py`'s own
    TODO comment (as it stands today) says `[5] strategy.cone.cone_5_z() over settled+
    provisional history`, but there is no "settled" history anymore (item 1 above) — the
@@ -1313,10 +1401,20 @@ project's audit-trail practice); one is decided differently than it was struck o
    partial-close amount, the shortfall arithmetic, the $10 check) uses current MARKET VALUE,
    never cost basis — a distinct question, raised by this document at old §16 item 8 and now
    resolved by the operator; see §4.3/§4.6.1/§16 item 8.
-2. **Non-terminal-order escalation threshold (§3.4).** How many consecutive trading
-   sessions may an order sit non-terminal before auto-halt fires? This document does not
-   propose a number — it depends on how much the operator trusts a "stuck" order to
-   eventually resolve on its own vs. needing manual intervention. Still open.
+2. ~~**Non-terminal-order escalation threshold (§3.4).** How many consecutive trading
+   sessions may an order sit non-terminal before auto-halt fires?~~ **REFRAMED, operator
+   decision 2026-09-06: `N` no longer escalates to a halt (§3.4) — halts are reserved for
+   money-losing ambiguity, never bookkeeping ambiguity, and there is no cancel path to make a
+   stuck market order actionable by a human anyway.** `N` is now "how many consecutive
+   sessions the design keeps polling an order before switching from order-based to
+   state-based resolution (mark it abandoned; resolve against observed position/cash; auto-
+   adopt a later fill that matches one of our own recorded abandoned intents, §3.4)." The
+   numeric value of `N` **itself remains open** — this document still does not propose one; it
+   depends on how quickly the operator wants the design to stop polling a rare non-terminal
+   market order and fall back to state-based resolution, not on how much manual intervention
+   they are willing to tolerate (there is none, by the decision above). ~~PROPOSED, PENDING
+   EXPLICIT CONFIRMATION: `N = 3`~~ **OPERATOR-DECIDED, 2026-09-06: `N = 3`** (not derived from
+   any measurement — an explicit operator choice, not a calibration).
 3. **Whether re-entry bucket `tranche_amount` should ever be corrected against real
    settled proceeds (§3.3).** This document accepts the estimate as a bounded, self-
    correcting approximation for a first version; confirm this is acceptable, or require the
@@ -1325,14 +1423,24 @@ project's audit-trail practice); one is decided differently than it was struck o
    migration bookkeeping or is a new dedicated table is left as an implementation detail;
    if the operator has a preference (e.g. "never add a new table without asking"), state it
    before phase 3 (§13) is built. Still open.
-5. **Session-level risk caps' actual numeric values** (`max_orders_per_session`,
+5. **Session-level risk caps' actual numeric values** (~~`max_orders_per_session`~~,
    `max_notional_per_session_usd`, `max_open_lots`, the daily loss guard threshold) —
    DESIGN.md §6.C lists these as config keys with no operator-set defaults recorded anywhere
-   this document found. Gate 12 (§6) cannot be built to a real threshold without them. **Still
-   open, and now higher-stakes than on 2026-09-05: `max_orders_per_session` specifically must
-   be set with §4.9's scaling risk in mind** — the same dollar `sell_amount` touches ~2-3 lots
-   against today's adopted book but will touch ~10 as the book fills with $50-origin lots, so
-   whatever value is chosen must not be sized only against today's typical case.
+   this document found. Gate 12 (§6) cannot be built to a real threshold without them. Still
+   open for the three remaining keys (`max_notional_per_session_usd`, `max_open_lots`, the daily
+   loss guard threshold — **untouched** by the item below).
+   **`max_orders_per_session` itself is RESOLVED, operator decision 2026-09-06 — no longer an
+   open numeric value to set.** An arbitrary count cap was the wrong mechanism (DESIGN.md §6.C
+   has the full reasoning: buying is already dollar-capped via the sleeve-cash re-check,
+   selling is already capped by the core-floor check, so count is implied by
+   `sleeve_cash / min_order_size` and added no safety); it is replaced by a latency-derived time
+   gate (`now + measured_p95_latency < hard_deadline`, else stop and accept the shortfall),
+   self-adjusting as §4.9's order-count-per-sell scaling risk plays out rather than needing a
+   human to periodically re-tune a constant. **DESIGN.md §6.C is explicit that this time gate is
+   deliberately simple scaffolding, expected to be redesigned at any time without ceremony — not
+   a settled architecture this document is closing the door on.** A separate small integer
+   circuit-breaker against a bug-driven absurd intent count may still exist, sized off
+   `MAX_LOTS`, explicitly not a tuning knob.
 6. ~~**Whether the two-phase session's added wall-clock cost (§3.2) is acceptable inside the
    T-30 margin**~~ **Still open, but no longer "unmeasured" after Friday 2026-09-11:** this
    document's earlier text noted the wait depends on how long phase-A closes take to reach
@@ -1345,12 +1453,14 @@ project's audit-trail practice); one is decided differently than it was struck o
    the T-30 margin, and whether §3.4's fallback (skip phase B, recycle next session) is an
    acceptable outcome for the "sometimes it doesn't fit" case — remains theirs to make once
    real numbers exist; this document does not presume the answer.
-7. **NEW, 2026-09-06: the sell-to-target loop's first-pass buffer percentage (§4.8).** This
+7. ~~**NEW, 2026-09-06: the sell-to-target loop's first-pass buffer percentage (§4.8).** This
    document proposes 1.0% (matching `provisional_close_deviation_pct`'s calibrated tolerance,
    the closest existing measured number, itself derived for a different purpose) but states
    plainly that it cannot derive the correct number defensibly — no measurement of
    "sell now for $X, does cash actually increase by $X" exists yet. The operator should either
-   confirm 1.0% or state a different number before phase 4 (§13) is built.
+   confirm 1.0% or state a different number before phase 4 (§13) is built.~~
+   **OPERATOR-DECIDED, 2026-09-06: 1.0%.** See §16 item 9 for why the asymmetry argument for
+   staying conservative strengthened once that item's ratchet claim was retracted.
 
 ---
 
@@ -1533,13 +1643,55 @@ Stated plainly, per this task's own instruction not to smooth these over.
    pass often, spending an extra unmeasured round-trip inside the T-30 window — a cost that
    is itself trending upward as the book fills with $50-origin lots and orders-per-session
    grows (§4.9), so a buffer that looks fine today could look undersized later without any
-   change to the buffer itself. Too large, and every session sells more SCHG than the target
-   strictly needs, quietly
+   change to the buffer itself. **This half stands, unchanged, and — per the retraction
+   immediately below — is now the dominant asymmetry.**
+
+   ~~Too large, and every session sells more SCHG than the target strictly needs, quietly
    eroding the core floor's headroom session after session in a way the pre-submission check
    (§4.6.1) does not catch, because that check only refuses a *single* close that would breach
    the floor outright — it has no memory of "this session's buffer sold slightly more than
-   necessary, again." This document proposes 1.0% (§4.8, §14 item 7) as a starting point, not
-   a validated number, precisely because this trade-off has not been measured either way.
+   necessary, again."~~ **RETRACTED, 2026-09-06 — checked directly against the ladder's own
+   arithmetic and found factually wrong; there is no cumulative ratchet.**
+   `strategy/ladder.py:926-929` already nets the sell-to-target amount against whatever cash is
+   already on hand, and skips the sell outright once cash covers `cash_target`:
+
+   ```python
+   if normal_ladder_buy and inputs.cash < cash_target:
+       need = cash_target - inputs.cash
+       available = max(0.0, inputs.schg_position_value - config.core_floor_pct * inputs.equity)
+       sell_amount = _floor_cents(min(need, available))
+   ```
+
+   A session that oversold by, say, $0.51 leaves the next session's `inputs.cash` exactly $0.51
+   above `cash_target`; `need` (and therefore `sell_amount`) is smaller by exactly that $0.51 the
+   next time this branch fires — total SCHG sold across sessions is unchanged, not eroded further
+   session after session. Once accumulated overshoot reaches `order_size` (≥ `min_order_size`,
+   $50), it instead **funds a buy outright** the next time a new-ATH bar occurs, via the
+   "cash to core" buy-back path: the `new_ath_bar` branch (`strategy/ladder.py:909-917`) computes
+   `available = inputs.cash - cash_target - tier1_reserve` and, when positive, spends it through
+   `_schg_buy_intents` (`strategy/ladder.py:769`, `reason="cash to core"`). **Overshoot is a
+   float, not a ratchet.** Verified by tracing both branches directly against the module, not
+   assumed.
+
+   The actual residual costs of a too-large buffer are real but different, and much smaller, than
+   what this item originally claimed: (a) SCHG is sold marginally earlier than strictly
+   necessary, so marginally out of the market for longer; and (b) **on a new-ATH bar**, excess
+   cash above `cash_target` (net of the tier-1 reserve) round-trips SCHG → cash → SCHG through the
+   same cash-to-core buy-back path (`strategy/ladder.py:769`, reached from `:909-917`), at the
+   cost of the bid/ask spread on each leg — not a growing erosion of the core floor's headroom.
+   This document proposes 1.0% (§4.8, §14 item 7) as a starting point, not a validated number,
+   precisely because this trade-off has not been measured either way — and the asymmetry argument
+   for keeping the buffer on the conservative side is, if anything, **stronger** now that the
+   ratchet is retracted: overshoot is nearly free, while undershoot (the surviving half of this
+   item, above) still costs a round-trip inside the T-30 window. Per-session telemetry logging
+   `(actual_cash_delta - target) / target` (§11) is accordingly a nice-to-have for eventual
+   calibration, not a safeguard against an ongoing erosion this document no longer believes
+   exists.
+
+   **OPERATOR-ENDORSED, 2026-09-06: this retraction.** The buffer value itself (1.0%, §4.8/§14
+   item 7) is now **OPERATOR-DECIDED, 2026-09-06** rather than merely proposed — the asymmetry
+   argument for staying conservative strengthened once this retraction landed, since overshoot is
+   now nearly free while undershoot still costs a round-trip inside the T-30 window.
 10. **NEW, 2026-09-06 — genuinely risky, stated plainly: this design's viability now rests on
     two numbers nobody has measured yet, at the same time.** Partial close's actual latency
     and the number of orders a growing book will require per session (§4.9) both feed directly
@@ -1547,10 +1699,21 @@ Stated plainly, per this task's own instruction not to smooth these over.
     2026-09-11 is this project's only near-term chance to measure the first of the two (order
     latency, including a partial close specifically per this update — RUNBOOK §8(b)) before
     going live. The second (orders-per-session growth as the book matures) cannot be measured
-    at all until the book itself has grown — meaning `max_orders_per_session` (§14 item 5) will
-    necessarily be set from a guess today and may need revisiting once the book's composition
-    shifts meaningfully toward $50-origin lots. This document does not consider this
-    disqualifying, but does consider it worth stating without softening: the design is sound
+    at all until the book itself has grown. **UPDATED, operator decision 2026-09-06: this no
+    longer means a guessed integer needs setting and revisiting** — `max_orders_per_session` is
+    retired (§14 item 5, DESIGN.md §6.C) in favor of a latency-derived time gate
+    (`now + measured_p95_latency < hard_deadline`) that self-adjusts as orders-per-session grows,
+    rather than a fixed count that would need re-tuning by hand as this section's own growth
+    curve plays out. That gate still depends on the first of the two unmeasured numbers (Friday's
+    order-latency measurement) to have a `p95_latency` to project with; it does not need the
+    second (today's actual orders-per-session count) to be *set* correctly in advance, because it
+    reasons about time directly rather than inferring time from a count. **DESIGN.md §6.C is
+    explicit that this replacement is deliberately simple scaffolding, not a settled design** —
+    stated here so this item does not read as fully resolved by the replacement; it narrows the
+    risk from "a guessed constant may be wrong" to "the scaffolding's own shape may need to
+    change," which this document does not consider the same risk, but does not consider zero
+    either. This document does not consider either version disqualifying, but does consider it
+    worth stating without softening: the design is sound
     on paper and degrades gracefully on paper (§3.2, §4.8 point 2/3), but "degrades gracefully"
     has itself never been exercised against a real broker, and Friday is the first, not the
     last, opportunity to find out whether the paper reasoning survives contact with actual

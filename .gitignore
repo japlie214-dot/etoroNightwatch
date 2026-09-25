@@ -61,3 +61,14 @@ android-probe-deps/
 # --- pulled live payloads: real account data, never commit ---
 pulled_probe_output/
 _device_config_tmp/
+
+# Transient pytest tmpdir/cache debris (see board nightwatch/project.md housekeeping)
+tmp*/
+pytest-cache-files-*/
+.pytest-basetemp-*/
+.pytest-run-*/
+.pytest-wrap-*/
+.p1-test-tmp/
+.tp-probe-tests-*/
+.codex-agent-test-tmp/
+CLAUDE.md

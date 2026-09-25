@@ -5,7 +5,7 @@ sketch in `DESIGN.md` §2 and §10 (`replay.py`, `fake_broker.py`) — that dire
 exist on disk yet (checked 2026-09-05: `forward_test/` has no files), so nothing is being
 deleted, only redirected before it is ever written.
 **Written:** 2026-09-05, per the operator's verbatim request (quoted below) superseding
-`HANDOFF_2026-09-05_evening.md` §6 item 7's narrower "forward-test harness and fake broker."
+`board nightwatch/handoff-2026-09-05-evening.md` §6 item 7's narrower "forward-test harness and fake broker."
 **Concurrent work, not touched by this doc:** an agent is editing `market/window.py`,
 `market/adopt.py`, `config.py`, `db/repo.py` at the time of writing. Everything below cites
 those modules' *documented contracts* (function names, docstrings, DESIGN_market_data.md),
@@ -167,7 +167,7 @@ class Strategy(Protocol):
                                                       # or is called with {} on a cold start
 ```
 
-**Why state is carried this way.** `HANDOFF_2026-09-05_evening.md` §1.4 documents a real bug
+**Why state is carried this way.** `board nightwatch/handoff-2026-09-05-evening.md` §1.4 documents a real bug
 class: a strategy instantiated fresh each day whose internal counter (`self._bars`) resets to
 1 and never recovers — the "warmup trap." The sandbox's runner (§8) deliberately **never
 holds a live strategy object across simulated days.** Each simulated session constructs a new
@@ -206,7 +206,7 @@ from 2006, but only starts trading in 2010.**
 
 **Why, precisely.** A backtest that both starts its *data* and starts *trading* in 2010 would
 see SPY's first bar at ≈$110 and treat that as the all-time high. The true 2007 peak was
-≈$157 and was not regained until roughly March 2013 (`HANDOFF_2026-09-05_evening.md` §3's
+≈$157 and was not regained until roughly March 2013 (`board nightwatch/handoff-2026-09-05-evening.md` §3's
 "Known limit of the measurement"). Such a run reports ≈0% drawdown through the entire
 2010–2013 recovery and never exercises tiers 1–5 during exactly the period the deep tiers
 exist for — a correctness trap indistinguishable, from the run's own output, from a
@@ -220,7 +220,7 @@ derived quantity any plugged-in strategy needs is fully converged** — not mere
 accurate as it would be with unlimited history. As of 2026-09-05 this can no longer be stated as
 a single bar count, because the live app's own ATH stopped being a fixed-width rolling window
 (the 819-bar/39-month window was superseded the same day it was decided —
-`HANDOFF_2026-09-05_evening.md` §3, §7) and became "the max raw close since
+`board nightwatch/handoff-2026-09-05-evening.md` §3, §7) and became "the max raw close since
 `market/window.py`'s `FULL_HISTORY_START_DATE`" — unbounded, not a window. `StrategyUniverse`
 (§2) now states two different kinds of convergence explicitly, rather than collapsing them into
 one integer:
@@ -236,7 +236,7 @@ one integer:
   simulated period. The ladder declares `required_data_start_date = "2006-01-01"`, matching the
   sandbox's own 2006 floor (four years ahead of the 2010 trading start) — chosen because it
   captures the true 2007 peak (≈$157, not regained until ≈March 2013,
-  `HANDOFF_2026-09-05_evening.md` §3's "known limit of the measurement") that a feed starting
+  `board nightwatch/handoff-2026-09-05-evening.md` §3's "known limit of the measurement") that a feed starting
   only in 2010 would miss entirely. This is the *same* accepted, stated limit the live app
   itself still carries (its 2010 floor misses 2008-2009 and earlier, `HANDOFF §7`) — the
   sandbox's 2006 start is a documented *improvement* on live's fidelity for this one signal, not
@@ -305,7 +305,7 @@ open positions in the live account, not a sample):
   charge: `|fees|` correlates with `investment × holding_days` at Pearson r = **0.9918**,
   vs. r = 0.9157 for `investment` alone and r = -0.0611 for `holding_days` alone (§2).
 - **SCHG: 0.320%/yr**, measured (`open $40,867.17`, `totalFees -$59.17`, §3). This is
-  `HANDOFF_2026-09-05_evening.md` §6 item 11's "modelled nowhere" cost — the sandbox is where
+  `board nightwatch/handoff-2026-09-05-evening.md` §6 item 11's "modelled nowhere" cost — the sandbox is where
   it first gets modelled.
 - Not dividends, not an account-level charge, not a function of leverage (all fee-bearing
   rows are `leverage=1`; the 2 leveraged/short rows carry $0.00 fees) — §2.
@@ -614,7 +614,7 @@ window plus today's provisional close into a `SpyContext` (ath/close/drawdown/ti
 specified it would have to **recompute** ATH/drawdown/tier itself from raw `price_history` —
 a second implementation of the exact arithmetic that produced this project's two live `window.py`
 bugs this week (the 276-bar-not-all-time ATH, and the `adjClose`-vs-raw-`close` basis mixup,
-`HANDOFF_2026-09-05_evening.md` §3-§4). That is unacceptable for a reason specific to this
+`board nightwatch/handoff-2026-09-05-evening.md` §3-§4). That is unacceptable for a reason specific to this
 project, not a generic "don't repeat yourself": a second implementation would let the sandbox
 validate the ladder against **its own copy** of the ATH/drawdown/tier logic rather than against
 the code that actually trades real money, and any divergence between the two would surface as

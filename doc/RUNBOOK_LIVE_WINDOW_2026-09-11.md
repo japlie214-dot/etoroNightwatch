@@ -2,11 +2,11 @@
 
 **Read this whole document before plugging the phone in.** Friday 2026-09-11 is the operator's
 only upcoming window with the z10 plugged in during live US market hours before this all slips
-another week (HANDOFF_2026-09-05.md's brief). Everything in this runbook drives one script,
+another week (board nightwatch/handoff-2026-09-05.md's brief). Everything in this runbook drives one script,
 [`tools/probe_live_2026-09-11.py`](../tools/probe_live_2026-09-11.py), which batches every open
 question that needs a live weekday and/or on-device Chaquopy execution into a single run.
 
-The dev PC cannot reach eToro at all (Kominfo DNS sinkhole, HANDOFF.md §2). **Nothing in sections
+The dev PC cannot reach eToro at all (Kominfo DNS sinkhole, board nightwatch/handoff.md §2). **Nothing in sections
 B through E1 can be run, checked, or debugged from a desktop machine.** Only section A (pure
 imports) and the script's own syntax have been verified off-device — see §7 below for exactly
 what that means and does not mean.
@@ -35,7 +35,7 @@ E2 is **off by default** and is not part of the default run. Read §5 before eve
 2. Confirm `config/config.toml` on the device points at the environment you intend
    (`etoro.environment = "real"` for the real account — this probe reads whatever the device's
    own config says; it does not force an environment).
-3. Have the phone's USB Private DNS fix active (HANDOFF.md §2/§7.4b) so the z10 itself can reach
+3. Have the phone's USB Private DNS fix active (board nightwatch/handoff.md §2/§7.4b) so the z10 itself can reach
    `public-api.etoro.com` — the dev PC's block does not apply to the phone once that fix is on.
 4. Decide **now**, before running anything, whether section E2 is authorized this session. If you
    are not sure, the answer is no — it can always run in a later session.
@@ -48,13 +48,13 @@ This script needs to run somewhere `app/src/main/python/nightwatch` is importabl
 the real app's Chaquopy environment on the phone, not a separate throwaway harness, so that the
 client code it audits is the actual shipped code, not a stale copy (`android-probe-deps/`'s
 `nightwatch/` copy is known stale as of this writing — missing `market/adopt.py`,
-`market/source.py`, and several client.py fixes — see HANDOFF_2026-09-05.md; do not run this probe
+`market/source.py`, and several client.py fixes — see board nightwatch/handoff-2026-09-05.md; do not run this probe
 against that copy without first re-syncing it from `app/src/main/python/nightwatch`).
 
 Two ways to invoke it, in order of preference:
 
 **A. Directly, if the z10 has a Python entry point that already has network + credential access**
-(the same mechanism prior live probes used — HANDOFF_2026-09-04_market_data.md §8's "credential
+(the same mechanism prior live probes used — board nightwatch/handoff-2026-09-04-market-data.md §8's "credential
 handling pattern," or an adb shell into the app's own Chaquopy process):
 
 ```
@@ -305,6 +305,60 @@ timestamped to wall-clock time:**
 7. **Clean up:** confirm no DEMO position or pending order is left open at the end of the
    measurement (the final close in the last repeat should leave the book flat) — this is a
    measurement exercise, not a standing position.
+
+**Implemented, 2026-09-06 (same day, later): `tools/probe_order_latency_2026-09-11.py`.**
+Steps 1–7 above are now a runnable script, not just a hand sequence — written after
+`etoro/client.py::close_position` gained its `units_to_deduct` parameter this session (so this
+harness calls the real, widened `close_position` for the partial-close leg; it does **not**
+hand-build the request the way step 4b originally specified, since that workaround is no longer
+necessary — `close_position(request_id, position_id, instrument_id, units_to_deduct=...)` now
+does it through the shipped client, and the harness's own summary output says so explicitly).
+The script's pure timing/statistics/projection logic lives in
+`nightwatch.probes.order_latency` (unit-tested, `tests/test_probes_order_latency.py`, broker
+mocked via `httpx.MockTransport` — no network in that test, per this project's established
+`tests/test_etoro_client.py` idiom); the script itself does the actual DEMO-account I/O and is
+not importable by the desktop test suite (mirrors `tools/probe_live_2026-09-11.py`'s own split).
+
+**Before running it:** confirm `config/config.toml`'s `etoro.environment` reads `"demo"` — the
+script also probes this itself and refuses loudly (see below) if it cannot positively confirm
+demo, but do not rely on the script alone; check it by hand first, the same as every other item
+in this runbook.
+
+**The exact command to run on the phone Friday, from the repo root (or wherever
+`app/src/main/python/nightwatch` is importable, same convention as §3 above):**
+
+```
+python tools/probe_order_latency_2026-09-11.py --output-dir <writable-dir-on-device>
+```
+
+Defaults: `--repeats 4` (within step 5's 3-5 guidance), `--order-amount-usd 50.0` (eToro's own
+live-verified SCHG minimum), `--partial-fraction 0.5` (close roughly half of the second
+position, per step 4b), `--poll-interval 2.0` / `--poll-timeout 90.0` seconds per leg,
+`--orders-low 2 --orders-high 3` (today's typical lots/sell, `DESIGN_session.md` §4.9) and
+`--orders-mature 10` (the projected count once the book matures, same section). Override any of
+these if Friday's conditions call for it — e.g. `--repeats 3` if the market window is tighter
+than expected, or `--section poll-timeout` raised if DEMO responses are slow that day.
+
+**Safety, built into the script itself, not just this doc:**
+- **Fail-closed demo check, before any order.** The script reads
+  `config/config.toml`'s `etoro.environment`, the derived credential label, and a live
+  `/balances` probe, and refuses — printing every check performed — unless all of them
+  *positively* say `"demo"`. An inconclusive probe is refused exactly like a detected
+  mismatch (`nightwatch.probes.order_latency.evaluate_demo_confirmation`); it does not rely on
+  preflight gate 7 (`engine/preflight.py`), which remains an unimplemented stub.
+- **Prints exactly what it is about to do** (instrument, amount or units, position id) before
+  every buy/close it places.
+- **Nothing left dangling.** Every position the script opens is tracked until its closing order
+  is confirmed `Filled`; anything still open when the script ends — success, an exception, or an
+  interrupt — is reported both on the console and in a dedicated `left_open_positions.json`
+  output file, and the script's own exit code is nonzero in that case.
+
+**What to send back after running it:** the full console output; every file under
+`--output-dir` (per-leg raw traces, `leg_statistics.json`, `t30_projections.json`, and the
+timestamped `_summary.txt`, the same "send the files, don't summarize them" rule as §4 above);
+and, specifically, whether the summary's T-30 projection line says the design fits at today's
+~2-3-lot count and/or at the ~10-lot mature-book count — that verdict is the entire point of
+this measurement (`DESIGN.md` §1.1).
 
 ### 8(c). REMOVED, 2026-09-06 — the operator has answered this question directly
 

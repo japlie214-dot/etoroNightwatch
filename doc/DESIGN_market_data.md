@@ -2,7 +2,7 @@
 
 **Status:** design agreed; gate 10 items 1 and 3 built 2026-09-05 (§6), the rest not yet built.
 Written 2026-09-04, substantially rewritten/extended 2026-09-05 (§4.7, §10.9–§10.13 in
-particular — see HANDOFF_2026-09-05.md).
+particular — see board nightwatch/handoff-2026-09-05.md).
 **Supersedes:** DESIGN.md §3 (`bars` table), §4.2 (the live-bar problem / `is_provisional`),
 §6.G (bad-data safety), and specifies gates 9–10 of §5.
 **Resolves:** the two High risks tracked in DESIGN.md §12 (unchecked rate staleness;
@@ -255,7 +255,7 @@ Rejected alternatives:
 | `www.etoro.com` | `202.137.1.74` (same sinkhole) | — |
 | `query1.finance.yahoo.com` | correct | correct |
 
-The Private DNS fix (HANDOFF.md §2, DESIGN.md §7.4b) is applied on the **z10 only**. The
+The Private DNS fix (board nightwatch/handoff.md §2, DESIGN.md §7.4b) is applied on the **z10 only**. The
 development PC still resolves every eToro hostname to the sinkhole, and it presents as a bare
 12-second TCP timeout with no diagnostic hint.
 
@@ -886,7 +886,7 @@ the entire account cash balance is intended to be tradable by the strategy.** Me
 as of 2026-09-05: `broker_available_cash = $1,264.59` (§10.11). Under exclusion, any deposit above
 the reserve is immediately tradable with no explicit act (DESIGN.md §4.4) — the operator manages
 exposure by raising the reserve **before** a deposit lands, per §4.4 above, not by pinning
-`cash_reserve_usd` above zero as a standing posture. HANDOFF_2026-09-05.md §6, §7 item 6, and §8
+`cash_reserve_usd` above zero as a standing posture. board nightwatch/handoff-2026-09-05.md §6, §7 item 6, and §8
 previously listed this as a go-live blocker; it is removed from that list as of this decision.
 
 ---
@@ -1179,7 +1179,7 @@ distribution, not carried over from the current 20%/60% guesses.
 applications of it, recorded 2026-09-05:
 
 **(a) `provisional_close_deviation_pct` — calibrated.** See `config.MarketDataConfig`'s own
-docstring and `HANDOFF_2026-09-05_evening.md` §4 / `FINDINGS_window_live_2026-09-05.md` §3: 272
+docstring and `board nightwatch/handoff-2026-09-05-evening.md` §4 / `FINDINGS_window_live_2026-09-05.md` §3: 272
 common Tiingo-raw-vs-eToro dates, mean |dev| 0.128%, max 0.640%; set to 1.0% (0.010).
 `max_rate_age_minutes` and `rate_vs_candle_deviation_pct` remain provisional, pending the
 still-unbuilt forward test (§12 step 7).
@@ -1200,7 +1200,7 @@ This project fetches 3 symbols once/day: nowhere close to the request or symbol 
 binding constraint, if there is one, is bandwidth — so this is the number that matters for sizing
 the fetch window, and it had never been written down before this correction.
 
-**Measured payload sizes** (`HANDOFF_2026-09-05_evening.md` §3):
+**Measured payload sizes** (`board nightwatch/handoff-2026-09-05-evening.md` §3):
 
 | bars | span | payload |
 |---|---|---|
@@ -1278,7 +1278,7 @@ from a real portfolio previously carried `current_price=None`, `invested=None`,
 `unrealized_pnl=None`, and `symbol=None` — `position_id`, `units`, `entry_price`, `leverage`,
 `is_buy`, and `open_date` populated correctly, since those map to fields that do exist.
 
-**Fixed 2026-09-05** (HANDOFF_2026-09-05.md §1, §4 — found the day before, fixed the next
+**Fixed 2026-09-05** (board nightwatch/handoff-2026-09-05.md §1, §4 — found the day before, fixed the next
 session). The four nonexistent-field reads are dropped; symbol resolution is keyed through
 `instrumentID` → `instruments` instead (§4.2). `_parse_position` now raises
 `EtoroValidationError` on a missing `positionID`/`instrumentID`/`units`/`openRate`/`amount` rather
@@ -1287,7 +1287,7 @@ than silently defaulting. Confirmed against the current source, not assumed from
 **Why this stayed invisible until now:** a demo account holding zero positions exercises
 `_parse_position()` zero times — there is nothing to parse, so a wrong field mapping cannot
 produce a wrong value, and no test comparing "expected vs. actual" ever ran. This is the same
-"check that passes because nothing happened" pattern DESIGN.md §12 and HANDOFF.md §7 warn about:
+"check that passes because nothing happened" pattern DESIGN.md §12 and board nightwatch/handoff.md §7 warn about:
 the bug was not fixed by any amount of demo-account testing, only by reading a genuinely populated
 live payload.
 
@@ -1338,7 +1338,7 @@ consequence.
 the eToro side** — not merely decided, but done. This satisfies this subsection's own ordering
 constraint below (the DCA must stop before the backfill runs) and **unblocks the §4.7 adoption
 migration**. The migration itself has still **never been run** against the live account — that
-remains open, tracked in HANDOFF_2026-09-05.md §6/§7 item 1.
+remains open, tracked in board nightwatch/handoff-2026-09-05.md §6/§7 item 1.
 
 Raised from §10.9's first answer: the operator's manual recurring DCA on SCHG is an eToro-side
 standing instruction independent of this app, and every fill it produces would be an open position
@@ -1625,7 +1625,7 @@ reader has one place to check a payload shape against rather than trusting a par
 
 Distinct from every prior instance of this defect class (§10.7 `_parse_position`, `get_balance`,
 §10.13 `_parse_trade_history_entry`'s field names, and the truthiness bug in
-HANDOFF_2026-09-05.md §4) — this one is about the **envelope**, not a field name inside it.
+board nightwatch/handoff-2026-09-05.md §4) — this one is about the **envelope**, not a field name inside it.
 `get_trade_history` assumed the response body was `{"items": [...]}"` and read
 `data.get("items", data if isinstance(data, list) else [])`. **The live body is a bare list**
 (§10.17), and the fallback in that expression was dead code: `data.get` is evaluated before its own
@@ -1636,7 +1636,7 @@ raising `EtoroValidationError` on a shape that is neither — see `etoro/client.
 `get_trade_history`, the comment at the `isinstance` branch.
 
 **The pattern is now five instances in this family, not four** — see the updated tally in
-HANDOFF_2026-09-05.md §4. **The meta-lesson, specific to this fifth instance:** every pre-existing
+board nightwatch/handoff-2026-09-05.md §4. **The meta-lesson, specific to this fifth instance:** every pre-existing
 test wrapped fixture rows in `{"items": [...]}"` before this fix, so the test suite encoded the
 same wrong envelope assumption the production code made, rather than independently checking it —
 a fixture that agrees with a bug is not a check on the bug.
@@ -1644,12 +1644,12 @@ a fixture that agrees with a bug is not a check on the bug.
 ### 10.19 Section D re-measure, and the ATH-inclusivity judgment call — RESOLVED 2026-09-05
 
 **Section D of the 2026-09-05 device probe re-confirms §10.11 exactly**: SCHG $44,866.97, UPRO
-$4,046.98, `sleeve_equity` $50,178.53, 202 + 7 managed positions. HANDOFF_2026-09-05.md §11's "the
+$4,046.98, `sleeve_equity` $50,178.53, 202 + 7 managed positions. board nightwatch/handoff-2026-09-05.md §11's "the
 migration should be re-measured immediately before the write" ask is satisfied by this re-measure,
 with the caveat carried forward that it should be run **once more** immediately before the
 migration's write, since a live account can move between any two reads.
 
-**The ATH-inclusivity judgment call (HANDOFF_2026-09-05.md §8) is resolved in favour of
+**The ATH-inclusivity judgment call (board nightwatch/handoff-2026-09-05.md §8) is resolved in favour of
 inclusive.** §4.7 never specified whether SPY's all-time-high "as of" a date includes that date's
 own close; `market/adopt.py`'s `build_spy_context_index` chose inclusive (its own docstring:
 "the ATH as of a given date is the maximum `adjClose` over every bar up to and INCLUDING that
@@ -1681,7 +1681,7 @@ signed drawdown fraction to a tier index and takes no position on how `ath`/`dra
 are computed, so it neither confirms nor contradicts the inclusive convention — it is consistent
 with either choice, and does not need to change.
 
-This question moves from open to **closed, resolved as inclusive**, in HANDOFF_2026-09-05.md §8.
+This question moves from open to **closed, resolved as inclusive**, in board nightwatch/handoff-2026-09-05.md §8.
 
 ---
 

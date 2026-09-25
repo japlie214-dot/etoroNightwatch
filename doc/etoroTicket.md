@@ -1,6 +1,6 @@
 > **DRAFT — for operator review before sending to eToro support.** Content below is assembled from
 > internal engineering documentation (`DESIGN_market_data.md` §2.9, §2.11, §10.6 and
-> `HANDOFF_2026-09-04_market_data.md` §4). All timestamps, values, and identifiers are quoted
+> `board nightwatch/handoff-2026-09-04-market-data.md` §4). All timestamps, values, and identifiers are quoted
 > verbatim from those sources; anything the operator must supply is marked with a placeholder.
 > Please fill in the placeholders and confirm the account/contact details before sending.
 

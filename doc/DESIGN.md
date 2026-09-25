@@ -1,7 +1,8 @@
 # etoroNightwatch — Live eToro Trading & Portfolio App
 
-**Status:** design, pending approval. Nothing built yet.
-**Date:** 2026-09-02
+**Status:** Canonical target architecture. Implementation is partial; `board nightwatch/project.md` (Control Room board, outside this repo) is the
+current completion record and execution priority list.
+**Last reconciled:** 2026-09-18.
 **Host:** vivo iQOO Z10, Android 16 / OriginOS 6, Snapdragon 7 Gen 3 (arm64-v8a only), 12 GB RAM,
 Jakarta (UTC+7). Native Android app with an
 embedded CPython runtime via **Chaquopy**. Often on battery, not permanently charged. Doubles
@@ -20,12 +21,22 @@ The phone is woken by **three independent paths** — an on-device `setAlarmCloc
 cloud-scheduled FCM high-priority push, and a manual command — converging on **one idempotent
 session** (§7.2).
 
+**Implementation snapshot (2026-09-18).** The repository already contains the Python eToro
+client, typed models/contracts, market-data clients and window assembly, strategy, SQLite
+repository/migrations, adoption and reconciliation helpers, notification/web modules, and
+Android probe tooling. The production critical path is incomplete: there is no wired
+`run_preflight()` or `run_session()`, the executor and native Android scheduler/service are not
+production-ready, and unattended demo acceptance is still a release gate. The tree and behavior
+below describe the target, not a claim that every module is already running on the phone. The
+base schema/repository still expose legacy `bars` persistence even though the target below uses
+fetch-derive-discard; removing that legacy storage and wiring the new session remain incomplete.
+
 ---
 
 ## 1. Ground truth established before design
 
-Three research passes produced the facts this design rests on. Where a fact contradicts the
-original brief it is called out.
+Research and live probes established the facts this design rests on. Detailed measurements and
+their provenance remain in the linked design addenda; this section records the current decisions.
 
 ### 1.1 eToro API (verified against https://api-portal.etoro.com)
 
@@ -35,22 +46,40 @@ original brief it is called out.
 | **Demo vs Real is chosen by URL path**, not a flag (`/execution/orders` vs `/execution/demo/orders`). A key is bound to one environment at creation. | Environment and credentials must switch together, atomically. One config value drives both. |
 | **There is no SELL order.** `action` supports only `open`; `transaction` only `buy`/`sellShort`. Reducing a holding = closing a specific `positionId`. | Maps cleanly onto the ladder: one lot = one eToro position. |
 | Opens are **USD-denominated** (`amount`); closes are **unit-denominated** (`UnitsToDeduct`, `null` = full close). | Lot bookkeeping must bridge the asymmetry. We always full-close a lot, so `UnitsToDeduct: null`. |
-| **HTTP 200 means accepted, not filled.** Must poll `GET /api/v2/trading/info/orders:lookup`. Status 3=Filled, 4=Rejected, 5=PartiallyFilled, **11=WaitingForMarket**. | Every order needs a poll-to-terminal loop and a persisted reference id for crash recovery. |
+| **HTTP 200 means accepted, not filled.** Current lookup is `GET /api/v2/trading/info/orders:lookup`. Status 3=Filled, 4=Rejected, 5=PartiallyFilled, **11=WaitingForMarket**. | Every order needs a poll-to-terminal loop and a persisted reference id for crash recovery. |
 | Minimum trade size is **per-instrument**, from `POST /api/v2/trading/info/eligibility` (`minPositionExposure` top-level; `minPositionAmount` **per `leverageConfigs` entry**, keyed by `(settlementType, direction)` — this app reads the `real`/`long` one). Not a constant. **Verified live 2026-09-04, corrected 2026-09-05**: the 2026-09-04 read reported `minPositionExposure=50.0` for SCHG; a fuller 2026-09-05 live eligibility payload (see DESIGN_market_data.md §10.14, §0.1) shows this was wrong — **both UPRO and SCHG carry `minPositionExposure=10.0`**, real/long `minPositionAmount=10.0` for each, `allowOpenPosition: true` for both, `maxUnitsPerOrder` 28,321 SCHG / 13,421 UPRO. The response's top-level key is `eligibilities` (not `eligibility`, which the code wrongly used until 2026-09-04 and got zero rows back from every real call), and the partial-close flag is `allowPartialClosePosition` (not `allowPartialClose`). **`min_order_size` in `config/config.toml` stays `50` regardless of this correction — that value is a deliberate operator decision, not a broker-floor tracking figure (DESIGN_market_data.md §10.14); do not lower it to 10.** | Query at preflight. Never hardcode $10. |
 | Rate limits per user key, 1-min window: reads 60/min, writes 20/min, market-data 120/min, eligibility 20/min dedicated. | Ample for a session. Throttle the webapp during the trading window. |
 | Candles: `GET /api/v1/market-data/instruments/{id}/history/candles/{dir}/{interval}/{count}`, `OneDay`, up to 1000. **Verified live 2026-09-04**: this path-segment shape is correct (the query-parameter shape found in eToro's own docs, `GET /market-data/instruments/history/candles?instrumentId=…`, 404s live and does not exist) — but `{dir}` must be `asc`/`desc`, not `backward`/`forward` as this table previously said (that also 404s). `limit=1000` genuinely returns 1000 rows; the response nests candles as `{"candles":[{"instrumentId":…,"candles":[{...OHLCV rows...}]}]}`. | Our history source. Self-contained — no Snowflake dependency. |
-| Live prices: `GET /api/v1/market-data/instruments/rates?instrumentIds=…` → `bid`/`ask`/`lastExecution`. **No market-open flag.** **Verified live 2026-09-04**: this path and these three field names were already correct. The instrument-id field in each row is `instrumentID` (lowercase `i`, capitalised `ID`) — a third casing distinct from `instrumentId`/`InstrumentID`, which the code checked for until this date and so silently matched zero rows despite the HTTP call succeeding. The quote timestamp field is `date`, not `timestamp`/`dateTime`. | Source of today's provisional close. Market-open comes from our own calendar. |
+| Live prices: `GET /api/v1/market-data/instruments/rates?instrumentIds=…` → `bid`/`ask`/`lastExecution`. **No market-open flag.** **Verified live 2026-09-04**: this path and these three field names were already correct. The instrument-id field in each row is `instrumentID` (lowercase `i`, capitalised `ID`) — a third casing distinct from `instrumentId`/`InstrumentID`, which the code checked for until this date and so silently matched zero rows despite the HTTP call succeeding. The quote timestamp field is `date`, not `timestamp`/`dateTime`. | Fresh quote input and cross-check for the session window. Market-open comes from our own calendar. |
 | Instrument ids are **immutable**. Resolve via `GET /api/v1/market-data/search?internalSymbolFull=UPRO` — **not** `market-data/instruments/search` as this table previously said (404s, `RouteNotFound`). **Verified live 2026-09-04**: UPRO→3244, SCHG→1084, SPY→3000. The response's top-level key is `items` (not `instruments`), and display fields are `internal`-prefixed (`internalInstrumentDisplayName`, `internalExchangeName`) rather than the unprefixed names this table previously assumed. A bare `internalSymbolFull=SPY` query is **not** an exact match — it also returns `SPY.RTH`, `SPY4.DE`, `SPY5.L`, `SPYD`, etc, so the exact-symbol row must be picked out of the page, not assumed to be first. No `currency`/`instrumentCurrency` field was returned under any name tried. | Resolve once via `market-data/search?internalSymbolFull=UPRO`, cache forever. |
 | `GET /api/v1/market-data/instruments?instrumentIds=…` (bulk instrument metadata). **Verified live 2026-09-04**: the response's top-level key is `instrumentDisplayDatas`, not `instruments` as this table previously assumed — the wrong key silently returned an empty list on every real call. | Bulk metadata lookups must read the right key or get nothing, silently. |
 | `POST /api/v2/trading/info/{demo/}costs` requires a `transaction` field in the body (`"buy"`/`"sell"`/`"sellShort"`/`"buyToCover"`, case-insensitive) — without it eToro 400s. **Verified live 2026-09-04.** | Always send `transaction: TRANSACTION` (the module's own hardcoded `"buy"` constant) alongside `instrumentId`/`amount`/`leverage`. |
-| `GET /trading/info/{demo/}portfolio` and `GET /trading/info/{demo/}pnl` both return 200 for the demo credential and **nest their payload under a `clientPortfolio` object** (`{"clientPortfolio": {"positions": [...], "unrealizedPnL": ..., "credit": ..., ...}}`), not at the response's top level as previously coded. **Verified live 2026-09-04**, but only against a zero-position demo account, so the bug was invisible before this correction (both the old top-level read and the fix return `[]` when there are no positions) — not yet confirmed against a *non-empty* portfolio. | A "didn't error" empty-list result is not proof the parsing is right; re-verify once a demo position actually exists. |
+| `GET /trading/info/{demo/}portfolio` and `GET /trading/info/{demo/}pnl` nest their payload under `clientPortfolio` (for example, `{"clientPortfolio":{"positions":[...]}}`). This shape was verified against a non-empty demo portfolio on 2026-09-18; the exact test position was read and later the independent book read returned zero after its close. | Keep parsing the envelope explicitly; a zero-position read alone is not sufficient evidence. |
 | `GET /api/v1/balances` has **no** demo/real path segment at all — same URL for both environments; which account it reads is decided entirely by which credential pair authenticates. `POST /api/v2/trading/info/{demo/}eligibility` and `.../{demo/}costs`, and `GET /api/v2/trading/info/{demo/}orders:lookup`, all take the segment **between** `info/` and the final path component. `GET /api/v1/trading/info/trade/{demo/}history` takes it **between** `trade/` and `history`, not before `trade`. `POST /api/v2/trading/execution/{demo/}orders` and the market-close-orders path take it right after `execution/`. Market-data endpoints (`search`, `instruments`, `instruments/rates`, `instruments/{id}/history/candles/...`) take **no** demo/real segment at all — market data is account-agnostic. **All verified live 2026-09-04.** | Every trading/info and execution path needs its segment placement checked individually, per-family — there is no single consistent rule across the whole API surface. |
+
+**Order-lookup observation, 2026-09-18.** The v2 demo lookup returned 404 for a recently filled open order; an exact-ID GET to eToro's deprecated v1 route returned the legacy `statusID`/`positions` body. The client now has a demo-only, read-only fallback and a parser for that shape. V2 remains the preferred API. T5 has not yet completed on the updated APK, so this workaround is not treated as production acceptance.
+
 
 **Unverified — must be proven in demo before going live:**
 
-1. No documented rule about rejecting orders near the close. Our T-30min timing is *probably* fine — and is now further from the close than the T-10min the design originally carried, so if anything this unknown is *less* pressing than it was. Still the **highest-risk unknown.**
+1. Whether demo opens and closes complete reliably close to the market close is still unmeasured. T5 has observed open/close status well before the close but has not completed the full cycle or tested the near-close boundary.
 2. Whether UPRO is tradable on your eToro entity (`allowOpenPosition` from eligibility is authoritative — leveraged ETFs are region-restricted).
-3. Whether partial close is permitted for these instruments (we don't need it, but preflight checks it).
+3. Partial-close permission and latency still need a complete demo measurement; the session design requires partial closes for its primary sell-to-target path.
+
+### Development-time API discovery (eToro MCP)
+
+The official [eToro hosted MCP](https://builders.etoro.com/tools/mcp) is a development-time
+reference for the live OpenAPI surface. Its Streamable HTTP endpoint exposes `get-all-routes`
+and `get-route-spec` to discover route and schema details. Use it when checking or updating this
+client; the Android app continues to call eToro through the typed `EtoroClient`, whose parsing,
+environment checks, rate limiting, and single-attempt writes are part of the safety boundary.
+The hosted MCP is not an order-execution dependency in the scheduled runtime.
+
+The community [orkblutt/etoro-mcp](https://github.com/orkblutt/etoro-mcp) demonstrates a broader
+set of MCP wrappers, including market data, trading, portfolio, watchlists, and discovery. It is
+a reference for tool coverage and ergonomics only. Its implementation is not copied or made a
+runtime dependency unless its license, code, credential handling, and trading safety have first
+been reviewed. Nightwatch does not need the social, watchlist, or investor-discovery tools.
 
 ### 1.2 The host: why an Android app, and why not the alternatives
 
@@ -320,7 +349,8 @@ Tier caps (cumulative fraction of budget, by SPY drawdown from ATH):
 
 ## 2. Layout
 
-A single Gradle project. The Kotlin module owns scheduling, permissions and lifecycle; the
+The following is the **target layout**, not a present-tense inventory. A single Gradle project is
+intended: the Kotlin module owns scheduling, permissions and lifecycle; the
 Chaquopy Python source set owns everything else, with the same module names the Windows design
 used, so the logic is portable and testable off-device.
 
@@ -391,11 +421,11 @@ development, unit tests and the forward test. Only `host.py` differs in what cal
 
 ## 3. Data model (SQLite, WAL)
 
-> **Superseded in part by [`DESIGN_market_data.md`](DESIGN_market_data.md)** (2026-09-04): the `bars` table is **dropped**. The phone stores no price series; history is fetched fresh each session and discarded. `corporate_actions` and `price_window_fingerprints` are added. Every other table below is unaffected.
+> **Target schema, per [`DESIGN_market_data.md`](DESIGN_market_data.md):** no price series is stored; history is fetched fresh each session and discarded. The current base schema/repository still retain legacy `bars` storage; its removal is outstanding. The new `corporate_actions` and `price_window_fingerprints` tables are additive and do not remove that legacy table.
 
 | Table | Purpose |
 |---|---|
-| `bars` | `(symbol, date, o,h,l,c,v, is_provisional, source)` PK `(symbol,date)`. **`is_provisional` is the key column** — see §4.2 |
+| `bars` (legacy; not target) | Still present in `db/schema.sql` and `Repo` methods. The target fetches the price window for a session and discards it; a migration to remove this legacy table and its unused persistence path is still required. See `DESIGN_market_data.md`. |
 | `instruments` | ticker → `instrument_id`, cached metadata, last eligibility snapshot |
 | `sessions` | one row per trading date: state machine, preflight verdict, timings, outcome. **Unique on `trading_date`** — cannot double-run a day |
 | `preflight_checks` | per-check result rows — full audit of why a run aborted |
@@ -408,6 +438,8 @@ development, unit tests and the forward test. Only `host.py` differs in what cal
 | `schg_daily_values` | `(date, value)` — feeds next year's budget |
 | `budget_history` | `(year, budget, order_size, cash_target, source: auto\|override)` |
 | `portfolio_snapshots` | per-session **account-level** totals (all-asset equity, total cash, `broker_available_cash`) **and sleeve** totals (`cash_reserve_usd`, `sleeve_cash`, `sleeve_equity`, sleeve unrealized/realized P&L, §4.5), plus per-position rows for every broker position with an `is_managed` flag — non-managed holdings are recorded for display only (§1.4, §9). This is also the row pushed to the Cloudflare Worker (§9) |
+| `price_window_fingerprints` | Per-session SHA-256 and window provenance for fetched price history; stores no price series. |
+| `corporate_actions` | Split/dividend tripwire metadata; not a historical price series or an automatic lot adjustment. |
 | `notifications` | Telegram send log with delivery status |
 | `commands` | inbound control audit: command text, `channel` (`fcm`\|`telegram`), sender/chat id, HMAC counter (replay rejection), verdict (accepted/rejected + reason), timestamp — an inbound control channel must be auditable |
 
@@ -418,43 +450,40 @@ development, unit tests and the forward test. Only `host.py` differs in what cal
 ### 4.1 Sequence
 
 ```
-T-15min  setAlarmClock() fires → SessionAlarmReceiver → SessionService (foreground)
-         Acquire PARTIAL_WAKE_LOCK (released in finally, §7.6)
+T-30     Calendar alarm wakes the app; foreground session acquires a partial wake lock.
          ↓
-  [1]    PREFLIGHT — 12 gates, all must pass (§5)
-         ↓  abort → Telegram with reason, hold the wake lock, no return to Doze
-  [2]    SETTLE — overwrite yesterday's provisional bar with the official close (§4.2)
+         PREFLIGHT — run implemented safety gates; missing critical checks fail closed.
          ↓
-  [3]    SLEEP until exactly T-30min (uses the real close, incl. 13:00 ET half-days)
+         FETCH one coherent SPY/SCHG/UPRO history window and current quotes; derive strategy
+         inputs in memory. Persist provenance/fingerprints, not the price series.
          ↓
-  [4]    FETCH live SPY/SCHG/UPRO rates → today's provisional bar
+PHASE A  Read broker cash/positions, build sleeve inputs, call decide(), and execute only
+         close intents. Persist each intent before its single write attempt; poll each order
+         to terminal. The sell-to-target path reads actual broker cash between passes.
          ↓
-  [5]    COMPUTE cone_5_z over 265+ bars ending on today's provisional close
+         Re-read cash and positions from the broker. Never add estimated sale proceeds.
          ↓
-  [6]    DECIDE — strategy.decide() → OrderIntents  (persisted to `decisions`; every cash/
-         equity input is the sleeve, never the account, §4.5)
+PHASE B  Rebuild inputs from observed broker state, call decide() again, discard phase A's
+         stale buy intents, then execute refreshed intents within the measured time budget.
          ↓
-  [7]    ARM GATE — mode==live AND NIGHTWATCH_ARM set AND no HALT flag
-         ↓  else → log + Telegram "would have done X", stop cleanly
-  [8]    EXECUTE — per intent: persist request-id → POST → poll to terminal status
-         ↓
-  [9]    PERSIST fills, update lots/buckets/state, snapshot portfolio
-         ↓
-  [10]   TELEGRAM report (or the daily heartbeat if there was nothing to do)
-         ↓
-  [11]   RESCHEDULE next run (before releasing — a crash here must not orphan the alarm)
-         ↓
-  [12]   Release wake lock, stop the foreground service, let the device return to Doze
+         Reconcile and persist observed fills, lots, buckets, state, and portfolio snapshot.
+         Send the result/heartbeat, schedule the next session, release the wake lock.
 ```
 
-**On the margin.** The Windows design fired at **T-30min** solely to absorb ~8 minutes of S4
-hibernate-resume latency. **That reason is gone** — `setAlarmClock()` fires on time and the
-device is already running. We keep a **5-minute margin** at T-15min, and it buys exactly two
-things: Wi-Fi re-association after Doze, and preflight. Nothing else. Step [3] sleeps out the
-residual so the order still lands at T-30min.
+`DESIGN_session.md` is canonical for two-phase ordering and crash/timeout semantics. This is the
+target architecture; the production session and scheduler are not yet wired. The exact-close
+deadline is resolved from the market calendar, including half-days.
 
-### 4.2 The live-bar problem — and why `is_provisional` exists
+### 4.2 Historical live-bar proposal (superseded)
 
+> **Current target:** fetch the adjusted history window fresh, derive strategy inputs in memory,
+> and discard the series after the session. Do not persist an `is_provisional` bar or run a
+> next-session settle step. `DESIGN_market_data.md` supersedes this historical proposal. The
+> legacy `bars` schema/API still exists in code and must not be mistaken for the target or used as
+> the production session's source of truth.
+>
+> The following rationale is retained as design history only.
+>
 > **§4.2a — Which T-30 decisions may trust a provisional close, and which may not.**
 > **Decided 2026-09-05 with the operator, from measurement, not preference.** A decision taken at
 > T-30 rests on a *provisional* close that the official close can contradict. The rule is that
@@ -689,7 +718,7 @@ reachable for diagnosis in the morning.
 | 7 | **Environment match** | Config says `real` but the key is demo-bound (or vice versa) — probed, not trusted |
 | 8 | **Instruments** | UPRO/SCHG/SPY unresolvable; `allowOpenPosition` false; `minPositionExposure` > `order_size` |
 | 9 | **Calendar** | Not a US trading day; also resolves early-close (13:00 ET) days so T-30min is correct |
-| 10 | **Price data** | ⚠️ **STALE — superseded by DESIGN_market_data.md §6.** This row still describes the settled/provisional bar architecture, which that document deletes entirely (no `bars` table, no `is_provisional`, no settle step — §3.2). Gate 10 as actually built (`engine/preflight.py`, 2026-09-05) checks freshness of the provisional close and rate/candle agreement per symbol; window completeness, corporate actions and signal sanity are specified there but not yet built. Read §6 of that document, not this cell. |
+| 10 | **Price-data integrity** | **Partial implementation; not wired.** `engine/preflight.py` implements freshness/cross-check and sanity helpers. `market/window.py` assembles and validates a fresh history window, but window-completeness, corporate-action and signal-sanity checks are not all gate-wired; `run_preflight()` is absent. See `DESIGN_market_data.md` for the target; observed UPRO quote staleness is recorded in T4. |
 | 11 | **Reconciliation** | An **unknown broker position in a managed symbol** (UPRO/SCHG we did not open) → hard failure. A **DB lot with no matching broker position** → hard failure (closed outside the app; needs reconciliation and a notification, never a silent re-buy). A position in **any non-managed symbol** is ignored for trading and recorded for display only — never a failure (§1.4, §6.D) |
 | 12 | **Risk caps** | Session order count or notional exceeds configured caps; daily loss guard tripped |
 
@@ -716,10 +745,11 @@ market closed showed SCHG's `lastExecution` timestamped to the *prior* session's
 SPY's was current pre-market — two managed-set instruments, same moment, different staleness,
 proving a stale rate is a real state this app will see. Tracked as a risk in §12.
 
-Gate 10 also has no answer yet for a **bar-history gap** (a missing trading day in the middle of
-the 260-bar window, not just a stale tip) — see the bad-tick guard note in §6.G and the tracked
-risk in §12; `market/bars.py::missing_trading_days()` already exists as the diagnostic a future
-gate would call.
+**Remaining data-integrity work.** `market.window.validate_window_completeness` can validate a
+fresh window against expected sessions, but the result is not wired into an automatic preflight
+because `run_preflight()` is still absent. Corporate-action checks and signal sanity also remain
+unfinished. Do not treat the legacy `bars` table or its missing-day helper as the production
+source of truth; see `DESIGN_market_data.md` and §6.G.
 
 **Gate 9 has an unhandled failure mode above it, not within it.** `market/calendar.py` runs
 `EASTERN = ZoneInfo("America/New_York")` at module import time, before gate 9 or any other gate
@@ -778,10 +808,53 @@ kinds are listed together below, grouped by what they protect against.
 
 | Config key | Purpose |
 |---|---|
-| `max_orders_per_session` | Independent backstop on how much can happen in one run. |
-| `max_notional_per_session_usd` | Independent backstop in dollar terms. |
-| `max_open_lots` | Independent backstop; the strategy's own `MAX_LOTS = 60` (§1.4) is a strategy-level bound — this is a second, separate one. |
-| daily loss guard | If sleeve P&L for the day is worse than a configured threshold, halt and notify (feeds preflight gate 12 and auto-halt, §6.I). |
+| ~~`max_orders_per_session`~~ **REPLACED, operator decision 2026-09-06** — see below. | ~~Independent backstop on how much can happen in one run.~~ |
+| `max_notional_per_session_usd` | Independent backstop in dollar terms. **Untouched by the 2026-09-06 decision below.** |
+| `max_open_lots` | Independent backstop; the strategy's own `MAX_LOTS = 60` (§1.4) is a strategy-level bound — this is a second, separate one. **Untouched by the 2026-09-06 decision below.** |
+| daily loss guard | If sleeve P&L for the day is worse than a configured threshold, halt and notify (feeds preflight gate 12 and auto-halt, §6.I). **Untouched by the 2026-09-06 decision below.** |
+
+**OPERATOR-ENDORSED, 2026-09-06: an arbitrary integer order-count cap is the wrong mechanism, and
+`max_orders_per_session` is replaced by a latency-derived time gate.** Reasoning, recorded so it
+is not re-litigated:
+
+- Runaway **buying** is already bounded, non-arbitrarily, by "the sum of all intent amounts in one
+  session must not exceed `sleeve_cash` minus the tier-1 reserve," re-checked immediately before
+  every submission (§6.B above) — an order count adds nothing on top of a dollar cap already
+  re-verified per order.
+- Runaway **selling** is already bounded by `sell_amount = min(need, schg_position_value -
+  core_floor_pct * equity)` (`strategy/ladder.py:926-929`) — the core floor, not an order count,
+  is what stops a sell from going too far.
+- Since every order is `>= min_order_size` ($50) and total session dollars are already capped by
+  the two mechanisms above, the order **count** is *implied* by `sleeve_cash / min_order_size` —
+  a second, independent integer cap on count adds no safety a dollar cap does not already provide.
+- The one thing left genuinely unbounded is **wall-clock time** inside the T-30 window
+  (§4.9/DESIGN_session.md §4.9's scaling risk: the same dollar `sell_amount` touches ~2-3 lots
+  today and ~10 as the book matures, so order count — and therefore round-trip time — grows
+  structurally over the book's life) — and an order **count** is a poor proxy for **time**, since
+  the same count costs very different wall-clock time depending on measured per-order latency.
+
+**Replacement:** before each order, require `now + measured_p95_latency < hard_deadline`; if it
+does not fit, stop placing further orders for the session and accept the shortfall — the same
+fail-soft degradation the sell-to-target loop (DESIGN_session.md §4.8) already accepts when its
+own iteration cap or minimum-top-up floor is hit. `hard_deadline` derives from the market
+calendar (T-30 minus a safety margin); `p95_latency` derives from Friday 2026-09-11's measurement
+(`tools/probe_order_latency_2026-09-11.py`, whose `project_session_budget` function already
+computes exactly this per-order-latency-times-order-count projection against DESIGN_session.md
+§4.9's 2-3-lots-today / ~10-lots-mature growth curve). This self-adjusts as the book grows — the
+scaling risk DESIGN_session.md §4.9 raises stops needing a human to periodically re-tune a
+constant. Implementation lands in `app/src/main/python/nightwatch/engine/order_budget.py`.
+
+> **This time gate is deliberately SIMPLE SCAFFOLDING, put in place so the session can be built
+> and so Friday's latency measurement has somewhere to land. It is expected to be redesigned, and
+> may be redesigned at any time without ceremony. It is not a settled architecture, and nothing
+> should be built to depend on its exact shape.**
+
+A separate, small integer **may** remain as a pure circuit breaker against a **bug** producing an
+absurd intent count — sized off `MAX_LOTS` (§1.4), explicitly **not** a tuning knob and not a
+revival of `max_orders_per_session` under a new name. The other three rows in this table
+(`max_notional_per_session_usd`, `max_open_lots`, the daily loss guard) are **untouched** by this
+decision — this change is narrower than "the blast-radius caps were reconsidered," and should not
+be read as such.
 
 **Not yet in this table, but should be.** `MAX_TICK_DEVIATION_PCT`, `LEVERAGED_TICK_DEVIATION_PCT`,
 `MIN_PLAUSIBLE_PRICE`, `LEVERAGED_SYMBOLS`, and `STALE_REFERENCE_TRADING_DAYS` (§6.G) are
@@ -861,8 +934,9 @@ against a real, multi-asset account.
   same as every other preflight failure. Tracked as a risk in §12.
 - Sanity-bound the signal itself: an implausible `|cone_5_z|` (say, > 10) **aborts** rather than
   trades on it.
-- Refuse to trade with fewer than 265 settled SPY bars (§1.4), or with any unsettled provisional
-  bar still in the window (§4.2, preflight gate 10).
+- Refuse to trade if the fetched history window has fewer than 265 valid SPY sessions or does not
+  match the expected session calendar (§1.4, preflight gate 10). This is an in-memory window check;
+  the target has no settled/provisional-bar storage lifecycle.
 
 ### H. Order-verification safety
 
@@ -877,6 +951,35 @@ against a real, multi-asset account.
   looking the order up by `referenceId`, never by re-sending — the difference between a lost
   response and a double buy.
 - The documented write rate limit (20/min, §1.1) is respected with a token bucket.
+- **Broker-side take-profit — an unexamined blank in the order path (found 2026-09-11).** The
+  open-order body (§4.3) sends exactly eight keys, none of them take-profit or stop-loss
+  related. That was never a decision; it was a blank. The broker fills it in: its eligibility
+  payload declares `defaultTakeProfitPercentage: 1000.0` (a +1000%, i.e. 11x, take-profit) for
+  the exact instrument/leverage config Nightwatch orders SCHG into
+  (`pulled_probe_output/20260905T102514Z_section_c_eligibility_raw.json`, instrumentId 1084),
+  and the live account confirms it applies: of 230 open positions, **229 carry
+  `takeProfitRate / openRate == 11.00`** and all 230 carry `isNoStopLoss: true`
+  (`data/probe_2026-09-11/adopt_fetch/adopt_portfolio_raw.json`). One position
+  (`positionID 3550406905`) carries `takeProfitRate: 0.0` with `isNoTakeProfit: true`, proving
+  "no take-profit" is representable in the same payload shape, and that the boolean — not the
+  rate — is the authoritative signal.
+- **Consequence if one ever fires.** A broker-side close is a close this app did not author, so
+  no abandoned close intent exists to match it. `engine/reconcile.py` would report
+  `unmatched_open_lot`, gate 11 would halt fail-closed, and the auto-resolve path (§3.4 of
+  DESIGN_session.md) would *not* clear it — that path only matches this app's own persisted
+  intents. The failure mode is therefore **safe but opaque**: a correct halt with a misleading
+  reason.
+- **Detection is built; suppression is not.** `Position` now parses `takeProfitRate` /
+  `isNoTakeProfit` (and the stop-loss pair) from the payload it already retained, and
+  `engine/preflight.find_broker_take_profits` reports every affected position. It is
+  deliberately **not** wired into gate 11: gate 11 is fail-closed and 229 of 230 live positions
+  carry a take-profit today, so that wiring would halt every session over a currently normal
+  condition. Gate 12 (risk caps, §5) is its intended caller once that gate exists.
+- **Open, pending a live API probe:** whether the take-profit can be suppressed at order time
+  at all. The eligibility payload says `allowEditTakeProfit: true` with
+  `minTakeProfitPercentage: 0.0`, which suggests it is editable, but the request field name is
+  unknown. This is deliberately left unresolved rather than guessed: a wrong field name yields
+  either a 400 or — far worse — a silently ignored field that looks like a fix. Tracked in §12.
 
 ### I. Kill switches and auto-halt
 
@@ -1319,7 +1422,7 @@ through:
   the unlocked phone; and the embedded FastAPI dashboard (§9.5), which is LAN-only.
 - **Forbidden, explicitly:** the Cloudflare Pages remote web app (§9.1–§9.4), the Worker's
   `/command` route (§8.3), and Telegram (§8.2). None of these gets a manual-trade capability,
-  ever. §6.E and §8.2 rule 4 (`doc/HANDOFF.md` §7) are the reason: §8.3 makes broad remote
+  ever. §6.E and §8.2 rule 4 (`board nightwatch/handoff.md` §7) are the reason: §8.3 makes broad remote
   operability a design principle precisely because the phone lives away from the user most of the
   time, and that is in deliberate tension with "arming, config writes, and anything that can move
   money stay local-only" — the design calls that tension out rather than silently resolving it,
@@ -1375,7 +1478,7 @@ minimums, and injectable failures (timeout after submit, rejection, partial fill
 1. A multi-year run over real SPY/SCHG/UPRO daily history completes with no unhandled exception.
 2. Strategy decisions match `etoro_trader`'s replay for the same inputs, **allowing for the four approved bug fixes** — every divergence traced to a specific fix, none unexplained.
 3. Deferred re-entry actually fires: buckets created, tranches filled 1/3→3/3, expiries logged. This is the proof that fix #1 works.
-4. The provisional→settled bar transition is exercised across a full year and the settled series matches the official candles exactly.
+4. The session fetches and validates one coherent adjusted history window, records only its fingerprint/provenance, and writes no price series to SQLite.
 5. Crash recovery: kill the process between "order submitted" and "response received", restart, and confirm exactly one order exists — recovered by `referenceId`, not re-sent.
 6. Every preflight gate is triggered at least once by fault injection and aborts cleanly.
 7. Budget rolls across a calendar year boundary, including the empty-prior-year fallback.
@@ -1385,35 +1488,28 @@ minimums, and injectable failures (timeout after submit, rejection, partial fill
 
 ---
 
-## 11. Build order
+## 11. Current completion gates
 
-**No eToro credential is required until step 5, and no real-money credential until step 12.**
-The order below is deliberately re-sequenced from a strict dependency order to front-load the
-questions with the cheapest, most reversible answers: prove the free infrastructure works with
-nothing but a laptop and a bot token, *then* decide whether the Android platform risk (§1.2,
-§12) and the eToro integration are worth building against. See `doc/RUNBOOK_INFRA.md` for the
-step-by-step console/CLI instructions behind steps 0–2.
+The former numbered build plan described uninstalled Android tooling and an unbuilt API client;
+it is retired. `board nightwatch/project.md` is the maintained execution queue and is ordered by current
+priority. This table records the target and the current implementation boundary as of
+2026-09-18.
 
-| # | Step | Gate |
+| Priority | Work | Current state |
 |---|---|---|
-| 0 | **Telegram smoke test.** Create the bot, obtain a chat id, send one message end to end (`RUNBOOK_INFRA.md` Part C). No credential beyond a bot token — proves the one outbound channel that has no dependency on the phone, the Worker, or eToro (§8.1). | |
-| 1 | **Firebase project + Cloudflare Worker.** Mint a Google OAuth token from the service-account JSON, then call FCM HTTP v1 and get back either a message id or a "no such registration token" error — the latter is a **pass**, since no device is registered yet (`RUNBOOK_INFRA.md` Parts A, B, D). **Proves free-tier viability with no phone and no eToro keys.** | **GATE — the question asked first** |
-| 2 | Cloudflare Pages web app (static assets + server-side Pages Function proxy, §9.1) reading a **stub** snapshot from the Worker (hand-written JSON, not a real portfolio). Proves the read path — Pages Function → Worker → KV → browser, with the read token enforced server-side and never exposed to the browser — end to end before any real data exists. Requires Cloudflare Access in front of the deployment (`RUNBOOK_INFRA.md` Part F) since the proxy is otherwise a public, unauthenticated endpoint. | |
-| 3 | **Android tooling install** — JDK + Android SDK + `adb`. Currently absent from this machine (§12) and explicitly a prerequisite, not assumed; deferred to here so it is only installed once step 1 has proven the cloud side is worth building against. | |
-| 4 | Minimal APK: FCM receive + `setAlarmClock()`, nothing else — the same shape as the old gate-zero `WakeProof.ps1` from the Windows design, now proving the Android platform instead of Task Scheduler. Grant `SCHEDULE_EXACT_ALARM` and the battery-optimization exemption, apply the OriginOS checklist (§7.4), disable the OriginOS "Pause app activity if unused" toggle and the stock unused-app permission removal (§1.2). Before this step is called done, also run a **throwaway Chaquopy test build against `compileSdk`/`targetSdk 36`** (§1.2) — a prerequisite check, separate from the alarm proof, that the toolchain itself works on this Android 16 device before any real app code is built on top of it. | **GATE — the multi-night on-battery proof.** Fires on time *and* has network, unplugged, screen off, untouched, for **3+ hours**, on **several consecutive nights**, including once across a reboot. Additionally confirm `RemoteMessage.getPriority()` still reports `PRIORITY_HIGH` after a week of pushes (§8.2 demotion canary) — this is the check that catches Google's 7-day silent-send demotion before it ever costs a live session. |
-| 5 | eToro client: auth, rate limiting, retries, all read endpoints, typed models. **First step that needs any eToro key at all**, and only the **demo** pair. | Against **demo** |
-| 6 | Market calendar + bar store + seeding (400 daily bars) + provisional/settle | |
-| 7 | Strategy port with the four approved bug fixes (§1.4); unit tests against `etoro_trader` fixtures | |
-| 8 | Forward-test harness + fake broker; acceptance criteria 1–8 (§10, desktop CPython) | **Gate** |
-| 9 | Session engine: preflight (§5), executor, idempotency, reconciliation, sleeve accounting (§4.5) | |
-| 10 | Full app integration: Telegram inbound with escalation-only hourly poll and the allowlist (§8.2), snapshot push to the Worker, the web app now reading live data instead of the step-2 stub; embedded FastAPI demoted to LAN-only debug view (§9.5) | |
-| 11 | Demo end-to-end **on the phone, on battery**: scheduled wake → real demo orders → back to Doze, several consecutive sessions. **Acceptance criterion, not just a smoke test:** at least one session in this run must occur while the demo account genuinely holds a non-empty position, and `get_portfolio()`'s `clientPortfolio` envelope handling (§1.1, §12) must be confirmed correct against it — a run where every session sees 0 positions does not close this step, per the "check that passes because nothing happened" rule (`doc/HANDOFF.md` §7 rule 1). The manual trade controls (§9.7) are the intended way to get a real position onto the demo account for this without waiting on the strategy's own signal to fire. | **Gate** |
-| 12 | Go live: real keys, `NIGHTWATCH_ARM`, a generous `cash_reserve_usd` so only a small sleeve is initially exposed, watch closely | Your call |
+| T1–T4 | Restore and verify the device, establish a flat demo baseline, build the probe, and measure market-data freshness | Complete for the 2026-09-18 window. The UPRO quote-age issue persists; see `board nightwatch/project.md`. |
+| T5 | Measure demo open, full-close, and partial-close lifecycles; verify the book flat afterward | Incomplete. The 2026-09-18 open and dedicated close status were observed, but the full controlled cycle including partial close has not run on the updated parser build. |
+| T7 | Capture rejected/pending/partial order, portfolio, and exact/fuzzy search payloads on demo | Not run. Missing shapes must remain marked unobserved if the API does not produce them. |
+| T6 | One $10 real SCHG take-profit probe | Explicitly authorized once earlier, not run. Run once only after the demo probes and real-config verification; never replay an uncertain write. |
+| P1–P3 | Finish parser evidence, commit reviewed changes, then back up/migrate/adopt the account book | P1 has contract types/checks and sanitized fixtures but awaits remaining live payload evidence; P2 and P3 remain open and must stay in that order. |
+| C1–C6 | API contract representation, fixtures, checking, per-call severity, alert dedup, mutation tests | Implemented in the current tree; focused client/contract tests pass. Continue validation against T7 evidence. |
+| B1–B4 | Preflight, two-phase session, lot executor, measured latency budget | Incomplete. Gate 10/11 helpers exist; `run_preflight()`, `engine/session.py`, full executor behavior, and the measured p95 wiring remain outstanding. |
+| Release | Scheduled on-device demo acceptance on battery, followed by any real operation | Not accepted. Multi-night wake/network behavior and a complete non-empty scheduled session remain release gates. |
 
-**Do not build steps 3–12 on an unproven platform.** If the minimal APK (step 4) cannot reliably
-fire with network on battery on this specific handset, no amount of application code fixes it —
-that gate is unchanged from the original design, only its number and its position relative to
-the cloud-infrastructure proof have moved.
+The target system remains the one described by this document and `DESIGN_session.md` /
+`DESIGN_market_data.md`; this status table prevents the target from being mistaken for shipped
+behavior. The remaining operator-owned risk values are not inferred here: `max_open_lots`, the
+session notional cap, and the daily-loss threshold or explicit disable decision.
 
 ---
 
@@ -1424,22 +1520,23 @@ an undocumented vendor OS, running on battery rather than mains, with money at s
 once-a-day window that cannot be retried. That was an explicit, informed decision. It is
 recorded here as a standing risk, not re-argued.
 
-> **Superseded in part by [`DESIGN_market_data.md`](DESIGN_market_data.md)** (2026-09-04): the two **High** risks below concerning live-rate staleness and undetected bar-history gaps are addressed there (gate 10, §6). The gap risk is **dissolved** rather than mitigated — re-derivation makes a gap inexpressible — so its 're-seed from official candles' mitigation no longer applies as written.
+> **Current status (2026-09-18):** quote staleness remains an observed issue; legacy `bars` persistence is still in the schema; window/session checks are not fully wired. The target architecture in `DESIGN_market_data.md` is not proof that those changes have shipped.
 
 | Risk | Severity | Mitigation |
 |---|---|---|
-| **Chaquopy / API 36 compatibility is unverified.** Chaquopy 17.0.0 supports AGP 7.3-9.2 (which structurally covers `compileSdk 36`), but no release note or changelog entry confirms Android 16 / API 36 has been tested. An embedded-CPython failure would invalidate the core premise that the Python strategy ports over largely unchanged. | Medium | Ship `compileSdk 36` / `targetSdk 35` so an unverified toolchain dependency is not coupled to a target bump. A throwaway Chaquopy test build against `compileSdk`/`targetSdk 36` is an explicit prerequisite in §11 step 4. Fallback if it fails: stay on `compileSdk 35`. |
-| **vivo's undocumented background killing on battery** — dontkillmyapp rates vivo 3/5 and states restrictions *"have not been fully uncovered yet"*, and that coverage is Funtouch-only, not updated for the device's actual OriginOS 6; developers report alarms failing on vivo hardware even with every known Funtouch-era setting applied, and no verified reports exist either way for OriginOS 6 | **High** | §11 step 4 multi-night proof on battery before anything else; all five OriginOS settings (§7.4); foreground service for the run; daily Telegram heartbeat so a silent kill is detected the same morning. **There is no way to make this risk go away — only to detect it fast.** |
+| **Android toolchain compatibility and unattended operation are different gates.** Chaquopy successfully built into and ran in the Android 16 probe app; the current debug build passes. AGP 8.9.0 warns that compileSdk 36 is newer than its tested level (35). | Medium | Keep targetSdk 35; resolve the AGP/compileSdk warning before release, and retain multi-night on-battery acceptance as a separate release gate. |
+| **vivo/OriginOS 6 may kill or delay background work on battery.** Existing probe runs do not establish unattended, multi-night reliability. | **High** | Verify the OriginOS settings in §7.4 and pass the multi-night scheduled wake/network proof in §11 before treating the Android host as production-ready. |
 | **Battery-optimization exemption revoked** (by an OS update, a "battery saver" sweep, App Hibernation, or the user) — silently removes network in the Rare/Restricted buckets | **High** | Preflight gate 2 checks it every run and fails loudly with the exact Settings path. Detected within one session. |
 | **App Hibernation force-stops the app and strips its permissions** after months of the user never opening it — the trigger is lack of *user interaction*, not lack of background activity, and this app is deliberately never opened by design (§1.2). OriginOS layers its own "Pause app activity if unused" toggle on top. Whether a successful unattended run counts as qualifying "usage" on stock AOSP is undocumented, and is certainly undocumented for the OriginOS toggle | **High** | Disable both the OriginOS toggle and the stock unused-app permission removal at setup (§7.4). Preflight gate 2 already checks both affected permissions every session and will detect revocation — **detection, not prevention**; the daily heartbeat surfaces it the same morning. |
 | **OS upgrade resets power-management settings** — the Z10 is early in its support life and *will* take major upgrades | **High** | Runbook: re-verify all five OriginOS settings **and re-run a one-night proof** after every OS update. Host panel shows the last-verified date. |
 | **`SCHEDULE_EXACT_ALARM` revoked** — *"your app stops, and all future exact alarms are canceled"* | **High** | `ACTION_SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED` receiver + `canScheduleExactAlarms()` in preflight gate 2. Never silently downgrade to an inexact alarm. |
-| **Orders near the close may behave differently than documented** | **High** | Step 11 on demo settles it; status 11 handled either way. |
-| **Live-rate staleness check is unimplemented** — `Rate.timestamp` (the live `date` field, §1.1) exists but `market/bars.py` never reads it, deferred twice pending preflight (§5 gate 10 note, §6.G). A live probe with the market closed caught SCHG timestamped to the prior session's close while SPY's was current — the same moment, two managed-set instruments, different staleness: a real condition, not a hypothetical one. | **High** | **Concrete gate spec.** Preflight gate 10 rejects a rate whose `date` timestamp is older than a configured limit while the market is open, using the same "now" reference the calendar gate (§5 gate 9) already establishes. On failure it takes the standard gate-failure path (§5): abort before any order, hold the wake lock, alert over Telegram (§8) naming the stale symbol and its age — never a silent skip or a fallback to a cached price. Additionally, persist the rate's own `date` on the bar row (`is_provisional` bars, §4.2) alongside the value it produced, so staleness is auditable from the DB after the fact rather than only inferable from logs at the moment it happened. Build before step 9 is considered done. |
-| **A bar-history gap is currently caught only by a stretched tolerance, not detected as a gap** — `market/bars.py`'s bad-tick guard (§6.G) widens multiplicatively with elapsed sessions, capped at 10x base (200% SPY/SCHG, 600% UPRO), past which only an order-of-magnitude error still trips it. `missing_trading_days()` exists as the diagnostic but nothing calls it to halt+reseed. | **High** | **Concrete gate spec.** Preflight gate 10 calls the existing `missing_trading_days()` over the required-history window (§1.4's ≥265-bar SPY requirement); any gap halts the session, alerts over Telegram (§8) the same as every other gate failure (an `ERROR` log alone is not sufficient — the phone lives away from the user), and **re-seeds from official candles** before trading resumes — the candles endpoint serves up to 1000 daily bars per request (§1.1, live-verified 2026-09-04), so a full re-seed is cheap and authoritative, not a partial patch. **Follow-up tied to this gate, not immediate:** once gap detection and re-seed exist, the bad-tick guard's multiplicative tolerance stretching (§6.G) exists only to survive gaps that this gate will now catch directly — its 10x cap should be revisited and tightened at that point. A widened band that no longer needs to be wide is just a weaker guard; do not tighten it before the gate lands, or gaps go undetected in the interim. |
-| **`get_portfolio()`'s `clientPortfolio` envelope handling is unverified against a genuinely non-empty portfolio** — every live probe so far ran against a demo account with 0 positions, which passes regardless of whether the envelope is unwrapped correctly. Step 9's reconciliation (§5 gate 11) treats an unmatched managed-symbol position as a hard preflight failure, so a wrong envelope read there is not a cosmetic bug. | Medium | **Scheduled, not floating — operator decision 2026-09-04.** Verification is deliberately postponed rather than manufactured: no synthetic position is opened early just to exercise the parser. It is now a named acceptance criterion of §11 step 11 ("demo end-to-end on the phone") — see the step 11 row below — because step 11 is the first point in the build order where the demo app is deployed on the phone and can hold a real, non-empty position under normal operation. This does **not** block step 9 from being *built*: the reconciliation code (gate 11) can and should be written and unit-tested against fixtures in step 9. It does block step 9's reconciliation from being *trusted* — a 0-position pass is exactly the "check that passes because nothing happened" pattern (`doc/HANDOFF.md` §7 rule 1) — until step 11 closes this row. |
+| **Order acceptance and completion close to the market close are not yet measured end to end.** The 2026-09-18 demo open/close observations were not a near-close test and the partial-close leg remains unmeasured. | **High** | Complete T5 in `board nightwatch/project.md` with a controlled demo cycle; test the boundary near the close without replaying uncertain writes. |
+| **Every position this app opens carries a broker-side take-profit it never asked for** (found 2026-09-11, §6.H) — the broker declares `defaultTakeProfitPercentage: 1000.0` for the config Nightwatch orders SCHG into, and 229 of 230 live open positions sit at exactly 11x their open rate. If one fires, the close is authored by the broker, so gate 11 reports `unmatched_open_lot` and halts fail-closed with a reason that does not name the real cause. | Medium | **Detection built, suppression open.** `Position` now parses `takeProfitRate`/`isNoTakeProfit` and `engine/preflight.find_broker_take_profits` reports affected positions; gate 12 (risk caps) is its intended caller. Suppression is **deliberately not attempted** until a live API probe establishes whether the open-order body accepts a take-profit field and under what name — the eligibility payload's `allowEditTakeProfit: true` / `minTakeProfitPercentage: 0.0` suggests it is editable, but guessing a field name risks a silently ignored field that looks like a fix. At 11x the TP is far out of reach in practice, which is why this is Medium rather than High; that is a distance argument, not a guarantee. |
+| **Live quotes can be stale even while the market is open.** Six UPRO polls on 2026-09-18 were 20.1–29.5 minutes old (mean 24.7 minutes), confirming the previously observed freeze. | **High** | Keep quote-age validation fail-closed in the eventual session preflight. Resolve why the UPRO feed remains stale before relying on it; do not substitute cached quotes. See T4 and `board nightwatch/project.md`. |
+| **The legacy bar-store path and the target fetch-derive-discard path are not fully reconciled in code.** The schema still contains `bars`; the market-data design calls for fresh windows, fingerprints, and corporate-action checks. | **High** | Do not treat the old `bars` store as the target source of truth. Finish the legacy-storage/session integration and ensure window completeness, corporate-action, and signal checks are wired into fail-closed preflight. |
+| **Portfolio-envelope parsing is verified on a non-empty demo book, but production reconciliation is not yet accepted.** A live demo position was read and cleaned up on 2026-09-18; the full scheduled session/reconciliation path remains unbuilt. | Medium | Retain fixture tests and verify reconciliation against the adopted book and subsequent non-empty demo session before release. |
 | **A missing tz database makes `market/calendar.py` unimportable** — `EASTERN = ZoneInfo("America/New_York")` runs at module scope, so a missing tz database raises before `main()` and before any preflight gate runs, producing a bare traceback instead of the abort-hold-wakelock-notify behavior §5 promises for every other failure. Preflight gate 9 covers "not a trading day," not "the calendar module failed to import." | Medium | `tzdata` is pinned in `requirements.txt` for desktop CPython (Windows ships no system tz database; Android resolves `ZoneInfo` via the APEX mainline module, so this is a desktop-only exposure). Wrap the import at the app's entry point so an import failure still produces the graceful abort path, not a bare traceback. |
-| **No Android build tooling on the development machine** — no JDK, no Android SDK, no `adb` installed as of this writing | Medium | Recorded as an explicit prerequisite gap, not assumed away. §11 sequences the Firebase/Cloudflare infrastructure proof (steps 0–2) *before* this install (step 3) specifically so the tooling install is deferred until it's known to be worth doing. Installing it is mechanical (Android Studio or SDK Studio command-line tools + a JDK) but is real setup time, not yet spent. |
+| **No production multi-night acceptance run has been completed on the Z10.** Android tooling is installed; the debug APK builds and the device has run the probe app. | **High** | Complete the scheduled on-battery/network proof and a demo end-to-end session before enabling unattended production use. |
 | **Running on battery rather than mains** — a flat phone is a missed session with no alert | Medium | Preflight gate 2 aborts below 40% and says so; daily heartbeat makes a dead phone obvious; charge cap and periodic inspection for the opposite failure. |
 | **Battery swelling** from long periods on charge; 7300 mAh cell | Medium | 80% charge cap if available on OriginOS 6 (*unverified — whether the Funtouch-era path carries over is unconfirmed, community-sourced, confirm on device*); periodic physical inspection; replace at ~3 years. A swollen cell is a fire risk. |
 | UPRO may not be tradable on your eToro entity | Medium | Preflight gate 8 — `allowOpenPosition` is authoritative. |

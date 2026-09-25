@@ -81,7 +81,7 @@ is fetch-derive-discard.
 specific, checkable facts:**
 
 **(a) The staircase is built from raw `close`, which is never retroactively revised.**
-`HANDOFF_2026-09-05_evening.md` §4 (implemented in this same round of fixes) split the codebase's
+`board nightwatch/handoff-2026-09-05-evening.md` §4 (implemented in this same round of fixes) split the codebase's
 price basis: `cone_5_z` uses `adjClose` (a *return*, where the dividend adjustment is exactly the
 correction you want), while ATH/drawdown/tier — the staircase's entire domain — use raw `close` (a
 *level*, compared against traded prices, matching what eToro's own candles track). §2.2's failure
@@ -121,11 +121,11 @@ counter-example).
 Raw closes are stable **except** across a stock split, which rebases every price before the split
 date by the split ratio. This is not hypothetical for this project: a real SCHG split (2024-10-11,
 4:1) has already been observed and verified against a live account
-(`HANDOFF_2026-09-04_market_data.md` §2.1, §4.6 — eToro retroactively rescaled both `units` and
+(`board nightwatch/handoff-2026-09-04-market-data.md` §2.1, §4.6 — eToro retroactively rescaled both `units` and
 `openRate` on 15 pre-split positions). SPY itself has had a 2:1 split before (2007) but none since
 Tiingo's usable history begins (2010); UPRO and SCHG (the other two symbols this project fetches,
 though the staircase as specified here is SPY-only) split on a documented ~2-3 year cadence
-(`HANDOFF_2026-09-04_market_data.md` §2.1).
+(`board nightwatch/handoff-2026-09-04-market-data.md` §2.1).
 
 Tiingo's EOD payload carries `splitFactor` on every bar (`market/source.py`'s `EodBar.split_factor`,
 already parsed). The guard:

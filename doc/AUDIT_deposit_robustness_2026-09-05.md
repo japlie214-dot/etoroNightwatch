@@ -25,7 +25,7 @@ too, since it is arguably more dangerous (a session that thinks it has cash it n
   criteria (§10, item 8: "a mid-run deposit is absorbed correctly with no special handling").
 - Read `doc/DESIGN_market_data.md` §4.5–§4.7 (gate 11's inverted, position-only reconciliation),
   §6 (gate 10's five sub-checks), §10.11 (measured sleeve arithmetic).
-- Read `doc/HANDOFF_2026-09-05.md` in full — the authoritative statement of what is built vs.
+- Read `board nightwatch/handoff-2026-09-05.md` in full — the authoritative statement of what is built vs.
   stubbed as of this date.
 - Read every line of `app/src/main/python/nightwatch/engine/preflight.py`, including its
   module-docstring map of all twelve gates.
@@ -308,5 +308,5 @@ $ .venv/Scripts/python.exe -m pytest -q
 407 passed in 8.45s
 ```
 
-(392 before this audit's tests were added, per `doc/HANDOFF_2026-09-05.md` §3; +15 new tests in
+(392 before this audit's tests were added, per `board nightwatch/handoff-2026-09-05.md` §3; +15 new tests in
 `tests/test_deposit_robustness.py`, all passing, none modified in any pre-existing file.)
