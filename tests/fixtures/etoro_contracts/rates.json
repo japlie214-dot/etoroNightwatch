@@ -1,0 +1,21 @@
+{
+  "rates": [
+    {
+      "ask": 1.25,
+      "askDiscounted": 1.25,
+      "bid": 1.0,
+      "bidDiscounted": 1.25,
+      "conversionRateAsk": 1.25,
+      "conversionRateBid": 1.0,
+      "date": "2026-09-11T12:34:56Z",
+      "instrumentID": 424242,
+      "lastExecution": 1.25,
+      "priceRateID": 900007,
+      "unitMargin": 1.25,
+      "unitMarginAsk": 1.25,
+      "unitMarginAskDiscounted": 1.25,
+      "unitMarginBid": 1.0,
+      "unitMarginBidDiscounted": 1.25
+    }
+  ]
+}

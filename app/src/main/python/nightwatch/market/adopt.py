@@ -3,7 +3,7 @@ pre-existing SCHG/UPRO positions (DESIGN_market_data.md §4.4, §4.7, §10.9,
 §10.10).
 
 **What this is.** 209 real positions (202 SCHG + 7 UPRO, per the live probe
-in HANDOFF_2026-09-04_market_data.md §2, DESIGN_market_data.md §4.5, §4.7)
+in board nightwatch/handoff-2026-09-04-market-data.md §2, DESIGN_market_data.md §4.5, §4.7)
 predate this app and have no ``lot_annotations`` row. Gate 11 invariant 1
 (§4.5) halts every session until each one gets a row, so this migration is
 mandatory, not optional, before the app can run at all.
@@ -22,7 +22,7 @@ landing between the recurring buy stopping and this migration running is
 handled by *re-running* this same function, not by a standing loop.
 
 **Decisions this migration is built to, not free to re-litigate**
-(HANDOFF_2026-09-04_market_data.md §2; DESIGN_market_data.md §4.7, §10.9):
+(board nightwatch/handoff-2026-09-04-market-data.md §2; DESIGN_market_data.md §4.7, §10.9):
 
 * Adopt, never quarantine -- every open broker position in a managed symbol
   (SCHG, UPRO) gets a fully-managed sidecar row.
@@ -49,7 +49,7 @@ handled by *re-running* this same function, not by a standing loop.
   make sense of: an ``instrumentID`` absent from the ``instruments`` table,
   an ``openDateTime`` the fetched SPY series does not cover (including a
   position that PREDATES the fetched window entirely --
-  HANDOFF_2026-09-05_evening.md §3a Case 3, given its own, more specific
+  board nightwatch/handoff-2026-09-05-evening.md §3a Case 3, given its own, more specific
   reason string in :func:`build_adoption_plan`), or a missing required
   broker field. :func:`run_adoption_backfill` treats ANY unresolved
   position as reason to write nothing at all (task brief: "a partial
@@ -60,7 +60,7 @@ handled by *re-running* this same function, not by a standing loop.
   measured one is this project's exact pathology"). If an override is ever
   added, §3a is explicit it must assign tier 0, not tier 1.
 
-**Basis note (HANDOFF_2026-09-05_evening.md §4, decided 2026-09-05):**
+**Basis note (board nightwatch/handoff-2026-09-05-evening.md §4, decided 2026-09-05):**
 ``entry_spy_ath``/``entry_spy_close``/``entry_spy_drawdown``/``entry_tier``
 are derived from Tiingo's raw ``close``, not ``adjClose`` -- they are
 LEVELS, not returns; see :class:`SpyContext`'s docstring.
@@ -102,7 +102,7 @@ DEFAULT_ORIGIN = "adopted"
 
 #: Every row this module ever writes has measured, not guessed, SPY context
 #: -- the only positions it resolves are ones whose openDateTime the fetched
-#: SPY window actually covers (HANDOFF_2026-09-05_evening.md §3a: an
+#: SPY window actually covers (board nightwatch/handoff-2026-09-05-evening.md §3a: an
 #: out-of-window position is UnresolvedPosition and halts the whole run, it
 #: never reaches a write). ``'assumed_out_of_window'`` is the other value
 #: ``lot_annotations.entry_context_source`` accepts (migration 005); it is
@@ -127,7 +127,7 @@ class AdoptionError(Exception):
 class SpyContext:
     """SPY all-time-high / close / drawdown / tier as of one trading date.
 
-    **Basis: raw ``close``, not ``adjClose``** (HANDOFF_2026-09-05_evening.md
+    **Basis: raw ``close``, not ``adjClose``** (board nightwatch/handoff-2026-09-05-evening.md
     §4, decided 2026-09-05, correcting this docstring's earlier claim that
     ``adjClose`` drives ATH/drawdown/tier). ATH/drawdown/tier are LEVELS --
     compared against traded prices, and the entry_tier this produces is
@@ -243,7 +243,7 @@ def build_spy_context_index(spy_bars: Sequence[EodBar]) -> dict[str, SpyContext]
     ``spy_bars`` need not be pre-sorted -- this sorts by date before the
     running-ATH pass.
 
-    **Basis: raw ``close``** (HANDOFF_2026-09-05_evening.md §4) -- see
+    **Basis: raw ``close``** (board nightwatch/handoff-2026-09-05-evening.md §4) -- see
     :class:`SpyContext`'s own docstring for why.
 
     **Inclusive convention, stated explicitly because DESIGN_market_data.md
@@ -329,7 +329,7 @@ def build_adoption_plan(
     plan = AdoptionPlan()
     # Earliest date the fetched SPY window actually covers -- used only to
     # give a "predates the window" halt (below) a more specific reason than
-    # the generic "does not cover" message (HANDOFF_2026-09-05_evening.md
+    # the generic "does not cover" message (board nightwatch/handoff-2026-09-05-evening.md
     # §3a Case 3). Not used for any resolution decision -- `spy_context.get`
     # below is still the sole source of truth for whether a date resolves.
     window_start = min(spy_context) if spy_context else None
@@ -381,7 +381,7 @@ def build_adoption_plan(
         context = spy_context.get(trading_date)
         if context is None:
             if window_start is not None and trading_date < window_start:
-                # HANDOFF_2026-09-05_evening.md §3a Case 3: a position opened
+                # board nightwatch/handoff-2026-09-05-evening.md §3a Case 3: a position opened
                 # before the fetched SPY window even starts. HALT LOUDLY --
                 # do not silently assign a tier. A guessed tier that is
                 # indistinguishable from a measured one is this project's
@@ -447,7 +447,7 @@ def build_adoption_plan(
                 entry_amount=position.amount,
                 origin=origin,
                 # Resolved via measured history, never guessed -- the only
-                # path that reaches this line (HANDOFF_2026-09-05_evening.md
+                # path that reaches this line (board nightwatch/handoff-2026-09-05-evening.md
                 # §3a: 'assumed_out_of_window' is reserved for a possible
                 # future override of the halt above, which this function
                 # does not implement).
@@ -490,7 +490,7 @@ def run_adoption_backfill(
     testable offline and keeps this module honest about the hard
     constraint it was built under: **no network call to eToro from this
     codepath, ever** -- the dev machine cannot reach eToro at all
-    (HANDOFF_2026-09-04_market_data.md §2.8), and actually running this
+    (board nightwatch/handoff-2026-09-04-market-data.md §2.8), and actually running this
     backfill against the live account is an explicit, separate,
     operator-supervised on-device step, not something this function or its
     tests do.

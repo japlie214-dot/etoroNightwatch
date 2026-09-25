@@ -1,0 +1,23 @@
+[
+  {
+    "closeRate": 1.25,
+    "closeTimestamp": "2026-09-11T12:34:56Z",
+    "fees": 1.25,
+    "initialInvestment": 1.25,
+    "instrumentId": 424242,
+    "investment": 1.25,
+    "isBuy": true,
+    "leverage": 1,
+    "netProfit": 1.25,
+    "openRate": 1.25,
+    "openTimestamp": "2026-09-11T12:34:56Z",
+    "orderId": 900005,
+    "parentPositionId": 0,
+    "positionId": 900004,
+    "socialTradeId": 0,
+    "stopLossRate": 1.25,
+    "takeProfitRate": 1.25,
+    "trailingStopLoss": false,
+    "units": 1.25
+  }
+]

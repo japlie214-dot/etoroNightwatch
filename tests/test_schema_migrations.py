@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
+
+import pytest
 
 from nightwatch.db import migrations
 from nightwatch.db.repo import Repo, connect
@@ -57,6 +60,46 @@ def test_migrate_is_idempotent(tmp_path: Path) -> None:
         first = migrations.migrate(conn)
         second = migrations.migrate(conn)
         assert first == second == migrations.discover()[-1].version
+    finally:
+        conn.close()
+
+
+def test_failed_version_record_rolls_back_ddl_and_can_retry(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "nightwatch.db")
+    try:
+        baseline = migrations.discover()[0]
+        migrations.current_version(conn)  # create schema_version
+        conn.executescript(f"BEGIN;\n{baseline.sql}\nCOMMIT;")
+        conn.execute(
+            "INSERT INTO schema_version (version, name, applied_at) "
+            "VALUES (?, ?, ?)",
+            (baseline.version, baseline.name, "test"),
+        )
+        conn.commit()
+        conn.execute(
+            "CREATE TRIGGER reject_v2 BEFORE INSERT ON schema_version "
+            "WHEN NEW.version = 2 BEGIN SELECT RAISE(ABORT, 'test failure'); END"
+        )
+        conn.commit()
+
+        with pytest.raises(sqlite3.IntegrityError, match="test failure"):
+            migrations.migrate(conn)
+
+        columns = {row[1] for row in conn.execute(
+            "PRAGMA table_info(portfolio_snapshot_positions)"
+        )}
+        assert "invested" in columns
+        assert "amount" not in columns
+        assert migrations.current_version(conn) == baseline.version
+
+        conn.execute("DROP TRIGGER reject_v2")
+        conn.commit()
+        assert migrations.migrate(conn) == migrations.discover()[-1].version
+        columns = {row[1] for row in conn.execute(
+            "PRAGMA table_info(portfolio_snapshot_positions)"
+        )}
+        assert "amount" in columns
+        assert "invested" not in columns
     finally:
         conn.close()
 

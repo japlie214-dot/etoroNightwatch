@@ -276,16 +276,49 @@ class LotAnnotation:
     history because nothing was ever stamped for it. Both are fully
     managed once a row exists.
 
-    ``entry_context_source`` (migration 005, HANDOFF_2026-09-05_evening.md
-    §3a) is a second, orthogonal provenance column, also never an access
-    gate: ``'derived'`` for context that was genuinely computed (from
-    measured history for an adopted lot, or a live stamped close for an
-    app-created one) versus ``'assumed_out_of_window'``, reserved for a
-    lot whose SPY entry context had to be guessed because its open date
-    predates the fetched SPY window entirely. ``market.adopt`` never
-    produces the latter today -- it halts the whole backfill instead of
-    guessing (§3a Case 3) -- the value exists so a future override path, if
-    one is ever built, has somewhere honest to record that it guessed.
+    ``entry_context_source`` (migration 005, board nightwatch/handoff-2026-09-05-evening.md
+    §3a; widened by migration 006) is a second, orthogonal provenance
+    column, also never an access gate: ``'derived'`` for context that was
+    genuinely computed (from measured history for an adopted lot, or a live
+    stamped close for an app-created one) versus ``'assumed_out_of_window'``,
+    reserved for a lot whose SPY entry context had to be guessed because its
+    open date predates the fetched SPY window entirely. ``market.adopt``
+    never produces the latter today -- it halts the whole backfill instead
+    of guessing (§3a Case 3) -- the value exists so a future override path,
+    if one is ever built, has somewhere honest to record that it guessed.
+
+    ``'adopted_from_abandoned_intent'`` (migration 006, DESIGN_session.md
+    §3.4, the operator's 2026-09-06 "no forced human-in-the-loop" decision)
+    marks a lot written by :func:`nightwatch.engine.reconcile
+    .resolve_abandoned_intent_adoptions`'s narrow auto-adopt path: an
+    unmatched broker position that matched one of this app's OWN persisted,
+    abandoned :class:`Intent` rows by instrument and size. Distinct from
+    ``'derived'`` specifically so this lot's provenance is greppable and
+    auditable forever after, never silently indistinguishable from a
+    normally-recorded one -- and NOT the fabricate-a-lot bug (DESIGN.md
+    §1.4 fix #3): that bug invented a lot from nothing, this one is built
+    only from a genuine persisted intent record matched against the broker's
+    own position.
+
+    ``exit_context_source`` (migration 007, DESIGN_session.md §3.4, closing
+    the mirror-image gap left by migration 006) is the CLOSE-side counterpart
+    of ``entry_context_source`` -- and deliberately a separate column rather
+    than a value squeezed into that one, because ``entry_context_source`` is
+    stamped once at open and never updated again (see
+    :meth:`Repo.update_lot_annotation`, which does not touch it), while this
+    column is only ever written later, at close time. ``None`` (the default,
+    and the value on every row written before migration 007) means "closed
+    the ordinary way, or still open" -- no special provenance to record.
+    ``'resolved_from_abandoned_intent'`` marks a row closed by
+    :func:`nightwatch.engine.reconcile.resolve_abandoned_close_intents`'s
+    narrow auto-resolve path: an ``unmatched_open_lot`` discrepancy (the
+    broker position vanished) that matched one of this app's OWN persisted,
+    abandoned close :class:`Intent` rows by position, symbol, and book. The
+    mirror image of ``'adopted_from_abandoned_intent'`` for exactly the
+    reason that path's own docstring names: a stuck CLOSE resolves via this
+    direction, never the buy-side adopt path, and it must be equally
+    greppable and auditable forever after -- never a silent, untraceable
+    ``is_open=False``.
     """
 
     position_id: str
@@ -303,6 +336,7 @@ class LotAnnotation:
     bucket_id: str | None = None
     entry_order_id: int | None = None
     exit_order_id: int | None = None
+    exit_context_source: str | None = None
     is_open: bool = True
     created_at: str | None = None
     updated_at: str | None = None
@@ -977,6 +1011,28 @@ class Repo:
         ).fetchall()
         return [self._intent(r) for r in rows]
 
+    def abandoned_intents(self) -> list[Intent]:
+        """Return every intent marked ``'abandoned'`` -- the candidate set
+        for :func:`nightwatch.engine.reconcile.resolve_abandoned_intent_adoptions`
+        (DESIGN_session.md §3.4, the operator's 2026-09-06 "no forced
+        human-in-the-loop" decision).
+
+        A persistently non-terminal order stops being polled after N
+        sessions (config-driven, :class:`~nightwatch.config.ReconciliationConfig`)
+        and is marked ``'abandoned'`` rather than escalated to a human --
+        the session orchestrator that flips an intent to this status (the
+        polling loop's own attachment point) is not built yet; this method
+        only reads what that future write path produces. If an abandoned
+        order later fills, gate 11 sees an unmatched broker position on the
+        next session and resolves it against this list, never against a
+        guess.
+        """
+        rows = self.conn.execute(
+            "SELECT * FROM intents WHERE status = 'abandoned' "
+            "ORDER BY session_id, sequence"
+        ).fetchall()
+        return [self._intent(r) for r in rows]
+
     def set_intent_status(
         self, intent_id: int, status: str, resolved: bool = False
     ) -> None:
@@ -1303,10 +1359,22 @@ class Repo:
                 f"lot_annotations.origin must be 'app' or 'adopted', got "
                 f"{annotation.origin!r} (position_id={annotation.position_id!r})"
             )
-        if annotation.entry_context_source not in ("derived", "assumed_out_of_window"):
+        if annotation.entry_context_source not in (
+            "derived", "assumed_out_of_window", "adopted_from_abandoned_intent",
+        ):
             raise ValueError(
-                "lot_annotations.entry_context_source must be 'derived' or "
-                f"'assumed_out_of_window', got {annotation.entry_context_source!r} "
+                "lot_annotations.entry_context_source must be 'derived', "
+                "'assumed_out_of_window', or 'adopted_from_abandoned_intent', "
+                f"got {annotation.entry_context_source!r} "
+                f"(position_id={annotation.position_id!r})"
+            )
+        if annotation.exit_context_source is not None and (
+            annotation.exit_context_source != "resolved_from_abandoned_intent"
+        ):
+            raise ValueError(
+                "lot_annotations.exit_context_source must be None or "
+                f"'resolved_from_abandoned_intent', got "
+                f"{annotation.exit_context_source!r} "
                 f"(position_id={annotation.position_id!r})"
             )
 
@@ -1326,8 +1394,9 @@ class Repo:
                 position_id, symbol, book, entry_reference_spy, entry_spy_ath,
                 entry_spy_close, entry_spy_drawdown, entry_tier, bucket_id,
                 entry_order_id, exit_order_id, entry_date, entry_amount,
-                is_open, origin, entry_context_source, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                is_open, origin, entry_context_source, exit_context_source,
+                created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 annotation.position_id, annotation.symbol, annotation.book,
@@ -1337,7 +1406,7 @@ class Repo:
                 annotation.entry_order_id, annotation.exit_order_id,
                 annotation.entry_date, annotation.entry_amount,
                 int(annotation.is_open), annotation.origin,
-                annotation.entry_context_source,
+                annotation.entry_context_source, annotation.exit_context_source,
                 annotation.created_at or now, annotation.updated_at or now,
             ),
         )
@@ -1391,8 +1460,9 @@ class Repo:
                         entry_spy_ath, entry_spy_close, entry_spy_drawdown,
                         entry_tier, bucket_id, entry_order_id, exit_order_id,
                         entry_date, entry_amount, is_open, origin,
-                        entry_context_source, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        entry_context_source, exit_context_source,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         annotation.position_id, annotation.symbol,
@@ -1403,6 +1473,7 @@ class Repo:
                         annotation.exit_order_id, annotation.entry_date,
                         annotation.entry_amount, int(annotation.is_open),
                         annotation.origin, annotation.entry_context_source,
+                        annotation.exit_context_source,
                         annotation.created_at or now,
                         annotation.updated_at or now,
                     ),
@@ -1415,6 +1486,82 @@ class Repo:
         else:
             self.conn.commit()
         return inserted
+
+    def update_lot_annotation(self, annotation: LotAnnotation) -> None:
+        """Update an existing sidecar row in place, keyed by ``position_id``.
+
+        The write path a PARTIAL CLOSE needs (board nightwatch/handoff-2026-09-06.md §7):
+        unlike a full close, the broker position stays OPEN with reduced
+        units, so its `lot_annotations` row must be updated rather than
+        reinserted or replaced. Complements, rather than replaces,
+        :meth:`insert_lot_annotation`/:meth:`insert_lot_annotations` -- a
+        lot's FIRST annotation is still write-once (stamped at open, §4.3);
+        this method is for every write after that.
+
+        Does NOT touch the re-link key (`entry_date`/`entry_amount`, §4.4 --
+        stamped once at open, immutable by design: eToro rescales `units`/
+        `openRate` on a split but preserves `amount`, so re-deriving the
+        re-link key from a live row would defeat its whole purpose) or the
+        identity/provenance columns (`position_id`, `symbol`, `book`,
+        `origin`, `entry_context_source`) -- those are set once at insert
+        time and never change here either. Every other column is updatable:
+        the entry-SPY-context fields, `entry_tier`, `bucket_id`,
+        `entry_order_id`, `exit_order_id`, `exit_context_source`, and
+        `is_open`.
+
+        `exit_context_source` (migration 007) is deliberately updatable
+        here, unlike `entry_context_source` -- it is CLOSE-time provenance
+        (e.g. `engine.reconcile.resolve_abandoned_close_intents`'s narrow
+        auto-resolve path stamping `'resolved_from_abandoned_intent'` when
+        it marks a vanished position's annotation closed), so it can only
+        ever be known at the point this method is called, never at insert
+        time.
+
+        Note `lot_annotations` carries no `units`/`amount` column of its own
+        -- the broker (`Position`) is the sole system of record for those
+        (§4.4) -- so a partial close's unit reduction has nothing here to
+        update; this method exists for the sidecar bookkeeping a partial
+        close DOES touch (`is_open` staying ``True``, `exit_order_id` once
+        the executor records which order performed the close).
+        TODO(lot-selection executor, out of scope here): call this after a
+        partial close's order reaches terminal -- the executor itself is not
+        built yet (board nightwatch/handoff-2026-09-06.md §7).
+
+        Raises:
+            ValueError: If no row exists at ``annotation.position_id`` -- a
+                partial close can only update a lot that already has an
+                annotation, mirroring :meth:`insert_lot_annotation`'s own
+                failure mode (there: raises on a row that already exists;
+                here: raises on one that doesn't).
+        """
+        self._validate_lot_annotation(annotation)
+        now = utcnow()
+        cur = self.conn.execute(
+            """
+            UPDATE lot_annotations SET
+                entry_reference_spy = ?, entry_spy_ath = ?, entry_spy_close = ?,
+                entry_spy_drawdown = ?, entry_tier = ?, bucket_id = ?,
+                entry_order_id = ?, exit_order_id = ?, exit_context_source = ?,
+                is_open = ?, updated_at = ?
+            WHERE position_id = ?
+            """,
+            (
+                annotation.entry_reference_spy, annotation.entry_spy_ath,
+                annotation.entry_spy_close, annotation.entry_spy_drawdown,
+                annotation.entry_tier, annotation.bucket_id,
+                annotation.entry_order_id, annotation.exit_order_id,
+                annotation.exit_context_source,
+                int(annotation.is_open), annotation.updated_at or now,
+                annotation.position_id,
+            ),
+        )
+        if cur.rowcount == 0:
+            raise ValueError(
+                f"no lot_annotations row for position_id={annotation.position_id!r} "
+                "to update -- update_lot_annotation requires an existing row "
+                "(use insert_lot_annotation for a lot's first annotation)"
+            )
+        self.conn.commit()
 
     @staticmethod
     def _lot_annotation(row: sqlite3.Row) -> LotAnnotation:
@@ -1430,6 +1577,7 @@ class Repo:
             entry_amount=row["entry_amount"], is_open=bool(row["is_open"]),
             origin=row["origin"],
             entry_context_source=row["entry_context_source"],
+            exit_context_source=row["exit_context_source"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
         )

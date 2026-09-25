@@ -98,7 +98,7 @@ __all__ = [
 ]
 
 #: Start date for the SPY history fetch: **operator decision, 2026-09-05,
-#: overriding the 39-month/819-bar window HANDOFF_2026-09-05_evening.md §3
+#: overriding the 39-month/819-bar window board nightwatch/handoff-2026-09-05-evening.md §3
 #: had settled on hours earlier.** The 819-bar window was itself a fix for
 #: FINDINGS_window_live_2026-09-05.md §2's bug (a 276-bar/~13-month fetch
 #: silently lost the true ATH); the operator's follow-up decision goes
@@ -471,7 +471,7 @@ def spy_context_from_history(
     Do not reintroduce a default here; that is exactly how the defect
     reappears.
 
-    **Basis (HANDOFF_2026-09-05_evening.md §4, decided 2026-09-05): raw
+    **Basis (board nightwatch/handoff-2026-09-05-evening.md §4, decided 2026-09-05): raw
     ``close``, never ``adjClose``.** ATH/drawdown/tier are LEVELS compared
     against traded prices (they drive real buy decisions and are what an
     eToro cross-check must agree with), not a return series -- the split
@@ -482,7 +482,7 @@ def spy_context_from_history(
     supplies an adjusted value), so this function is basis-consistent
     end-to-end without any conversion.
 
-    **The ATH floor (HANDOFF_2026-09-05_evening.md §3a, Case 2, decided
+    **The ATH floor (board nightwatch/handoff-2026-09-05-evening.md §3a, Case 2, decided
     2026-09-05):** ``current_ath = max(rolling_window_ath,
     max(entry_spy_ath for every OPEN lot))``. Once a lot's own stamped entry
     peak ages out of the fetched window, the window's rolling max alone can
@@ -592,7 +592,7 @@ def assemble_spy_signal(
             still computed in that case, off whatever window was fetched.
         open_lot_entry_spy_ath: Every currently-open lot's stamped
             ``entry_spy_ath`` (``lot_annotations``, both books, both
-            symbols) -- HANDOFF_2026-09-05_evening.md §3a Case 2's ATH
+            symbols) -- board nightwatch/handoff-2026-09-05-evening.md §3a Case 2's ATH
             floor: ``current_ath = max(rolling_window_ath,
             max(entry_spy_ath for every OPEN lot))``. **No default** -- a
             defaulted-empty version of this parameter was found to be
@@ -628,7 +628,7 @@ def assemble_spy_signal(
         "SPY", iex_quote=iex_quote, etoro_daily_candle=etoro_daily_candle
     )
 
-    # [splice] -- cone_5_z basis: adjClose (HANDOFF_2026-09-05_evening.md §4:
+    # [splice] -- cone_5_z basis: adjClose (board nightwatch/handoff-2026-09-05-evening.md §4:
     # cone_5_z is a RETURN, and on raw close the four annual SPY dividends
     # inject ~0.27% fake down-moves into the 260-return window that are not
     # real losses). The most recent adjClose already equals its own raw

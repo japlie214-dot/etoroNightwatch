@@ -2,7 +2,7 @@
 
 The header-building logic is trivial; the point of this file is the
 redaction claim -- verified against the real logging pipeline with an actual
-captured log file, per HANDOFF.md's rule that "a check that passes because
+captured log file, per board nightwatch/handoff.md's rule that "a check that passes because
 nothing happened is not a pass."
 """
 
@@ -73,7 +73,7 @@ def test_header_values_never_survive_the_real_logging_pipeline(
 ) -> None:
     """Actually log the built header dict and assert the secrets are gone
     from the resulting file on disk -- not a structural argument, a real
-    capture (HANDOFF.md: "verify redaction claims, don't just assume them").
+    capture (board nightwatch/handoff.md: "verify redaction claims, don't just assume them").
     """
     configure_logging(host=host)
     try:

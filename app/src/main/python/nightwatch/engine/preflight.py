@@ -1,13 +1,36 @@
 """The twelve preflight gates (DESIGN §5, DESIGN_market_data.md §6).
 
-Only **gate 10's freshness check** is implemented here (build step 5 of
-DESIGN_market_data.md §12, described there as "the highest-value item in
-this entire sequence" -- it is the check that would have caught §2.9's live
-UPRO rates-freeze bug outright). Gate 9 and the other ten gates remain
-comment-only stubs; do not infer they are implemented because this file grew.
+**Gate 10's freshness check** and **gate 11's reconciliation** are
+implemented here. Gate 10 was build step 5 of DESIGN_market_data.md §12,
+described there as "the highest-value item in this entire sequence" -- it is
+the check that would have caught §2.9's live UPRO rates-freeze bug outright.
+Gate 11 (build step 6, DESIGN §1.4 fix #3 / §5, DESIGN_market_data.md §4.5's
+"inverted gate 11") delegates its actual comparison to
+:func:`nightwatch.engine.reconcile.reconcile`; this module only turns the
+result into a :class:`GateResult` and fails closed on any non-empty
+discrepancy list. As of 2026-09-06 it also optionally delegates the narrow
+auto-adopt path (an unmatched broker position resolved against this app's
+own abandoned order intents, DESIGN_session.md §3.4) to
+:func:`nightwatch.engine.reconcile.resolve_abandoned_intent_adoptions`, and
+its mirror-image auto-resolve path (an ``unmatched_open_lot`` -- a stuck
+CLOSE that later filled -- resolved the same way) to
+:func:`nightwatch.engine.reconcile.resolve_abandoned_close_intents` -- see
+:func:`gate_11_reconciliation`'s own docstring. Neither gate has a
+production caller yet -- ``run_preflight`` does not exist (see below) -- so
+both are reachable and tested but not yet wired into a running session;
+that wiring is explicitly out of scope here. Same for the session-level
+polling loop that decides an order is non-terminal for long enough to be
+marked ``'abandoned'`` in the first place (``engine/session.py``) -- see
+:class:`~nightwatch.config.ReconciliationConfig` for where that loop's
+"how many sessions" threshold is configured; **operator-decided,
+2026-09-06: N = 3** (DESIGN_session.md §14 item 2, board nightwatch/handoff-2026-09-06.md
+§9) -- no longer a proposed placeholder.
+The other ten gates remain comment-only stubs; do not infer they are
+implemented because this file grew.
 
-# TODO(step 6, DESIGN §5): implement each remaining gate as a function
-# returning a db.repo.PreflightCheck, run in order, ALL must pass:
+# TODO(step 6, DESIGN §5): implement each remaining gate (all but 10 and 11)
+# as a function returning a db.repo.PreflightCheck, run in order, ALL must
+# pass:
 #   1. Halt switch          - host.halt_flag_path() exists, or /halt was set
 #   2. Power & permissions   - battery >=40% or charging; battery-optimization
 #      exemption granted; AlarmManager.canScheduleExactAlarms(); wake lock
@@ -25,18 +48,22 @@ comment-only stubs; do not infer they are implemented because this file grew.
 #      via `.sessions` membership, NOT `.is_session()` (raises
 #      DateOutOfBounds under pandas 3.0.5, DESIGN_market_data.md §2.6).
 #      market/calendar.py stays a cross-check, not the authority.
-#  11. Reconciliation        - broker positions vs sidecar agree (DESIGN_
-#      market_data.md §4.5's inverted gate 11; delegates to
-#      engine/reconcile.py, not yet built)
-#  12. Risk caps             - session order count/notional vs config.risk
+#  11. Reconciliation        - IMPLEMENTED below (gate_11_reconciliation);
+#      see that function and engine/reconcile.py, not this stub list.
+#  12. Risk caps             - session order count/notional vs config.risk;
+#      also the intended caller of `find_broker_take_profits` below (added
+#      2026-09-11, DESIGN.md §6.A) -- a broker-side take-profit this app
+#      never asked for is a risk fact, and the detection half of it is
+#      implemented and tested here even though gate 12 itself is not.
 #
 # Any failure: persist ALL attempted PreflightCheck rows via
 # db.repo.Repo.record_preflight_check, send the Telegram abort message naming
 # the gate, and -- per DESIGN §5 -- hold the wake lock rather than returning
 # to Doze, so run_preflight()'s caller must not release on failure. That
-# orchestration function (run_preflight) does not exist yet; gate 10 below is
-# a pure function over already-fetched data for exactly that reason -- it has
-# no opinion on wake locks, sessions, or how its inputs were obtained.
+# orchestration function (run_preflight) does not exist yet; gates 10 and 11
+# below are pure functions over already-fetched data for exactly that reason
+# -- neither has an opinion on wake locks, sessions, or how its inputs were
+# obtained.
 
 Gate 10, per DESIGN_market_data.md §6, has five numbered sub-checks. Scope
 of this module:
@@ -91,16 +118,29 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Mapping, Sequence
 
-from ..config import MarketDataConfig
-from ..etoro.models import Candle, Rate
+from ..config import MarketDataConfig, ReconciliationConfig
+from ..db.repo import Intent, LotAnnotation
+from ..etoro.models import Candle, Position, Rate
 from ..notify.telegram import TelegramNotifier
+from .reconcile import (
+    Adoption,
+    Discrepancy,
+    Resolution,
+    reconcile,
+    resolve_abandoned_close_intents,
+    resolve_abandoned_intent_adoptions,
+)
 
 __all__ = [
     "GateResult",
     "ProvisionalClose",
     "INTRADAY_CANDLE_INTERVALS",
+    "BrokerTakeProfit",
+    "find_broker_take_profits",
     "gate_10_price_data",
     "notify_gate_10_failure",
+    "gate_11_reconciliation",
+    "notify_gate_11_failure",
 ]
 
 _logger = logging.getLogger("nightwatch.engine.preflight")
@@ -417,7 +457,7 @@ def _check_provisional_close(
     checked against eToro's own candle when one is available -- and, as of
     2026-09-05, against the candle's *own* freshness first.
 
-    **Basis, confirmed like-with-like (HANDOFF_2026-09-05_evening.md §4):**
+    **Basis, confirmed like-with-like (board nightwatch/handoff-2026-09-05-evening.md §4):**
     ``provisional.value`` is always raw (Tiingo IEX ``tngoLast``, or a raw
     eToro candle close -- ``market.window.resolve_provisional_close`` has no
     code path that supplies an adjusted value), and ``candle.close`` is
@@ -568,11 +608,297 @@ def notify_gate_10_failure(
     session orchestrator's responsibility (``run_preflight()``, not yet
     built -- DESIGN §5's "the caller must not release [the wake lock] on
     failure"). Raising this function's scope to cover that orchestration
-    would mean inventing gates 1-9/11/12 and the session loop just to give
+    would mean inventing gates 1-9/12 and the session loop just to give
     gate 10 somewhere to be called from, which is explicitly out of scope.
     """
     if result.passed:
         raise ValueError("notify_gate_10_failure called with a passing GateResult")
+    notifier.preflight_result(
+        trading_date=trading_date,
+        passed=False,
+        gate=result.gate,
+        gate_name=result.name,
+        reason=result.reason,
+        session_id=session_id,
+    )
+
+
+# TODO(engine/session.py, not yet built -- explicitly out of scope for this
+# task): the polling loop's attachment point. When a phase-A close/buy's
+# order sits non-terminal for
+# ``config.reconciliation.non_terminal_order_sessions_before_abandoned``
+# consecutive sessions (DESIGN_session.md §3.4), stop calling
+# ``recover_by_reference_id`` for it and instead call
+# ``Repo.set_intent_status(intent_id, "abandoned")``. The NEXT session's
+# gate 11 call should then pass ``Repo.abandoned_intents()`` as
+# ``abandoned_intents`` below -- that is the only wiring this function
+# needs from that loop; everything else (matching, adopting, never
+# fabricating) already lives in this module and engine/reconcile.py.
+def gate_11_reconciliation(
+    positions: Sequence[Position],
+    annotations: Sequence[LotAnnotation],
+    *,
+    managed_symbols: Sequence[str],
+    instrument_symbols: Mapping[int, str],
+    abandoned_intents: Sequence[Intent] = (),
+    reconciliation_config: ReconciliationConfig = ReconciliationConfig(),
+) -> GateResult:
+    """Gate 11 (DESIGN §1.4 fix #3, §5; DESIGN_market_data.md §4.5's
+    "inverted gate 11") -- FAIL-CLOSED: any non-empty discrepancy list from
+    :func:`nightwatch.engine.reconcile.reconcile` fails this gate loudly.
+
+    Like :func:`gate_10_price_data`, this is a pure function over
+    already-fetched data (the live positions, and every ``lot_annotations``
+    row), not a fetcher -- it has no opinion on wake locks, sessions, or how
+    its inputs were obtained. All policy (never fabricate a lot for an
+    unmatched broker position, detect both membership directions) lives in
+    :func:`~nightwatch.engine.reconcile.reconcile`; this function only turns
+    that module's report into a :class:`GateResult`, exactly as
+    :func:`gate_10_price_data` turns its own checks into one.
+
+    **Auto-adopt, added 2026-09-06 (DESIGN_session.md §3.4, the operator's
+    "no forced human-in-the-loop" decision):** if ``abandoned_intents`` is
+    non-empty, every ``unmatched_broker_position`` discrepancy is first
+    offered to :func:`~nightwatch.engine.reconcile
+    .resolve_abandoned_intent_adoptions`, which resolves the ones that match
+    one of this app's OWN persisted, abandoned intents (by instrument and
+    size) and leaves every other discrepancy -- including a bare unmatched
+    position with no such record -- failing this gate exactly as before.
+    The default, empty ``abandoned_intents`` makes this a complete no-op:
+    every existing caller of this function (and every existing test) gets
+    byte-identical behaviour to before this change. The resolved
+    :class:`~nightwatch.engine.reconcile.Adoption` list is surfaced in
+    ``details["adoptions"]`` for the caller to actually persist (this
+    function, like :func:`reconcile`, makes no DB writes) -- it never
+    affects ``passed``.
+
+    **Auto-resolve, added 2026-09-06, closing the mirror-image gap:** the
+    SAME ``abandoned_intents`` is also offered to
+    :func:`~nightwatch.engine.reconcile.resolve_abandoned_close_intents`,
+    the symmetric counterpart for the other direction -- an
+    ``unmatched_open_lot`` discrepancy (an abandoned CLOSE intent that later
+    filled, so the annotation still says open but the broker position is
+    gone) resolved against one of this app's OWN persisted, abandoned close
+    intents (by position, symbol, and book). No new parameter: the same
+    empty default makes this path a no-op too, exactly like the adopt path.
+    The resolved :class:`~nightwatch.engine.reconcile.Resolution` list is
+    surfaced in ``details["resolutions"]`` for the caller to actually
+    persist (via :meth:`~nightwatch.db.repo.Repo.update_lot_annotation`) --
+    it never affects ``passed`` either.
+
+    Args:
+        positions: Every currently open broker position, already fetched
+            this session.
+        annotations: Every ``lot_annotations`` row (open and closed), e.g.
+            ``Repo.list_lot_annotations()`` with no filter.
+        managed_symbols: The managed set (DESIGN.md §1.4) -- normally
+            ``SymbolConfig().traded`` (SCHG, UPRO).
+        instrument_symbols: ``instrument_id -> symbol`` for every instrument
+            this app has resolved -- see :func:`~nightwatch.engine.reconcile
+            .reconcile` for why a missing id is treated as non-managed, not
+            as a failure.
+        abandoned_intents: This app's own intents with ``status ==
+            'abandoned'`` (e.g. ``Repo.abandoned_intents()``), the auto-adopt
+            path's sole source of provenance. Defaults to ``()``, disabling
+            adoption entirely -- the caller (``engine/session.py``, not yet
+            built) opts in explicitly by supplying this.
+        reconciliation_config: Tunes the adoption match's size tolerance
+            (``abandoned_intent_size_tolerance_pct``). Defaults to
+            :class:`~nightwatch.config.ReconciliationConfig`'s own defaults.
+
+    On failure: same contract as gate 10 -- the caller must halt, hold the
+    wake lock, and alert over Telegram (DESIGN §5; see
+    :func:`notify_gate_11_failure`).
+    """
+    discrepancies: list[Discrepancy] = reconcile(
+        positions,
+        annotations,
+        managed_symbols=managed_symbols,
+        instrument_symbols=instrument_symbols,
+    )
+
+    adoptions: list[Adoption] = []
+    resolutions: list[Resolution] = []
+    if abandoned_intents:
+        discrepancies, adoptions = resolve_abandoned_intent_adoptions(
+            positions,
+            annotations,
+            discrepancies,
+            abandoned_intents,
+            size_tolerance_pct=reconciliation_config.abandoned_intent_size_tolerance_pct,
+        )
+        discrepancies, resolutions = resolve_abandoned_close_intents(
+            annotations,
+            discrepancies,
+            abandoned_intents,
+        )
+
+    passed = not discrepancies
+    reason = (
+        "every open broker position in a managed symbol has a matching open "
+        f"lot_annotations row and vice versa ({', '.join(managed_symbols)})"
+        if passed
+        else "; ".join(d.reason for d in discrepancies)
+    )
+    if passed and adoptions:
+        reason += (
+            f"; {len(adoptions)} position(s) auto-adopted from this app's own "
+            "abandoned order intent(s), see details['adoptions']"
+        )
+    if passed and resolutions:
+        reason += (
+            f"; {len(resolutions)} position(s) auto-resolved (closed) from "
+            "this app's own abandoned close intent(s), see "
+            "details['resolutions']"
+        )
+    details: dict[str, object] = {
+        "discrepancies": [
+            {
+                "kind": d.kind,
+                "position_id": d.position_id,
+                "symbol": d.symbol,
+                "reason": d.reason,
+            }
+            for d in discrepancies
+        ],
+        "adoptions": [
+            {
+                "position_id": a.position_id,
+                "symbol": a.annotation.symbol,
+                "book": a.annotation.book,
+                "entry_date": a.annotation.entry_date,
+                "entry_amount": a.annotation.entry_amount,
+                "entry_context_source": a.annotation.entry_context_source,
+                "intent_request_id": a.intent.request_id,
+            }
+            for a in adoptions
+        ],
+        "resolutions": [
+            {
+                "position_id": r.position_id,
+                "symbol": r.annotation.symbol,
+                "book": r.annotation.book,
+                "exit_context_source": r.annotation.exit_context_source,
+                "intent_request_id": r.intent.request_id,
+            }
+            for r in resolutions
+        ],
+    }
+    return GateResult(gate=11, name="Reconciliation", passed=passed, reason=reason, details=details)
+
+
+@dataclass(frozen=True, slots=True)
+class BrokerTakeProfit:
+    """One open position carrying a broker-side take-profit this app never
+    asked for (DESIGN.md §6.A "Broker-side exits", established 2026-09-11).
+
+    ``multiple`` is ``take_profit_rate / entry_price`` -- the shape the live
+    evidence actually takes (229 of 230 open positions sit at exactly
+    ``11.00``, i.e. the broker's declared ``defaultTakeProfitPercentage`` of
+    +1000% for the instrument/leverage config this app orders into). It is
+    ``None`` when ``entry_price`` is zero or non-finite, rather than raising
+    inside something a preflight gate calls.
+    """
+
+    position_id: str
+    instrument_id: int
+    entry_price: float
+    take_profit_rate: float
+    multiple: float | None
+
+
+# TODO(gate 12, DESIGN §5 -- "Risk caps", still a comment-only stub above):
+# gate 12 is the honest home for this, and ``run_preflight()`` (not built)
+# is what must call it. A broker-side take-profit is an *exit this app did
+# not author and cannot currently suppress* -- a risk-cap fact, not a
+# reconciliation mismatch. It is deliberately NOT folded into
+# :func:`gate_11_reconciliation`: gate 11 is fail-closed, and on the live
+# account 229 of 230 positions carry a TP today, so wiring this there would
+# halt every session from now on over a condition that is currently normal
+# and has never fired. Until gate 12 exists this function has no production
+# caller; that is stated plainly rather than papered over with scaffolding
+# nothing runs.
+def find_broker_take_profits(
+    positions: Sequence[Position],
+) -> list[BrokerTakeProfit]:
+    """Which open positions carry a live broker-side take-profit?
+
+    Detection only. This function does NOT try to remove, suppress, or
+    modify a take-profit: whether eToro's open-order body accepts a
+    "no take profit" field at all is unresolved pending a live API probe,
+    and a guessed field name risks either a 400 or -- far worse -- a
+    silently ignored field that looks like a fix (DESIGN.md §6.A).
+
+    A position counts as carrying a TP when the broker states a positive
+    ``takeProfitRate`` **and** does not state ``isNoTakeProfit``. Both halves
+    matter:
+
+    * The suppressed case on the live account (position 3550406905) sends
+      ``takeProfitRate: 0.0`` *with* ``isNoTakeProfit: true`` -- the flag,
+      not the rate alone, is what says "no TP".
+    * A payload that omits both keys parses to ``None``/``False``
+      (:meth:`~nightwatch.etoro.client.EtoroClient._parse_position`) and is
+      simply not reported here. "Not stated" is not "suppressed" and is not
+      "detected" either -- inventing a finding from a missing key would be
+      the same class of mistake as inventing a suppression.
+
+    Returns one :class:`BrokerTakeProfit` per affected position, in input
+    order; an empty list when nothing carries one.
+    """
+    found: list[BrokerTakeProfit] = []
+    for position in positions:
+        rate = position.take_profit_rate
+        if position.is_no_take_profit or rate is None:
+            continue
+        if not math.isfinite(rate) or rate <= 0:
+            continue
+        multiple: float | None = None
+        if math.isfinite(position.entry_price) and position.entry_price > 0:
+            multiple = rate / position.entry_price
+        found.append(
+            BrokerTakeProfit(
+                position_id=position.position_id,
+                instrument_id=position.instrument_id,
+                entry_price=position.entry_price,
+                take_profit_rate=rate,
+                multiple=multiple,
+            )
+        )
+    if found:
+        _logger.warning(
+            "%d of %d open position(s) carry a broker-side take-profit this app "
+            "never requested (e.g. position %s at %.4f, %s of its open rate) -- "
+            "if one fires, gate 11 will halt with unmatched_open_lot rather than "
+            "auto-resolve (DESIGN.md §6.A)",
+            len(found),
+            len(positions),
+            found[0].position_id,
+            found[0].take_profit_rate,
+            f"{found[0].multiple:.2f}x" if found[0].multiple is not None else "unknown x",
+        )
+    return found
+
+
+def notify_gate_11_failure(
+    notifier: TelegramNotifier,
+    result: GateResult,
+    *,
+    trading_date: str,
+    session_id: int | None = None,
+) -> None:
+    """Send the Telegram alert for a failed gate 11 -- the same wiring as
+    :func:`notify_gate_10_failure`, over the already-built notify layer.
+    ``result.reason``/``result.details`` already name every discrepancy
+    (position id, symbol, which of the two directions).
+
+    Deliberately does NOT hold the wake lock or decide the session should
+    halt -- that is ``run_preflight()``'s job, not yet built (see module
+    docstring); scoping this function to cover that orchestration would
+    mean building the session loop just to give gate 11 somewhere to be
+    called from.
+    """
+    if result.passed:
+        raise ValueError("notify_gate_11_failure called with a passing GateResult")
     notifier.preflight_result(
         trading_date=trading_date,
         passed=False,

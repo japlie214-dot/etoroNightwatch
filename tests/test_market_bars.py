@@ -79,9 +79,10 @@ def _capture_bars_logs() -> Iterator[list[logging.LogRecord]]:
         logger.removeHandler(handler)
 
 
-def _search_response(instrument_id: int = 1001) -> httpx.Response:
+def _search_response(instrument_id: int = 1001, symbol: str = "SPY") -> httpx.Response:
     return httpx.Response(
-        200, json={"instruments": [{"instrumentId": instrument_id, "name": "SPY"}]}
+        200,
+        json={"items": [{"instrumentId": instrument_id, "internalSymbolFull": symbol}]},
     )
 
 

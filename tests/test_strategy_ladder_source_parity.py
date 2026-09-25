@@ -1,6 +1,6 @@
 """Tests the ported ``nightwatch.strategy.ladder`` against the REAL,
 unmodified ``etoro_trader`` source strategy -- a real external oracle, not a
-self-referential fixture (HANDOFF_2026-09-05_evening.md §1: "a green suite
+self-referential fixture (board nightwatch/handoff-2026-09-05-evening.md §1: "a green suite
 is evidence about your fixtures, not about reality").
 
 Two kinds of check:
@@ -146,7 +146,7 @@ def _make_source_harness(**overrides) -> StdBandLadderCashRecycleHarness:
 
 
 def test_source_reproduces_documented_bug_no_reentry_bucket_ever_created():
-    """HANDOFF_2026-09-05_evening.md §1's bug #1, reproduced against the
+    """board nightwatch/handoff-2026-09-05-evening.md §1's bug #1, reproduced against the
     REAL source code: a lot sold profitably after SPY has genuinely made a
     new ATH since the lot was bought should classify as a new-ATH sale and
     create a deferred re-entry bucket. It never does, because the winning

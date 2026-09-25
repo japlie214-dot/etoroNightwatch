@@ -1,4 +1,4 @@
-"""The 2026-09-11 live-window probe (HANDOFF_2026-09-05.md, DESIGN_market_data.md
+"""The 2026-09-11 live-window probe (board nightwatch/handoff-2026-09-05.md, DESIGN_market_data.md
 §10.5/§10.6/§10.9-§10.13). ONE self-contained on-device script that batches every
 open question this project has that needs a live weekday market and/or
 on-device Chaquopy execution, because Friday 2026-09-11 is the operator's only
@@ -10,7 +10,7 @@ source tree on ``sys.path`` (this file adds ``app/src/main/python`` itself,
 see ``_ensure_nightwatch_importable`` below, so it works whether invoked from
 a plain interpreter that happens to share this repo's layout, or from inside
 the installed app's own process). The dev PC cannot reach eToro at all -- see
-HANDOFF.md §2 / HANDOFF_2026-09-04_market_data.md §2.8, the Kominfo DNS
+board nightwatch/handoff.md §2 / board nightwatch/handoff-2026-09-04-market-data.md §2.8, the Kominfo DNS
 sinkhole -- so nothing in sections B/C/D/E1/E2 below can be exercised from a
 desktop machine; only section A's pure-import checks and the whole file's own
 ``python -m py_compile`` syntax check can run off-device.
@@ -140,7 +140,7 @@ def run_section(
 ) -> bool:
     """Run one section in its own thread with a hard timeout.
 
-    HANDOFF_2026-09-05.md's brief: "a hang or exception in one [section] must
+    board nightwatch/handoff-2026-09-05.md's brief: "a hang or exception in one [section] must
     never let other sections fail to report." A per-call ``httpx`` timeout
     handles the specific cause of the LAST hang (DESIGN_market_data.md §8),
     but this is a second, independent layer against anything else that could
@@ -180,7 +180,7 @@ def run_section(
 
 
 def section_a_chaquopy_imports(output_dir: Path) -> None:
-    """HANDOFF_2026-09-05.md §7 item 4 / DESIGN_market_data.md §10.3.
+    """board nightwatch/handoff-2026-09-05.md §7 item 4 / DESIGN_market_data.md §10.3.
 
     READ-ONLY: no eToro call anywhere in this function. Verifies numpy,
     pandas, exchange_calendars, and httpx actually import and do real work
@@ -396,7 +396,7 @@ def _extract_candle_rows(data: Any) -> list[Mapping[str, Any]]:
 
 def _check_truthiness(section_label: str, row: Mapping[str, Any], keys: Sequence[str]) -> None:
     """Flag any key in ``keys`` whose value is present but falsy (0, 0.0,
-    "", False) -- HANDOFF_2026-09-05.md §4's "fourth instance" defect class:
+    "", False) -- board nightwatch/handoff-2026-09-05.md §4's "fourth instance" defect class:
     an ``or``/``.get(..., default)`` chain silently loses a legitimate falsy
     value to a fallback. This does not fix anything; it only reports.
     """
@@ -412,7 +412,7 @@ def _check_truthiness(section_label: str, row: Mapping[str, Any], keys: Sequence
 
 
 def section_c_parser_audit(client: Any, output_dir: Path) -> None:
-    """HANDOFF_2026-09-05.md §6/§8: audit the six parsers never independently
+    """board nightwatch/handoff-2026-09-05.md §6/§8: audit the six parsers never independently
     re-verified against a live payload this week: ``_parse_candle``,
     ``get_rates``, ``get_eligibility``, ``_parse_order_result``,
     ``get_instruments``, ``get_costs``.
@@ -592,7 +592,7 @@ def section_c_parser_audit(client: Any, output_dir: Path) -> None:
 
 
 def section_d_sleeve_arithmetic(client: Any, output_dir: Path) -> None:
-    """HANDOFF_2026-09-05.md §11's explicit ask: re-derive sleeve arithmetic
+    """board nightwatch/handoff-2026-09-05.md §11's explicit ask: re-derive sleeve arithmetic
     from THIS probe, not from any number in any document, immediately before
     any migration. READ-ONLY: ``get_balance``, ``get_portfolio``,
     ``get_candles`` only.
@@ -893,7 +893,7 @@ def section_e2_real_money_order(
         except Exception as e:
             _p(f"E2: fetching new position FAILED: {_fmt_exc(e)}")
 
-    # Deliberately NOT an `x and y or z` chain (HANDOFF_2026-09-05.md §4's
+    # Deliberately NOT an `x and y or z` chain (board nightwatch/handoff-2026-09-05.md §4's
     # "fourth instance": a legitimate falsy value, e.g. a genuine 0.0 fee,
     # must not be lost to a fallback here of all places).
     disclosed_fee_raw = next(iter(fee_like.values())) if fee_like else None

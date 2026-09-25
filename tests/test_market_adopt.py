@@ -2,7 +2,7 @@
 §10.9, §10.10; nightwatch.market.adopt).
 
 Entirely offline -- no eToro call (the dev PC cannot reach eToro at all,
-HANDOFF_2026-09-04_market_data.md §2.8) and no Tiingo call (a fixed,
+board nightwatch/handoff-2026-09-04-market-data.md §2.8) and no Tiingo call (a fixed,
 synthetic SPY series is used instead of a live fetch, so this suite is not
 market-hours-dependent). ``positions`` fixtures are built directly as
 ``etoro.models.Position`` objects -- i.e. as if ``_parse_position`` had
@@ -14,7 +14,7 @@ live account, 2024-09-03/2024-09-06, pre the 2024-10-11 4:1 split), several
 more synthetic SCHG positions spanning different SPY drawdown tiers, one
 UPRO position, and one position in an instrument this app does not manage --
 the "a test that passes because nothing happened is not a pass" rule this
-project's own history keeps citing (HANDOFF.md §7 rule 1, this task's
+project's own history keeps citing (board nightwatch/handoff.md §7 rule 1, this task's
 brief) means a fixture with zero positions or one that never exercises the
 exclusion path would prove nothing.
 """
@@ -184,7 +184,7 @@ def test_spy_context_index_unsorted_input_still_correct() -> None:
 
 
 def test_spy_context_index_uses_raw_close_not_adj_close() -> None:
-    """HANDOFF_2026-09-05_evening.md §4: ATH/drawdown/tier are LEVELS and
+    """board nightwatch/handoff-2026-09-05-evening.md §4: ATH/drawdown/tier are LEVELS and
     must be derived from raw ``close``, never ``adjClose`` -- unlike this
     module's earlier docstring, which (before this fix) claimed adjClose."""
     bars = [
@@ -260,7 +260,7 @@ def test_apply_writes_exactly_the_planned_rows_with_correct_fields(repo: Repo) -
     assert row.entry_spy_close == 104.5
     assert row.entry_spy_drawdown == pytest.approx(-0.05)
     assert row.entry_tier == 0
-    # migration 005, HANDOFF_2026-09-05_evening.md §3a: every position this
+    # migration 005, board nightwatch/handoff-2026-09-05-evening.md §3a: every position this
     # module resolves has MEASURED context -- an out-of-window position
     # halts the whole run instead (see the predates-window tests below).
     assert row.entry_context_source == "derived"
@@ -371,7 +371,7 @@ def test_spy_series_not_covering_open_date_halts(repo: Repo) -> None:
 
 
 def test_position_predating_the_fetched_window_halts_with_a_specific_reason(repo: Repo) -> None:
-    """HANDOFF_2026-09-05_evening.md §3a Case 3: a position whose open_date
+    """board nightwatch/handoff-2026-09-05-evening.md §3a Case 3: a position whose open_date
     predates the fetched SPY window entirely must HALT LOUDLY, name the
     offending position, and write NOTHING -- never silently assign a tier.
     This is the same underlying "SPY series does not cover" mechanism as

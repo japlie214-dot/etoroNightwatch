@@ -1,0 +1,16 @@
+{
+  "balances": [
+    {
+      "accountId": "900002",
+      "accountType": "real",
+      "balance": 1.25,
+      "currency": "USD",
+      "displayBalance": 1.25,
+      "displayCurrency": "USD",
+      "exchangeRate": 1
+    }
+  ],
+  "displayCurrency": "USD",
+  "gcid": 900001,
+  "totalBalance": 1.25
+}

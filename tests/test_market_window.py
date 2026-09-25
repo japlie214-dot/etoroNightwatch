@@ -66,7 +66,7 @@ def _real_session_window(start: str, end: str) -> list[str]:
 
 
 # A real ~39-month historical span with >=819 XNYS sessions (MIN_HISTORY_BARS,
-# HANDOFF_2026-09-05_evening.md §3), entirely in the past so it never depends
+# board nightwatch/handoff-2026-09-05-evening.md §3), entirely in the past so it never depends
 # on "today". Verified against a real exchange_calendars XNYS session count
 # (825 sessions in this exact range) while writing this fixture.
 _WINDOW_START = "2022-05-17"
@@ -351,7 +351,7 @@ def test_assemble_spy_signal_uses_etoro_candle_fallback():
 
 
 # ---------------------------------------------------------------------------
-# FIX 1 (HANDOFF_2026-09-05_evening.md §3): the 39-month / 819-bar window
+# FIX 1 (board nightwatch/handoff-2026-09-05-evening.md §3): the 39-month / 819-bar window
 # ---------------------------------------------------------------------------
 
 
@@ -406,7 +406,7 @@ def test_assemble_spy_signal_finds_a_peak_that_would_have_aged_out_of_a_13_month
 
 
 # ---------------------------------------------------------------------------
-# FIX 2a (HANDOFF_2026-09-05_evening.md §3a Case 2): the ATH floor
+# FIX 2a (board nightwatch/handoff-2026-09-05-evening.md §3a Case 2): the ATH floor
 # ---------------------------------------------------------------------------
 
 
@@ -487,7 +487,7 @@ def testspy_context_from_history_raises_on_bad_open_lot_ath():
 
 
 # ---------------------------------------------------------------------------
-# FIX 3 (HANDOFF_2026-09-05_evening.md §4): raw close for ATH/tier, never
+# FIX 3 (board nightwatch/handoff-2026-09-05-evening.md §4): raw close for ATH/tier, never
 # adjClose
 # ---------------------------------------------------------------------------
 

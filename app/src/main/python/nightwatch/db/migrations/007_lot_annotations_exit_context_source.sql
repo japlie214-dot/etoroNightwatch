@@ -1,0 +1,42 @@
+-- Migration 007: lot_annotations gains exit_context_source (DESIGN_session.md
+-- §3.4, closing the mirror-image gap left by migration 006).
+--
+-- Migration 006 gave the BUY side of the abandoned-intent auto-resolve path
+-- (engine/reconcile.py's resolve_abandoned_intent_adoptions) a distinct,
+-- permanent, greppable entry_context_source value
+-- ('adopted_from_abandoned_intent') for a lot auto-adopted from this app's
+-- own persisted, abandoned intent record. That module's own docstring was
+-- always explicit that the mirror-image case -- an abandoned CLOSE intent
+-- that later fills, leaving an `unmatched_open_lot` discrepancy (the
+-- position vanished, but the annotation still says open) -- resolves via a
+-- *different* direction, never the buy-side adopt path. Until now that
+-- direction had no auto-resolution at all: gate 11 simply failed closed and
+-- waited for a human, defeating the "no forced human-in-the-loop" decision
+-- for exactly this one mirror-image case.
+--
+-- entry_context_source cannot hold this value: it is stamped once at INSERT
+-- and Repo.update_lot_annotation deliberately never touches it again (it is
+-- entry-time provenance, immutable by design, same reasoning as
+-- entry_date/entry_amount's re-link key). The close-side auto-resolve event
+-- happens strictly LATER, at update_lot_annotation time -- so it needs its
+-- own column, not a repurposed one, exactly mirroring entry_context_source
+-- but on the exit side.
+--
+-- NULL (the default, and the value of every row written before this
+-- migration) means "closed the ordinary way, or still open" -- no special
+-- provenance to record, same spirit as entry_context_source's 'derived'
+-- baseline but nullable here since most closes are NOT this auto-resolve
+-- path (unlike entry_context_source, which every row has some value for).
+-- 'resolved_from_abandoned_intent' marks a row closed by
+-- engine.reconcile.resolve_abandoned_close_intents's narrow auto-resolve
+-- path: an unmatched_open_lot discrepancy that matched one of this app's
+-- OWN persisted, abandoned close Intent rows (by position_id, symbol, and
+-- book) -- never a fabrication, exactly like its buy-side mirror.
+--
+-- A plain ADD COLUMN suffices here (no table rebuild, unlike migration 006):
+-- SQLite cannot widen an existing CHECK constraint in place, but adding a
+-- brand-new nullable column with its own CHECK is a normal ALTER TABLE.
+ALTER TABLE lot_annotations
+    ADD COLUMN exit_context_source TEXT DEFAULT NULL
+        CHECK (exit_context_source IS NULL
+               OR exit_context_source = 'resolved_from_abandoned_intent');

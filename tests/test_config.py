@@ -12,6 +12,7 @@ from nightwatch.config import (
     ConfigError,
     EtoroEnvironment,
     MissingCredentialError,
+    ReconciliationConfig,
     StrategyConfig,
     TradingMode,
     load_config,
@@ -24,6 +25,70 @@ def test_load_config_defaults(config_path: Path, secrets_path: Path, host: Deskt
     assert config.mode is TradingMode.DRY_RUN
     assert config.etoro.environment is EtoroEnvironment.DEMO
     assert config.symbols.all == ("SPY", "SCHG", "UPRO")
+    # ReconciliationConfig's defaults load even with no [reconciliation]
+    # section in config.toml at all (MINIMAL_CONFIG_TOML has none) -- the
+    # PROPOSED-but-unconfirmed N=3 default, and the auto-adopt size
+    # tolerance, both come through untouched.
+    assert config.reconciliation.non_terminal_order_sessions_before_abandoned == 3
+    assert config.reconciliation.abandoned_intent_size_tolerance_pct == 0.02
+
+
+def test_load_config_reconciliation_section_overrides_defaults(
+    config_path: Path, secrets_path: Path, host: DesktopHost
+) -> None:
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8")
+        + "\n[reconciliation]\n"
+        + "non_terminal_order_sessions_before_abandoned = 5\n"
+        + "abandoned_intent_size_tolerance_pct = 0.05\n",
+        encoding="utf-8",
+    )
+    config = load_config(config_path=config_path, secrets_path=secrets_path, env={}, host=host)
+    assert config.reconciliation.non_terminal_order_sessions_before_abandoned == 5
+    assert config.reconciliation.abandoned_intent_size_tolerance_pct == 0.05
+
+
+# ---------------------------------------------------------------------------
+# ReconciliationConfig (DESIGN_session.md §3.4/§14 item 2 -- the operator's
+# 2026-09-06 "no forced human-in-the-loop" decision). N (the sessions-before-
+# abandoned threshold) is PROPOSED, not confirmed -- these tests pin the
+# validation behaviour, not the specific default value's correctness.
+# ---------------------------------------------------------------------------
+
+
+def test_reconciliation_config_defaults() -> None:
+    config = ReconciliationConfig()
+    assert config.non_terminal_order_sessions_before_abandoned == 3
+    assert config.abandoned_intent_size_tolerance_pct == 0.02
+
+
+def test_reconciliation_config_rejects_non_positive_session_threshold() -> None:
+    with pytest.raises(ConfigError):
+        ReconciliationConfig(non_terminal_order_sessions_before_abandoned=0)
+
+
+def test_reconciliation_config_rejects_negative_session_threshold() -> None:
+    with pytest.raises(ConfigError):
+        ReconciliationConfig(non_terminal_order_sessions_before_abandoned=-1)
+
+
+def test_reconciliation_config_rejects_zero_size_tolerance() -> None:
+    with pytest.raises(ConfigError):
+        ReconciliationConfig(abandoned_intent_size_tolerance_pct=0.0)
+
+
+def test_reconciliation_config_rejects_size_tolerance_at_or_above_one() -> None:
+    with pytest.raises(ConfigError):
+        ReconciliationConfig(abandoned_intent_size_tolerance_pct=1.0)
+
+
+def test_reconciliation_config_accepts_a_custom_valid_threshold() -> None:
+    config = ReconciliationConfig(
+        non_terminal_order_sessions_before_abandoned=7,
+        abandoned_intent_size_tolerance_pct=0.10,
+    )
+    assert config.non_terminal_order_sessions_before_abandoned == 7
+    assert config.abandoned_intent_size_tolerance_pct == 0.10
 
 
 def test_missing_config_file_raises(tmp_path: Path, host: DesktopHost) -> None:

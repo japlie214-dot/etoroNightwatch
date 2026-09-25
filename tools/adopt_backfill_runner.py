@@ -2,7 +2,7 @@
 §4.4, §4.7, §10.9, §10.10; ``nightwatch.market.adopt``).
 
 **Split by design, matching ``adopt.py``'s own "no network I/O" rule and the
-project's one real, hard constraint (HANDOFF_2026-09-04_market_data.md
+project's one real, hard constraint (board nightwatch/handoff-2026-09-04-market-data.md
 §2.8): the dev PC cannot reach eToro at all (Kominfo DNS sinkhole), but IT
 CAN reach Tiingo.** So this file is deliberately two independently-testable
 halves:
@@ -149,7 +149,7 @@ def fetch_spy_history(
 ) -> list[EodBar]:
     """``TiingoClient.get_eod_history('SPY', ...)`` -- the ONLY network call
     in this file. Reachable from the dev PC (confirmed live 2026-09-05,
-    unlike eToro, HANDOFF_2026-09-04_market_data.md §2.8).
+    unlike eToro, board nightwatch/handoff-2026-09-04-market-data.md §2.8).
     """
     host = DesktopHost(root=config_dir) if config_dir else DesktopHost()
     config = load_config(host=host)

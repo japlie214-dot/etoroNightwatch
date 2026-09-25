@@ -27,14 +27,16 @@ a config value can be wrong in a way no amount of local type-checking catches.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from dataclasses import dataclass
-from typing import Any, Callable, Final, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Literal, Mapping, Sequence
 
 import httpx
 
 from ..config import Credentials, EtoroConfig
 from ..db.repo import Instrument, Repo
+from .contracts import ContractReport, check_payload
 from . import auth
 from .errors import (
     EtoroAuthError,
@@ -48,6 +50,7 @@ from .errors import (
     EtoroValidationError,
 )
 from .models import (
+    FILLED_ORDER_STATUSES,
     Balance,
     Candle,
     CloseRequest,
@@ -63,6 +66,9 @@ from .models import (
     compute_available_cash,
 )
 from .ratelimit import RateLimiter, RequestClass
+
+if TYPE_CHECKING:
+    from ..notify.telegram import TelegramNotifier
 
 __all__ = [
     "MAX_LEVERAGE",
@@ -149,6 +155,7 @@ class EtoroClient:
         transport: httpx.BaseTransport | None = None,
         client: httpx.Client | None = None,
         repo: Repo | None = None,
+        contract_notifier: TelegramNotifier | None = None,
         rate_limiter: RateLimiter | None = None,
         sleep: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
@@ -183,6 +190,8 @@ class EtoroClient:
             transport=transport,
         )
         self._repo = repo
+        self._contract_notifier = contract_notifier
+        self._reported_contract_drift: set[tuple[Any, ...]] = set()
         self._limiter = rate_limiter or RateLimiter()
         self._sleep = sleep
         self._clock = clock
@@ -192,6 +201,16 @@ class EtoroClient:
         #: The most recent response's `Date` header, for preflight gate 4
         #: (clock skew > 60s aborts). `None` until at least one call is made.
         self.last_server_date: str | None = None
+        #: Last write response body, including permanent HTTP rejections, for
+        #: probe evidence. Reset before each write so failures cannot expose a
+        #: previous order's response.
+        self.last_write_response_body: Any = None
+        #: Exact JSON body passed to the latest write request, available even
+        #: when the transport raises before an HTTP response arrives.
+        self.last_write_request_body: Any = None
+        #: Every HTTP response from the dedicated close-order lookup endpoint,
+        #: including retryable and terminal errors, for close-probe evidence.
+        self.last_close_lookup_responses: list[dict[str, Any]] = []
 
     # -- lifecycle -----------------------------------------------------------
 
@@ -225,6 +244,42 @@ class EtoroClient:
                 break
             self._sleep(max(wait, 0.01))
 
+    def _check_response_contract(
+        self,
+        contract: str,
+        payload: Any,
+        *,
+        severity: Literal["critical", "advisory"],
+    ) -> ContractReport:
+        """Report structural drift once per client; the parser enforces critical fields."""
+        report = check_payload(contract, payload)
+        if not report.violations:
+            return report
+
+        signature = tuple(sorted(
+            (v.kind, v.path, v.expected, v.actual) for v in report.violations
+        ))
+        key = (self.environment, contract, signature)
+        if key not in self._reported_contract_drift:
+            self._reported_contract_drift.add(key)
+            summary = "; ".join(
+                f"{kind} {path} (expected {expected}, got {actual})"
+                for kind, path, expected, actual in signature
+            )
+            message = (
+                f"[{self.environment.upper()}] eToro {contract} payload contract drift: "
+                f"{summary}"
+            )
+            (_logger.error if severity == "critical" else _logger.warning)("%s", message)
+            if self._contract_notifier is not None:
+                try:
+                    self._contract_notifier.send(message, event="etoro_contract_drift")
+                except Exception:
+                    # Alert delivery must not turn an API read into a trading failure.
+                    _logger.warning("eToro contract drift alert delivery failed")
+
+        return report
+
     def _request(
         self,
         method: str,
@@ -234,16 +289,21 @@ class EtoroClient:
         params: Mapping[str, Any] | None = None,
         json_body: Any | None = None,
         request_id: str | None = None,
+        response_capture: list[dict[str, Any]] | None = None,
     ) -> httpx.Response:
         """Send one request with rate limiting, retries, and typed errors.
 
-        Retry policy (DESIGN's stated policy, carried over from
-        TelegramNotifier's proven shape): network errors and 5xx retry with
-        bounded exponential backoff; 429 retries honouring `Retry-After`;
-        every other 4xx is raised immediately, never retried.
+        Reads retry network errors, 5xx, and 429 with bounded backoff. Writes
+        get one attempt: a timeout or server error can follow an accepted
+        order, so retrying could duplicate it. Every other 4xx is also raised
+        immediately.
         """
+        if request_class == "write":
+            self.last_write_request_body = json_body
+            self.last_write_response_body = None
+        attempt_limit = 1 if request_class == "write" else self._max_attempts
         last_error: Exception | str = "unknown error"
-        for attempt in range(1, self._max_attempts + 1):
+        for attempt in range(1, attempt_limit + 1):
             self._wait_for_capacity(request_class)
             headers = auth.build_headers(self._credentials, request_id)
             try:
@@ -252,19 +312,30 @@ class EtoroClient:
                 )
             except httpx.TimeoutException as exc:
                 last_error = exc
-                if attempt == self._max_attempts:
+                if attempt == attempt_limit:
                     raise EtoroTimeoutError(f"timed out calling {path}: {exc}") from exc
                 self._sleep(self._backoff(attempt))
                 continue
             except httpx.RequestError as exc:
                 last_error = exc
-                if attempt == self._max_attempts:
+                if attempt == attempt_limit:
                     raise EtoroNetworkError(f"network error calling {path}: {exc}") from exc
                 self._sleep(self._backoff(attempt))
                 continue
 
             self.last_server_date = response.headers.get("Date", self.last_server_date)
             self._limiter.reconcile(request_class, response.headers)
+            if response_capture is not None:
+                response_capture.append({
+                    "method": method, "path": path, "params": params,
+                    "status_code": response.status_code, "body": response.text,
+                })
+
+            if request_class == "write" and response.status_code >= 400:
+                try:
+                    self.last_write_response_body = response.json()
+                except Exception:
+                    self.last_write_response_body = response.text
 
             if response.status_code < 300:
                 return response
@@ -277,14 +348,14 @@ class EtoroClient:
             if response.status_code == 429:
                 retry_after = RateLimiter.retry_after_from_headers(response.headers) or 1.0
                 last_error = f"429 rate limited (retry_after={retry_after}s)"
-                if attempt == self._max_attempts:
+                if attempt == attempt_limit:
                     raise EtoroRateLimitError(str(last_error), retry_after=retry_after)
                 self._sleep(retry_after)
                 continue
 
             if 500 <= response.status_code < 600:
                 last_error = f"{response.status_code} server error: {self._safe_body(response)}"
-                if attempt == self._max_attempts:
+                if attempt == attempt_limit:
                     raise EtoroServerError(str(last_error), status_code=response.status_code)
                 self._sleep(self._backoff(attempt))
                 continue
@@ -371,18 +442,23 @@ class EtoroClient:
         explicitly rather than reintroducing it into this hot path.
         """
         data = self._fetch_portfolio_envelope()
-        if "credit" not in data:
+        missing = {"credit", "orders", "ordersForOpen"} - data.keys()
+        if missing:
             raise EtoroValidationError(
-                "portfolio response missing 'credit' -- cannot compute "
-                "available_cash (broker contract change, not a value to "
-                f"silently default to 0; body keys seen: {sorted(data.keys())!r})"
+                "portfolio response missing required available-cash fields "
+                f"{sorted(missing)!r}; body keys seen: {sorted(data.keys())!r}"
             )
-        credit = float(data["credit"])
-        available = compute_available_cash(
-            credit,
-            orders_for_open=data.get("ordersForOpen", []),
-            orders=data.get("orders", []),
-        )
+        try:
+            available = compute_available_cash(
+                data["credit"],
+                orders_for_open=data["ordersForOpen"],
+                orders=data["orders"],
+            )
+            credit = float(data["credit"])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise EtoroValidationError(
+                f"portfolio response has invalid available-cash fields: {exc}"
+            ) from exc
         return Balance(
             credit=credit,
             total_balance=None,
@@ -393,62 +469,197 @@ class EtoroClient:
     def verify_environment(self) -> None:
         """Probe that the credential's bound environment matches config.
 
-        DESIGN §5 gate 7 / §6.F: this must be *detected*, not assumed. A
-        config value alone cannot prove which environment a key is bound to
-        -- eToro binds a key to an environment at creation time and does not
-        expose that as a documented, stable response field, so this method
-        treats a handful of plausible signals as a *positive* mismatch
-        indicator without treating their absence as proof of a match:
+        DESIGN §5 gate 7 / §6.F: this must be *detected*, not assumed.
 
-        * an explicit boolean/string field in the balances payload (several
-          plausible names are checked, since the exact shape has not yet
-          been observed against a live key -- see the module docstring on
-          `EtoroClient` and the HANDOFF note this ships with);
-        * a real-money-shaped response (e.g. a non-trivial `totalBalance`)
-          returned while `config.environment` is `demo`, which is the one
-          asymmetric signal that's fairly safe to trust: eToro demo accounts
-          are seeded with a fixed, well-known balance, not zero and not
-          identical to a funded real account by chance.
+        **Corrected 2026-09-11, SEVERE -- this method was a silent no-op.**
+        It used to derive its verdict solely from
+        :meth:`_detect_environment` applied to the ``/balances`` body, and
+        that function only ever looked at the body's TOP LEVEL. A read-only
+        capture taken today against this operator's account under BOTH
+        configs (``data/probe_2026-09-11/env_probe_real/`` and
+        ``env_probe_demo/``, produced by ``probe.env_probe``) shows the live
+        ``/balances`` body is::
 
-        Raises :class:`EtoroEnvironmentMismatchError` on a detected mismatch.
-        Raises nothing (returns normally) when no positive signal is found --
-        that is "unable to confirm," not "confirmed OK," and callers relying
-        on this for gate 7 should treat it only as an additional check
-        layered on top of `get_balance()` succeeding at all (a real key
-        pointed at a demo-only endpoint, or vice versa, still fails outright
-        with 401/403 in the common case, which `get_balance` already turns
-        into `EtoroAuthError`).
+            {"gcid": 18049964, "totalBalance": ..., "displayCurrency": "USD",
+             "balances": [{"accountId": "17761031", "accountType": "Trading",
+                           "subType": null, "balance": ..., ...}]}
+
+        -- which carries no environment marker at ANY nesting depth. The
+        nested ``accountType`` is ``"Trading"`` (an account *kind*, not an
+        environment). Worse, the demo and real responses are **structurally
+        identical**: same ``gcid``, same ``accountId``, same ``accountType``,
+        same ``subType``. ``/balances`` is account-global, not
+        environment-scoped, so it is *structurally incapable* of telling the
+        two apart, and this method therefore detected nothing, ever, on the
+        REAL account as much as on demo. Gate 7 was not guarding anything.
+
+        The old docstring also claimed a "fairly safe to trust" asymmetric
+        signal -- that a demo account carries a fixed seeded ``totalBalance``
+        distinguishable from a funded real one. Today's capture refutes it:
+        real ``totalBalance=56792.27`` vs demo ``56775.82``, a 0.03%
+        difference. That heuristic is not implemented here and must not be.
+
+        **What actually discriminates**, observed live today in both
+        directions, is eToro's per-credential authorisation on the
+        environment PATH SEGMENT (see :attr:`EtoroConfig.path_segment`):
+
+        ==================  =====================================  ==========
+        credential bound    ``GET .../trading/info/demo/portfolio``  ``.../portfolio``
+        ==================  =====================================  ==========
+        demo                200                                    403
+        real                403                                    200
+        ==================  =====================================  ==========
+
+        (403 body: ``{"errorCode": "InsufficientPermissions", ...}``.) That
+        is a *positive*, bidirectional identification of the environment the
+        credential is actually bound to -- exactly what gate 7 needs, and it
+        uses an endpoint this client already calls
+        (:meth:`_fetch_portfolio_envelope`). :meth:`probe_environment`
+        implements it.
+
+        Fail-closed semantics are unchanged and deliberate: this method
+        raises :class:`EtoroEnvironmentMismatchError` on a *detected*
+        mismatch and returns normally otherwise. Returning normally still
+        means "no mismatch detected" -- which is "unable to confirm" when
+        :meth:`probe_environment` returns ``None`` (an ambiguous or failed
+        probe), NOT "confirmed OK". Callers that need positive confirmation
+        before doing something dangerous must check
+        :meth:`probe_environment`'s return value themselves and refuse on
+        ``None`` -- which is precisely what
+        :func:`nightwatch.probes.order_latency.evaluate_demo_confirmation`
+        does. The fix here makes positive confirmation *possible*; it does
+        not make refusal less likely.
         """
         response = self._request(
             "GET", "/api/v1/balances", request_class="read"
         )
         data = response.json()
+        # Body scan first: free (the response is already in hand), and it
+        # will start working on its own the day eToro adds a marker. Today
+        # it returns None against the live body -- see this method's
+        # docstring and _detect_environment's.
         detected = self._detect_environment(data)
+        if detected is None:
+            detected = self.probe_environment()
         if detected is not None and detected != self._config.environment.value:
             raise EtoroEnvironmentMismatchError(
                 configured=self._config.environment.value, detected=detected
             )
 
+    #: The two paths whose 200/403 pattern positively identifies which
+    #: environment a credential is bound to (see :meth:`verify_environment`).
+    #: Both are GETs on an endpoint this client already uses; neither can
+    #: place, modify, or close anything.
+    _ENV_PROBE_DEMO_PATH: Final[str] = "/api/v1/trading/info/demo/portfolio"
+    _ENV_PROBE_REAL_PATH: Final[str] = "/api/v1/trading/info/portfolio"
+
+    def _probe_segment_access(self, path: str) -> bool | None:
+        """``True`` if this credential may GET ``path``, ``False`` if eToro
+        refuses it with 401/403, ``None`` if the question could not be
+        answered at all.
+
+        The ``None`` case matters as much as the other two: a timeout, a
+        5xx, a rate-limit exhaustion or an unexpected 4xx tells us nothing
+        about the credential's binding, and must NOT be collapsed into
+        "denied" -- that would let a flaky network manufacture a confident
+        environment verdict out of nothing.
+        """
+        try:
+            self._request("GET", path, request_class="read")
+            return True
+        except EtoroAuthError:
+            return False
+        except EtoroError:
+            return None
+
+    def probe_environment(self) -> str | None:
+        """Positively identify the environment this CREDENTIAL is bound to.
+
+        Returns ``"demo"``, ``"real"``, or ``None`` for "could not
+        determine" -- never a guess. Costs two read-class GETs.
+
+        Method and the live evidence for it are documented on
+        :meth:`verify_environment`: eToro authorises a credential for the
+        demo path segment or the real one, not both, so the pair of
+        (allowed, denied) answers names the binding. This deliberately
+        probes the *credential*, not the config -- config is the claim being
+        checked, so it is not consulted here at all.
+
+        ``None`` is returned whenever the two answers do not form a clean
+        exclusive pair -- both allowed, both denied, or either probe
+        inconclusive. A future eToro change that granted a credential both
+        segments would land here as ``None`` (refuse), not as a coin flip.
+        """
+        demo_allowed = self._probe_segment_access(self._ENV_PROBE_DEMO_PATH)
+        real_allowed = self._probe_segment_access(self._ENV_PROBE_REAL_PATH)
+        if demo_allowed is None or real_allowed is None:
+            return None
+        if demo_allowed and not real_allowed:
+            return "demo"
+        if real_allowed and not demo_allowed:
+            return "real"
+        return None
+
     @staticmethod
     def _detect_environment(payload: Mapping[str, Any]) -> str | None:
-        """Best-effort extraction of an environment signal from a balances body.
+        """Best-effort extraction of an environment marker from a balances body.
 
-        Returns ``"demo"``, ``"real"``, or ``None`` if no signal is present.
-        Kept as a static, independently-testable function so its heuristic
-        can be exercised with a hand-built payload without any HTTP call.
+        Returns ``"demo"``, ``"real"``, or ``None`` if no marker is present.
+        Kept as a static, independently-testable function so it can be
+        exercised with a hand-built payload without any HTTP call.
+
+        **This returns ``None`` against the real live payload, and that is
+        the correct answer, not a bug.** The live ``/balances`` body carries
+        no environment marker at any depth, and is byte-shape-identical
+        between demo and real (see :meth:`verify_environment`'s docstring
+        for the captured evidence). This function is retained rather than
+        deleted for two reasons: it is the cheap check (the body is already
+        in hand), and it starts working for free if eToro ever adds a
+        marker. It is no longer the *only* thing gate 7 relies on.
+
+        Fixed 2026-09-11: the scan now descends into nested dicts and lists
+        instead of looking only at the top level -- the old top-level-only
+        scan was the specific defect that made
+        :meth:`verify_environment` a silent no-op. Note that descending is
+        necessary but was never sufficient here: the live body's only
+        nested near-match is ``accountType: "Trading"``, which is an account
+        kind, not an environment, and is correctly ignored below because
+        ``"trading"`` is in neither value set.
         """
-        for key in ("isDemo", "is_demo", "demo"):
-            if key in payload:
-                value = payload[key]
-                if isinstance(value, bool):
-                    return "demo" if value else "real"
-        for key in ("accountType", "account_type", "environment"):
-            if key in payload:
-                value = str(payload[key]).strip().lower()
-                if value in ("demo", "virtual", "practice"):
-                    return "demo"
-                if value in ("real", "live"):
-                    return "real"
+        return EtoroClient._detect_environment_in(payload, _depth=0)
+
+    @staticmethod
+    def _detect_environment_in(node: Any, *, _depth: int) -> str | None:
+        """Recursive worker for :meth:`_detect_environment`.
+
+        Depth-bounded (8) so a pathological or cyclic-looking payload cannot
+        turn a safety probe into an unbounded walk.
+        """
+        if _depth > 8:
+            return None
+        if isinstance(node, Mapping):
+            for key in ("isDemo", "is_demo", "demo", "isVirtual", "is_virtual"):
+                if key in node and isinstance(node[key], bool):
+                    return "demo" if node[key] else "real"
+            for key in ("accountType", "account_type", "environment", "subType", "sub_type"):
+                if key in node and node[key] is not None:
+                    value = str(node[key]).strip().lower()
+                    if value in ("demo", "virtual", "practice"):
+                        return "demo"
+                    if value in ("real", "live"):
+                        return "real"
+                    # Anything else (e.g. the live body's "Trading") is not
+                    # an environment marker -- keep scanning, never guess.
+            for value in node.values():
+                found = EtoroClient._detect_environment_in(value, _depth=_depth + 1)
+                if found is not None:
+                    return found
+            return None
+        if isinstance(node, (list, tuple)):
+            for item in node:
+                found = EtoroClient._detect_environment_in(item, _depth=_depth + 1)
+                if found is not None:
+                    return found
         return None
 
     # -- gate 8, portfolio, pnl ------------------------------------------------
@@ -505,7 +716,7 @@ class EtoroClient:
     def _parse_position(raw: Mapping[str, Any]) -> Position:
         """Parse one broker position (DESIGN_market_data.md §4.2, §4.5, §10.7).
 
-        Bug found 2026-09-04, corrected 2026-09-05 (HANDOFF_2026-09-05.md §1,
+        Bug found 2026-09-04, corrected 2026-09-05 (board nightwatch/handoff-2026-09-05.md §1,
         §4): the previous version read ``currentRate``, ``invested``,
         ``unrealizedPL``, and ``symbol`` off every position -- a live,
         non-empty 227-position portfolio confirmed **none of those four keys
@@ -520,6 +731,16 @@ class EtoroClient:
         response missing any of them is a contract change, not something to
         silently default to ``0.0`` -- this raises
         :class:`~nightwatch.etoro.errors.EtoroValidationError` instead.
+
+        ``takeProfitRate``/``isNoTakeProfit`` and ``stopLossRate``/
+        ``isNoStopLoss`` are read as of 2026-09-11 (they were always in the
+        payload, never parsed -- see :class:`Position`'s docstring and
+        DESIGN.md §6.A "Broker-side exits"). They are deliberately NOT in
+        the required list: unlike ``units``/``openRate``/``amount`` they
+        carry no position-identity meaning, so a payload without them parses
+        to ``None``/``False`` rather than raising -- the detection helper
+        (:func:`nightwatch.engine.preflight.find_broker_take_profits`) treats
+        "not stated" as "not detected", never as "suppressed".
         """
         position_id = next(
             (raw[k] for k in ("positionID", "positionId", "id") if raw.get(k) is not None),
@@ -551,6 +772,14 @@ class EtoroClient:
             leverage=int(raw.get("leverage", 1)),
             is_buy=bool(raw.get("isBuy", True)),
             open_date=raw.get("openDateTime"),
+            take_profit_rate=(
+                float(raw["takeProfitRate"]) if raw.get("takeProfitRate") is not None else None
+            ),
+            is_no_take_profit=bool(raw.get("isNoTakeProfit", False)),
+            stop_loss_rate=(
+                float(raw["stopLossRate"]) if raw.get("stopLossRate") is not None else None
+            ),
+            is_no_stop_loss=bool(raw.get("isNoStopLoss", False)),
             raw=dict(raw),
         )
 
@@ -633,7 +862,7 @@ class EtoroClient:
             # before the ``isinstance`` fallback is ever considered, so a list
             # raised ``AttributeError: 'list' object has no attribute 'get'``
             # and the fallback was dead code. Found on-device 2026-09-05, the
-            # fifth bug of this family (HANDOFF_2026-09-05.md §4) and the
+            # fifth bug of this family (board nightwatch/handoff-2026-09-05.md §4) and the
             # first where the wrong assumption was about the *envelope* rather
             # than a field inside it. Branch explicitly, and raise on a shape
             # that is neither -- a silent empty list here would report "no
@@ -758,17 +987,50 @@ class EtoroClient:
             },
         )
         data = response.json()
-        # "items" is the real key; "instruments" is tolerated too (a
-        # concurrent test suite this module must not edit -- see
-        # tests/test_market_bars.py -- mocks the pre-correction shape).
-        rows = data.get("items", data.get("instruments", data if isinstance(data, list) else [data]))
-        exact = [r for r in rows if r.get("internalSymbolFull") == symbol]
-        matches = exact or rows
-        if not matches:
-            raise EtoroValidationError(f"no instrument found for symbol {symbol!r}")
-        row = matches[0]
+        if isinstance(data, list):
+            rows = data
+        elif isinstance(data, Mapping):
+            # "items" is the live key; "instruments" is tolerated for older
+            # callers and test fixtures, but fuzzy rows are never accepted.
+            rows = data.get("items", data.get("instruments"))
+        else:
+            rows = None
+        if not isinstance(rows, list) or any(
+            not isinstance(row, Mapping) for row in rows
+        ):
+            raise EtoroValidationError(
+                "market-data/search response must contain an array of objects"
+            )
+        exact = [row for row in rows if row.get("internalSymbolFull") == symbol]
+        if not exact:
+            raise EtoroValidationError(f"no exact instrument found for symbol {symbol!r}")
+        instrument_ids: list[int] = []
+        try:
+            for row in exact:
+                value = row.get("instrumentId", row.get("internalInstrumentId"))
+                if isinstance(value, bool):
+                    raise ValueError("boolean instrument id")
+                if isinstance(value, int):
+                    instrument_id = value
+                elif isinstance(value, str) and value.isdecimal():
+                    instrument_id = int(value)
+                else:
+                    raise ValueError("instrument id is not an integer")
+                if instrument_id <= 0:
+                    raise ValueError("instrument id must be positive")
+                instrument_ids.append(instrument_id)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise EtoroValidationError(
+                f"exact market-data/search result for {symbol!r} has no valid instrument id"
+            ) from exc
+        if len(set(instrument_ids)) != 1:
+            raise EtoroValidationError(
+                f"market-data/search returned ambiguous exact results for {symbol!r}"
+            )
+        row = exact[0]
+        instrument_id = instrument_ids[0]
         return InstrumentSearchResult(
-            instrument_id=int(row.get("instrumentId", row.get("internalInstrumentId"))),
+            instrument_id=instrument_id,
             symbol=symbol,
             name=row.get("internalInstrumentDisplayName") or row.get("name"),
             exchange=row.get("internalExchangeName") or row.get("exchange"),
@@ -843,6 +1105,7 @@ class EtoroClient:
             params={"instrumentIds": ",".join(str(i) for i in instrument_ids)},
         )
         data = response.json()
+        self._check_response_contract("rates", data, severity="advisory")
         rows = data.get("rates", data if isinstance(data, list) else [])
         result: dict[int, Rate] = {}
         for row in rows:
@@ -1095,6 +1358,8 @@ class EtoroClient:
             eToro's ``orderId`` string. HTTP 200 here means *accepted*, not
             filled -- callers MUST follow up with :meth:`poll_order_to_terminal`.
         """
+        self.last_write_request_body = None
+        self.last_write_response_body = None
         body = OrderRequest(instrument_id=instrument_id, amount=amount_usd).to_json()
         response = self._request(
             "POST",
@@ -1103,21 +1368,126 @@ class EtoroClient:
             json_body=body,
             request_id=request_id,
         )
-        data = response.json()
-        order_id = data.get("orderId") or data.get("orderID") or data.get("id")
-        return str(order_id) if order_id is not None else ""
+        return self._order_id_from_write_response(
+            response, request_id=request_id, what="place_buy_order"
+        )
 
-    # -- orders: close (full close only) --------------------------------------
+    def _order_id_from_write_response(
+        self, response: httpx.Response, *, request_id: str, what: str
+    ) -> str:
+        """Extract the broker's order id from a write response -- loudly.
 
-    def close_position(self, request_id: str, position_id: str, instrument_id: int) -> str:
-        """``POST /market-close-orders/positions/{positionId}`` (DESIGN §4.3).
+        Added 2026-09-11, the same bug class as :meth:`_parse_order_result`
+        and found by it: both write methods ended in
+        ``return str(order_id) if order_id is not None else ""``. A response
+        whose id key we did not guess correctly therefore produced an EMPTY
+        STRING, which the caller then polled with -- eToro answers that with
+        ``400 ... Either orderId or referenceId must be provided``, i.e. a
+        successfully submitted order that we can no longer track. Confirmed
+        live against the demo account: the close-order response carries none
+        of ``orderId``/``orderID``/``id`` at the top level.
 
-        Always a full close -- ``UnitsToDeduct: null`` -- because one lot is
-        exactly one eToro position and partial close is explicitly out of
-        scope for this app (see :class:`~nightwatch.etoro.models.CloseRequest`,
-        which refuses to construct with a non-``None`` unit count).
+        So: the guessed keys are still tried first, then the whole response
+        body is logged at WARNING (it is the only way to learn the real
+        shape), then the order is recovered through the ``referenceId`` path
+        DESIGN §6.H already defines -- the ``x-request-id`` we sent is ours
+        and eToro echoes it back as ``referenceId``. Only if that also fails
+        does this raise. What it never does is hand back ``""`` as if it were
+        an order id.
         """
-        body = CloseRequest(position_id=position_id, instrument_id=instrument_id).to_json()
+        try:
+            data = response.json()
+        except Exception:
+            data = None
+        #: The last write response body seen, verbatim -- probes save it, since
+        #: these bodies are only obtainable while the market is open.
+        self.last_write_response_body = data
+        if isinstance(data, Mapping):
+            # Confirmed live 2026-09-11 (demo): a CLOSE response nests
+            # everything one level down under ``orderForClose`` and spells the
+            # id ``orderID`` --
+            #   {"orderForClose": {"positionID": ..., "orderID": 380818802,
+            #    "orderType": 19, "statusID": 1, ...}, "token": "..."}
+            # -- so no top-level key matches and the old ``or``-chain returned
+            # "". Both levels are searched, top level first.
+            sources = [data]
+            sources.extend(v for v in data.values() if isinstance(v, Mapping))
+            for source in sources:
+                for key in ("orderId", "orderID", "orderid", "id"):
+                    value = source.get(key)
+                    if value not in (None, ""):
+                        return str(value)
+        _logger.warning(
+            "%s: response carries no recognised order id key -- full body: %s",
+            what,
+            str(data)[:1000],
+        )
+        try:
+            recovered = self.lookup_order(reference_id=request_id)
+        except EtoroError as exc:
+            raise EtoroValidationError(
+                f"{what}: submitted successfully but the response carries no "
+                f"order id, and recovery by referenceId={request_id} failed "
+                f"({exc}). Body: {str(data)[:400]}"
+            ) from exc
+        if recovered.order_id:
+            _logger.warning(
+                "%s: order id recovered via referenceId=%s -> %s",
+                what, request_id, recovered.order_id,
+            )
+            return str(recovered.order_id)
+        raise EtoroValidationError(
+            f"{what}: submitted successfully but no order id could be found "
+            f"in the response or recovered by referenceId={request_id}. "
+            f"Body: {str(data)[:400]}"
+        )
+
+    # -- orders: close (full or partial) --------------------------------------
+
+    def close_position(
+        self,
+        request_id: str,
+        position_id: str,
+        instrument_id: int,
+        units_to_deduct: float | None = None,
+    ) -> str:
+        """``POST /market-close-orders/positions/{positionId}`` (DESIGN §4.3;
+        partial close decided board nightwatch/handoff-2026-09-06.md §7).
+
+        Args:
+            request_id: The caller-supplied ``x-request-id`` UUID, same
+                contract as :meth:`place_buy_order`.
+            position_id: The eToro position to close.
+            instrument_id: The resolved (and immutable) eToro instrument id.
+            units_to_deduct: ``None`` (the default) sends
+                ``UnitsToDeduct: null`` -- a **full** close, byte-identical on
+                the wire to this app's original, only behaviour. A positive
+                value instead sends a **partial** close, deducting exactly
+                that many units and leaving the position OPEN with the
+                remainder -- SCHG has no per-lot tracking
+                (``schg_position_value`` is a scalar), so the executor that
+                chooses lots must be able to close less than a whole
+                position.
+
+        This method does NOT enforce the broker's $10
+        ``minPositionExposure``/``minPositionAmount`` stub floor -- it has no
+        access to the position's market value. Callers passing a non-``None``
+        ``units_to_deduct`` MUST first check
+        :func:`~nightwatch.etoro.models.partial_close_leaves_legal_remainder`
+        against the position's MARKET VALUE (``units * price``, not
+        ``Position.amount``'s cost basis -- see that function's docstring for
+        the still-unverified market-value-vs-cost-basis assumption).
+        TODO(lot-selection executor, out of scope here): wire that check in
+        before calling this with a partial ``units_to_deduct`` -- the
+        executor itself is not built yet (board nightwatch/handoff-2026-09-06.md §7).
+        """
+        self.last_write_request_body = None
+        self.last_write_response_body = None
+        body = CloseRequest(
+            position_id=position_id,
+            instrument_id=instrument_id,
+            units_to_deduct=units_to_deduct,
+        ).to_json()
         response = self._request(
             "POST",
             f"/api/v1/trading/execution/{self._demo()}market-close-orders/positions/{position_id}",
@@ -1125,14 +1495,18 @@ class EtoroClient:
             json_body=body,
             request_id=request_id,
         )
-        data = response.json()
-        order_id = data.get("orderId") or data.get("orderID") or data.get("id")
-        return str(order_id) if order_id is not None else ""
+        return self._order_id_from_write_response(
+            response, request_id=request_id, what="close_position"
+        )
 
     # -- orders:lookup, poll to terminal, referenceId recovery ---------------
 
     def lookup_order(
-        self, *, order_id: str | None = None, reference_id: str | None = None
+        self,
+        *,
+        order_id: str | None = None,
+        reference_id: str | None = None,
+        response_capture: list[dict[str, Any]] | None = None,
     ) -> OrderResult:
         """``GET /v2/trading/info/orders:lookup`` (or ``/demo/orders:lookup``)
         for one order.
@@ -1152,13 +1526,116 @@ class EtoroClient:
             params["orderId"] = order_id
         if reference_id is not None:
             params["referenceId"] = reference_id
-        response = self._request(
-            "GET",
-            f"/api/v2/trading/info/{self._demo()}orders:lookup",
-            request_class="read",
-            params=params,
+        try:
+            response = self._request(
+                "GET",
+                f"/api/v2/trading/info/{self._demo()}orders:lookup",
+                request_class="read",
+                params=params,
+                response_capture=response_capture,
+            )
+        except EtoroValidationError as exc:
+            # eToro still serves this deprecated demo GET; the current v2
+            # lookup can return 404 for an order visible in the portfolio.
+            # Keep it as a read-only, ID-only fallback; never retry a write.
+            if not self.is_demo or order_id is None or exc.status_code != 404:
+                raise
+            response = self._request(
+                "GET",
+                f"/api/v1/trading/info/{self._demo()}orders/{order_id}",
+                request_class="read",
+                response_capture=response_capture,
+            )
+        data = response.json()
+        legacy_shape = isinstance(data, Mapping) and "statusID" in data and "status" not in data
+        self._check_response_contract(
+            "legacy-order-lookup" if legacy_shape else "order-lookup",
+            data,
+            severity="critical",
         )
-        return self._parse_order_result(response.json())
+        result = self._parse_order_result(data)
+        if order_id is not None and result.order_id != str(order_id):
+            raise EtoroValidationError(
+                f"orders:lookup returned orderId {result.order_id}, expected {order_id}"
+            )
+        if reference_id is not None and result.reference_id not in (None, reference_id):
+            raise EtoroValidationError(
+                "orders:lookup returned a different referenceId than requested"
+            )
+        return result
+
+    def lookup_close_order(self, order_id: str | int) -> OrderResult:
+        """Fetch close-order status and affected positions by its order ID.
+
+        eToro documents close orders separately from open orders at
+        ``GET /api/v1/trading/info/{demo/}close-orders/{orderId}``. Do not
+        fall back to ``orders:lookup``: that endpoint can 404 for an accepted
+        close order.
+        """
+        close_id = self._id_string(order_id, "orderId")
+        if close_id is None or not close_id.isdecimal() or int(close_id) <= 0:
+            raise EtoroValidationError("close orderId must be a positive integer")
+        captured: list[dict[str, Any]] = []
+        try:
+            response = self._request(
+                "GET",
+                f"/api/v1/trading/info/{self._demo()}close-orders/{close_id}",
+                request_class="read",
+                response_capture=captured,
+            )
+            return self._parse_close_order_result(response.json(), expected_order_id=close_id)
+        finally:
+            self.last_close_lookup_responses.extend(captured)
+
+    @classmethod
+    def _parse_close_order_result(
+        cls, data: Any, *, expected_order_id: str
+    ) -> OrderResult:
+        """Parse the documented close-orders payload, failing on unknown IDs or status."""
+        if not isinstance(data, Mapping):
+            raise EtoroValidationError("close-orders payload must be an object")
+        order_id = cls._id_string(data.get("orderID"), "orderID")
+        if order_id != expected_order_id:
+            raise EtoroValidationError(
+                f"close-orders returned orderID={order_id!r}, expected {expected_order_id!r}"
+            )
+        status_raw = data.get("statusID")
+        if isinstance(status_raw, bool) or not isinstance(status_raw, int):
+            raise EtoroValidationError("close-orders statusID must be an integer")
+        try:
+            status = OrderStatus(status_raw)
+        except ValueError as exc:
+            raise EtoroValidationError(
+                f"close-orders has unknown statusID={status_raw}"
+            ) from exc
+
+        raw_positions = data.get("positions")
+        if not isinstance(raw_positions, list):
+            raise EtoroValidationError("close-orders positions must be a list")
+        position_ids: set[str] = set()
+        for position in raw_positions:
+            if not isinstance(position, Mapping):
+                raise EtoroValidationError("close-orders position entry must be an object")
+            position_id = cls._id_string(position.get("positionID"), "positionID")
+            if position_id is None or not position_id.isdecimal() or int(position_id) <= 0:
+                raise EtoroValidationError("close-orders positionID must be a positive integer")
+            position_ids.add(position_id)
+        if len(position_ids) > 1:
+            raise EtoroValidationError("close-orders returned multiple position IDs")
+        position_id = next(iter(position_ids), None)
+        if status in FILLED_ORDER_STATUSES and position_id is None:
+            raise EtoroValidationError(
+                f"filled close order {order_id} has no affected position ID"
+            )
+        reference_id = cls._id_string(data.get("referenceID"), "referenceID")
+        return OrderResult(
+            order_id=order_id,
+            reference_id=reference_id,
+            status=status,
+            position_id=position_id,
+            reject_reason=data.get("errorMessage"),
+            raw=dict(data),
+        )
 
     def recover_by_reference_id(self, reference_id: str) -> OrderResult | None:
         """Recover a possibly-lost response by ``referenceId`` (DESIGN §6.H).
@@ -1167,34 +1644,305 @@ class EtoroClient:
         means the original request never reached the server and it is safe
         to (re)submit; any other result means it did, and must never be
         submitted again.
+
+        Narrowed 2026-09-11, together with the :meth:`_parse_order_result`
+        rewrite: only an HTTP-level :class:`EtoroValidationError` (one
+        carrying a ``status_code``, i.e. the API itself answering "no such
+        order") is read as "never received". Now that a *parse* failure
+        raises the same exception type instead of silently defaulting, an
+        un-narrowed ``except`` here would turn "I could not understand the
+        broker's answer" into "the broker never got it" -- and authorise a
+        duplicate live order. Parse failures propagate.
         """
         try:
             return self.lookup_order(reference_id=reference_id)
-        except EtoroValidationError:
+        except EtoroValidationError as exc:
+            if exc.status_code is None:
+                raise
             return None
 
     @staticmethod
-    def _parse_order_result(data: Mapping[str, Any]) -> OrderResult:
+    def _execution_rows(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+        """``positionExecutions``, validated -- never silently treated as empty.
+
+        An absent key is legitimately "no executions yet" (an order that has
+        not filled has none). A key that is PRESENT but not a list of objects
+        is a contract change, and is raised rather than skipped: silently
+        reading zero executions off a malformed list is exactly how a filled
+        order's ``positionId`` went missing in the first place.
+        """
+        raw = row.get("positionExecutions")
+        if raw is None:
+            return []
+        if not isinstance(raw, (list, tuple)):
+            raise EtoroValidationError(
+                f"orders:lookup positionExecutions is not a list: {raw!r}"[:500]
+            )
+        for entry in raw:
+            if not isinstance(entry, Mapping):
+                raise EtoroValidationError(
+                    f"orders:lookup positionExecutions entry is not an object: "
+                    f"{entry!r}"[:500]
+                )
+        return list(raw)
+
+    @staticmethod
+    def _id_string(value: Any, field_name: str) -> str | None:
+        """Accept broker IDs only as non-empty strings or integer numbers."""
+        if value is None:
+            return None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (str, int))
+            or (isinstance(value, str) and not value.strip())
+        ):
+            raise EtoroValidationError(
+                f"orders:lookup {field_name} must be a non-empty string or integer"
+            )
+        return str(value)
+
+    @staticmethod
+    def _first_float(
+        sources: Sequence[tuple[str, Any]], *, field_name: str, order_id: Any
+    ) -> float | None:
+        """First non-``None`` candidate coerced to ``float``, or ``None``.
+
+        ``sources`` is ``(path, value)`` pairs in precedence order. A value
+        that is present but not numeric raises
+        :class:`~nightwatch.etoro.errors.EtoroValidationError` naming the JSON
+        path -- it is never skipped in favour of the next candidate and never
+        swallowed into ``None``. "Absent everywhere" is the only way to get
+        ``None`` out of this.
+        """
+        for path, value in sources:
+            if value is None:
+                continue
+            try:
+                return float(value)
+            except (TypeError, ValueError) as exc:
+                raise EtoroValidationError(
+                    f"order {order_id} has a non-numeric {field_name} at "
+                    f"{path}: {value!r}"[:500]
+                ) from exc
+        return None
+
+    @classmethod
+    def _parse_order_result(cls, data: Mapping[str, Any]) -> OrderResult:
+        """Parse one ``orders:lookup`` payload (DESIGN §1.1, §6.H).
+
+        Rewritten 2026-09-11 against the first REAL captured response
+        (``data/probe_2026-09-11/order_latency_run2/RAW_orders_lookup_payload.json``).
+        Every field below was previously read off a *guessed* flat shape, and
+        all four guesses were wrong:
+
+        =====================  ==========================================
+        Old (guessed)          Real live shape
+        =====================  ==========================================
+        ``status`` as an int   ``status: {"id": 3, "name": "Filled", ...}``
+        ``positionId``         ``positionExecutions[0].positionId``
+        ``units``              ``requestedUnits`` / ``positionExecutions[0].openingData.units``
+        ``executionPrice``     ``positionExecutions[0].openingData.avgPrice``
+        =====================  ==========================================
+
+        **The defaulting, not the key names, was the real bug.** The old
+        version wrapped the status read in ``except (TypeError, ValueError):
+        status = OrderStatus.RECEIVED`` -- so ``int({"id": 3, ...})`` raised,
+        was caught, and every order in the app's history was reported as
+        non-terminal. An order that filled in ~163ms was polled for 90s and
+        booked as a timeout, and its position was left open and unclosable.
+        A parse miss must therefore be loud or explicitly absent; it must
+        never become a plausible default. This follows the required-vs-
+        optional split :meth:`_parse_position` already reasons about (§10.7).
+
+        **Required -- raises** :class:`~nightwatch.etoro.errors.EtoroValidationError`:
+
+        * ``status``. There is no honest default for "I could not tell what
+          the broker said about this order". ``RECEIVED`` in particular is a
+          *non-terminal* status, so defaulting to it converts an unparseable
+          payload into "keep polling, then time out" -- the failure mode
+          above. An unknown numeric code raises too (it is a contract change,
+          not a synonym for "received").
+        * ``position_id`` **when, and only when, the order reports a fill**
+          (:data:`~nightwatch.etoro.models.FILLED_ORDER_STATUSES`). This is
+          the one genuinely position-identity-critical field: a filled open
+          whose position id we did not capture is a position we can never
+          close (DESIGN §4.3's close path is keyed on it), which is exactly
+          what stranded two live demo positions. Before a fill there is
+          legitimately no position yet, so ``None`` there is a fact, not a
+          miss.
+
+        **Optional -- ``None`` means "the broker did not state it"**, and a
+        value that IS stated but unparseable still raises (see
+        :meth:`_first_float`):
+
+        * ``fill_units``, ``fill_price``, ``fill_amount_usd``. These carry no
+          position identity and are all recoverable after the fact from the
+          portfolio row that ``position_id`` gets us (``units``/``openRate``/
+          ``amount`` on :class:`~nightwatch.etoro.models.Position`), so a
+          payload that omits them costs us measurement, not control. Note
+          ``requestedUnits``/``requestedAmount`` are *requested*, not
+          *executed*, so they are used only as a last resort behind the
+          execution's own ``openingData``/``closingData`` numbers.
+        * ``order_id``, ``reference_id``, ``reject_reason``.
+
+        Both the live nested shape and a flat ``status``/``positionId``/
+        ``units``/``executionPrice`` shape are accepted -- eToro is already
+        known to disagree with itself across endpoints on casing and nesting
+        (see :class:`~nightwatch.etoro.models.TradeHistoryEntry`), so the
+        flat spellings are kept as lower-precedence fallbacks. What is NOT
+        kept is the silent default when neither matches.
+        """
         row = data.get("order", data)
-        status_raw = row.get("status", row.get("orderStatus"))
+        if not isinstance(row, Mapping):
+            raise EtoroValidationError(
+                f"orders:lookup payload is not an object: {row!r}"[:500]
+            )
+        order_ids = [
+            cls._id_string(row[key], key)
+            for key in ("orderId", "orderID")
+            if row.get(key) is not None
+        ]
+        if len(set(order_ids)) > 1:
+            raise EtoroValidationError("orders:lookup has conflicting order ids")
+        order_id = order_ids[0] if order_ids else None
+        reference_id = cls._id_string(
+            row.get("referenceId", row.get("referenceID")), "referenceId"
+        )
+
+        # -- status: required, never defaulted ------------------------------
+        status_raw = row.get("status", row.get("orderStatus", row.get("statusID")))
+        status_label: str | None = None
+        if isinstance(status_raw, Mapping):
+            # The real live shape: {"id": 3, "name": "Filled", "errorCode": 0}.
+            status_label = status_raw.get("name")
+            status_code = status_raw.get("id", status_raw.get("statusId"))
+            if status_code is None:
+                raise EtoroValidationError(f"order {order_id} status object has no 'id'")
+        else:
+            status_code = status_raw
+        if status_code is None:
+            raise EtoroValidationError(f"order {order_id} response is missing its status")
         try:
-            status = OrderStatus(int(status_raw))
-        except (TypeError, ValueError):
-            status = OrderStatus.RECEIVED
+            if isinstance(status_code, bool):
+                raise ValueError("boolean status")
+            numeric_status = float(status_code)
+            if not math.isfinite(numeric_status) or not numeric_status.is_integer():
+                raise ValueError("status is not an integer")
+            status = OrderStatus(int(numeric_status))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise EtoroValidationError(
+                f"order {order_id} has an unparseable/unknown status "
+                f"(label={status_label!r}); refusing to default it to RECEIVED"
+            ) from exc
+        if status_label is not None and not isinstance(status_label, str):
+            raise EtoroValidationError(
+                f"order {order_id} status name is not a string: {status_label!r}"[:500]
+            )
+
+        executions = cls._execution_rows(row)
+        legacy_positions: list[Mapping[str, Any]] = []
+        if "statusID" in row and "status" not in row:
+            raw_positions = row.get("positions")
+            if not isinstance(raw_positions, list) or any(
+                not isinstance(item, Mapping) for item in raw_positions
+            ):
+                raise EtoroValidationError("legacy order positions must be a list of objects")
+            legacy_positions = list(raw_positions)
+        execution = executions[0] if executions else {}
+        opening = execution.get("openingData")
+        closing = execution.get("closingData")
+        if opening is None:
+            opening = {}
+        if closing is None:
+            closing = {}
+        if not isinstance(opening, Mapping) or not isinstance(closing, Mapping):
+            raise EtoroValidationError(
+                f"order {order_id} positionExecutions[0] opening/closingData is "
+                f"not an object: {dict(execution)!r}"[:500]
+            )
+
+        # -- position id: required once the order has actually filled -------
+        position_ids = [
+            cls._id_string(value, "positionId")
+            for value in (
+                row.get("positionId"),
+                row.get("positionID"),
+                *(candidate.get("positionId") for candidate in executions),
+                *(candidate.get("positionID") for candidate in executions),
+                *(candidate.get("positionID") for candidate in legacy_positions),
+            )
+            if value is not None
+        ]
+        distinct_position_ids = set(position_ids)
+        if len(distinct_position_ids) > 1:
+            raise EtoroValidationError(
+                f"order {order_id} has multiple position ids in positionExecutions"
+            )
+        position_id = position_ids[0] if position_ids else None
+        if position_id is None and status in FILLED_ORDER_STATUSES:
+            raise EtoroValidationError(
+                f"order {order_id} reports {status.name} but carries no "
+                "positionId in the response"
+            )
+
+        fill_units = cls._first_float(
+            [
+                ("positionExecutions[0].openingData.units", opening.get("units")),
+                ("positionExecutions[0].closingData.units", closing.get("units")),
+                ("units", row.get("units")),
+                # Requested, not executed -- last resort only.
+                ("requestedUnits", row.get("requestedUnits")),
+            ],
+            field_name="units",
+            order_id=order_id,
+        )
+        fill_price = cls._first_float(
+            [
+                ("positionExecutions[0].openingData.avgPrice", opening.get("avgPrice")),
+                ("positionExecutions[0].closingData.avgPrice", closing.get("avgPrice")),
+                ("positions[0].rate", legacy_positions[0].get("rate") if legacy_positions else None),
+                ("executionPrice", row.get("executionPrice")),
+            ],
+            field_name="fill price",
+            order_id=order_id,
+        )
+        fill_amount_usd = cls._first_float(
+            [
+                ("amount", row.get("amount")),
+                (
+                    "positionExecutions[0].initialExposureAccountCurrency",
+                    execution.get("initialExposureAccountCurrency"),
+                ),
+                # Requested, not executed -- last resort only.
+                ("requestedAmount", row.get("requestedAmount")),
+            ],
+            field_name="amount",
+            order_id=order_id,
+        )
+
+        reject_reason = row.get("rejectReason")
+        if reject_reason is None and row.get("errorCode") not in (None, 0):
+            reject_reason = f"errorCode={row['errorCode']}"
+        if reject_reason is None and isinstance(status_raw, Mapping):
+            error_code = status_raw.get("errorCode")
+            if error_code:  # a real, non-zero broker error code
+                reject_reason = f"errorCode={error_code}"
+
         return OrderResult(
-            order_id=(str(row["orderId"]) if row.get("orderId") is not None else None),
-            reference_id=(
-                str(row["referenceId"]) if row.get("referenceId") is not None else None
-            ),
+            order_id=order_id,
+            reference_id=reference_id,
             status=status,
-            position_id=(
-                str(row["positionId"]) if row.get("positionId") is not None else None
-            ),
-            fill_price=(float(row["executionPrice"]) if row.get("executionPrice") is not None else None),
-            fill_units=(float(row["units"]) if row.get("units") is not None else None),
-            fill_amount_usd=(float(row["amount"]) if row.get("amount") is not None else None),
-            reject_reason=row.get("rejectReason"),
-            raw=dict(row),
+            position_id=(str(position_id) if position_id is not None else None),
+            fill_price=fill_price,
+            fill_units=fill_units,
+            fill_amount_usd=fill_amount_usd,
+            reject_reason=reject_reason,
+            status_label=status_label,
+            raw={
+                key: value
+                for key, value in row.items()
+                if key not in ("token", "CID", "gcid", "accountId")
+            },
         )
 
     def poll_order_to_terminal(

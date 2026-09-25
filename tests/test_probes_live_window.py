@@ -1,5 +1,5 @@
 """Tests for nightwatch.probes.live_window (the 2026-09-11 live-probe's
-off-device-testable logic: HANDOFF_2026-09-05.md's ask for unit tests on the
+off-device-testable logic: board nightwatch/handoff-2026-09-05.md's ask for unit tests on the
 arithmetic, key-set diff, and trade partitioning).
 
 Entirely offline, like tests/test_market_adopt.py -- no eToro call, no
@@ -179,7 +179,7 @@ def test_parser_required_key_groups_registry_shape():
 
 
 def test_parser_read_keys_registry_covers_all_six_unverified_parsers():
-    # HANDOFF_2026-09-05.md §6/§8: the six parsers this probe must audit.
+    # board nightwatch/handoff-2026-09-05.md §6/§8: the six parsers this probe must audit.
     expected = {
         "_parse_candle",
         "get_rates",
@@ -224,7 +224,7 @@ def test_partition_trades_by_instrument_handles_none_fees_without_dropping_row()
 
 
 def test_partition_trades_by_instrument_all_120_real_rows_shape():
-    # Mirrors HANDOFF_2026-09-05.md §5's real finding: sigma fees = -$380.40
+    # Mirrors board nightwatch/handoff-2026-09-05.md §5's real finding: sigma fees = -$380.40
     # across 120 rows. A synthetic stand-in of the same shape (not the real
     # values, which are not reproduced here) -- one instrument carrying all
     # the fee burden, another carrying none, checks the partition actually

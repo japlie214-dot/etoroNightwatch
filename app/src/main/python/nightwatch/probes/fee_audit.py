@@ -364,7 +364,7 @@ def reconcile_account_totals(
     tolerance: float = 0.01,
 ) -> FeeReconciliationTotals:
     """Sum ``fees``/``net_profit`` across every row and diff against the two
-    account-wide figures HANDOFF_2026-09-05.md already recorded.
+    account-wide figures board nightwatch/handoff-2026-09-05.md already recorded.
 
     A ``None`` fee/profit contributes 0.0, matching every other grouping
     function in this module. If the sums do not reconcile within

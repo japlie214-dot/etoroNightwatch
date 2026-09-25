@@ -1,0 +1,53 @@
+{
+  "clientPortfolio": {
+    "bonusCredit": 1.25,
+    "credit": 1.25,
+    "entryOrders": [],
+    "exitOrders": [],
+    "mirrors": [],
+    "orders": [],
+    "ordersForClose": [],
+    "ordersForCloseMultiple": [],
+    "ordersForOpen": [],
+    "positions": [
+      {
+        "CID": 900006,
+        "amount": 1.25,
+        "initialAmountInDollars": 1.25,
+        "initialUnits": 1.25,
+        "instrumentID": 424242,
+        "isBuy": true,
+        "isDetached": false,
+        "isDiscounted": true,
+        "isNoStopLoss": true,
+        "isNoTakeProfit": false,
+        "isPartiallyAltered": false,
+        "isSettled": true,
+        "isTslEnabled": false,
+        "leverage": 1,
+        "lotCount": 1.25,
+        "mirrorID": 0,
+        "openConversionRate": 1.25,
+        "openDateTime": "2026-09-11T12:34:56Z",
+        "openPositionActionType": 1,
+        "openRate": 1.25,
+        "orderID": 900005,
+        "orderType": 1,
+        "parentPositionID": 0,
+        "pnlVersion": 1,
+        "positionID": 900004,
+        "redeemStatusID": 0,
+        "settlementTypeID": 1,
+        "stopLossRate": 1.25,
+        "stopLossVersion": 1,
+        "takeProfitRate": 1.25,
+        "totalExternalFees": 1.25,
+        "totalExternalTaxes": 1.25,
+        "totalFees": 1.25,
+        "units": 1.25,
+        "unitsBaseValueDollars": 1.25
+      }
+    ],
+    "stockOrders": []
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "orderForClose": {
+    "CID": 900006,
+    "instrumentID": 424242,
+    "lastUpdate": "2026-09-11T12:34:56Z",
+    "openDateTime": "2026-09-11T12:34:56Z",
+    "orderID": 900005,
+    "orderType": 1,
+    "positionID": 900004,
+    "statusID": 1
+  }
+}

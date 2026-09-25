@@ -6,12 +6,14 @@ the real ``config/``, ``data/`` or ``logs/`` of the working tree.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
 
 from nightwatch.host import DesktopHost
 from nightwatch.db.repo import Repo
+from nightwatch.logging_setup import _NOISY_HTTP_LOGGERS
 
 MINIMAL_CONFIG_TOML = """
 [trading]
@@ -66,3 +68,66 @@ def repo(host: DesktopHost) -> Repo:
     r = Repo.open(host.data_dir() / "nightwatch.db", host=host)
     yield r
     r.close()
+
+
+@pytest.fixture(autouse=True)
+def _restore_logging_state():
+    """Undo any global ``logging`` state ``configure_logging()`` may have set.
+
+    ``configure_logging()`` (logging_setup.py) does not confine itself to the
+    logger it hands back: it also sets the ``nightwatch`` logger's level,
+    handlers and ``propagate`` flag, adds an owned file handler to the ROOT
+    logger (and may touch the root level), and lowers a few noisy
+    third-party loggers (httpx/httpcore/urllib3) to WARNING. None of that is
+    undone when the test that triggered it ends, so whichever test calls
+    ``configure_logging()`` first leaves the mutation in place for every
+    test that runs after it in the same process.
+
+    The dangerous one is ``nightwatch.propagate = False``: pytest's
+    ``caplog`` attaches its capture handler to the ROOT logger, so once
+    ``propagate`` is False, no ``nightwatch.*`` record reaches ``caplog``
+    again for the rest of the run -- a guard test can pass or fail purely
+    depending on whether some earlier, unrelated test happened to call
+    ``configure_logging()`` first. That is test *order* dependence, which is
+    exactly why the same suite disagreed between the system Python and this
+    repo's ``.venv`` (see board nightwatch/handoff-2026-09-07.md): the two interpreters
+    collect/order tests differently, so the pollution bit one and not the
+    other.
+
+    Restoring the mutated state here, once, for every test means no future
+    test file has to know about or individually defend against this -- see
+    the (now largely redundant) per-file workarounds in test_market_bars.py
+    and test_notify_telegram.py, written before this fixture existed.
+    """
+    nightwatch_logger = logging.getLogger("nightwatch")
+    root_logger = logging.getLogger()
+
+    nw_level = nightwatch_logger.level
+    nw_propagate = nightwatch_logger.propagate
+    nw_handlers = list(nightwatch_logger.handlers)
+    root_level = root_logger.level
+    root_handlers = list(root_logger.handlers)
+    noisy_levels = {name: logging.getLogger(name).level for name in _NOISY_HTTP_LOGGERS}
+
+    try:
+        yield
+    finally:
+        # Close and drop any handler added during the test (by
+        # configure_logging() or otherwise) before restoring the pre-test
+        # handler list, so file descriptors aren't leaked and handlers don't
+        # accumulate test over test.
+        for handler in nightwatch_logger.handlers:
+            if handler not in nw_handlers:
+                handler.close()
+        nightwatch_logger.handlers[:] = nw_handlers
+        nightwatch_logger.setLevel(nw_level)
+        nightwatch_logger.propagate = nw_propagate
+
+        for handler in root_logger.handlers:
+            if handler not in root_handlers:
+                handler.close()
+        root_logger.handlers[:] = root_handlers
+        root_logger.setLevel(root_level)
+
+        for name, level in noisy_levels.items():
+            logging.getLogger(name).setLevel(level)

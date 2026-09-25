@@ -154,7 +154,6 @@ port = 8080         # must be above 1024: binding lower requires root on Android
 # Risk caps — preflight gate 12 (DESIGN §5).
 # ---------------------------------------------------------------------------
 [risk]
-max_orders_per_session       = 10
 max_notional_per_session_usd = 5000.0
 # Daily loss guard; comment out to disable.
 # max_daily_loss_usd         = 500.0
@@ -180,8 +179,7 @@ timeout_seconds = 10.0   # every call gets an explicit per-call timeout (§8 got
 # ~0.1% (§2.11(C)), while the UPRO rates-freeze bug measured +1.322%/+19.0h
 # stale (§2.9).  Revisit once the forward test has run.
 #
-# provisional_close_deviation_pct is CALIBRATED (2026-09-05, HANDOFF_2026-09
-# -05_evening.md §4): Tiingo raw close vs eToro candle close (both raw --
+# provisional_close_deviation_pct is CALIBRATED (2026-09-05, board nightwatch/handoff-2026-09-05-evening.md §4): Tiingo raw close vs eToro candle close (both raw --
 # §4's basis split; never adjClose, which diverges 1.09% at the window edge
 # and would breach any sane tolerance), 272 common dates 2025-08-01..
 # 2026-09-04: mean 0.128%, max 0.640%. 1.0% leaves ~56% headroom above the

@@ -1,0 +1,12 @@
+{
+  "costs": [
+    {
+      "costType": "sample",
+      "currency": "USD",
+      "value": 1.25
+    }
+  ],
+  "instrumentId": 424242,
+  "lastUpdated": "2026-09-11T12:34:56Z",
+  "symbol": "SCHG"
+}

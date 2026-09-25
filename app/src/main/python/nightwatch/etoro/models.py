@@ -7,9 +7,10 @@ carried by :mod:`nightwatch.db.repo`'s row types).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, Final
+from typing import Any, Final, Mapping, Sequence
 
 __all__ = [
     "OrderStatus",
@@ -26,6 +27,8 @@ __all__ = [
     "compute_available_cash",
     "OrderRequest",
     "CloseRequest",
+    "MIN_POSITION_VALUE_USD",
+    "partial_close_leaves_legal_remainder",
     "OrderResult",
     "TradeHistoryEntry",
     "InstrumentSearchResult",
@@ -76,7 +79,12 @@ TERMINAL_ORDER_STATUSES: Final[frozenset[OrderStatus]] = frozenset(
 #: is not a fill under any circumstance — DESIGN §6.H is explicit that it must
 #: never be booked as a success.
 FILLED_ORDER_STATUSES: Final[frozenset[OrderStatus]] = frozenset(
-    {OrderStatus.FILLED, OrderStatus.PARTIALLY_FILLED}
+    {
+        OrderStatus.FILLED,
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.CANCELED_PARTIALLY_FILLED,
+        OrderStatus.REJECTED_PARTIALLY_FILLED,
+    }
 )
 
 
@@ -174,7 +182,7 @@ class Position:
 
     Bug found 2026-09-04 against a live, non-empty (227-position) portfolio,
     corrected 2026-09-05 (DESIGN_market_data.md §4.2, §4.5, §10.7;
-    HANDOFF_2026-09-04_market_data.md §5; HANDOFF_2026-09-05.md §1, §4): a
+    board nightwatch/handoff-2026-09-04-market-data.md §5; board nightwatch/handoff-2026-09-05.md §1, §4): a
     broker position carries no ``symbol`` string, no current/mark
     price, and no unrealized P&L. This dataclass only carries fields the
     broker genuinely returns:
@@ -197,6 +205,24 @@ class Position:
       split-invariant re-link key (§4.4/§4.5): a live probe proved eToro
       rescales both ``units`` and ``openRate`` on a split while preserving
       ``amount`` exactly (`amount == units * openRate`, 227/227 verified).
+    * **``take_profit_rate``/``is_no_take_profit`` (and the stop-loss pair)
+      added 2026-09-11** (DESIGN.md §6.A "Broker-side exits"). These keys
+      were always in the payload and were simply never read, so the app was
+      structurally blind to a broker-side exit it never asked for:
+      ``OrderRequest.to_json`` sends eight keys, none take-profit related,
+      and the broker applies its own ``defaultTakeProfitPercentage`` for the
+      instrument/leverage config this app orders into. On the live account
+      229 of 230 open positions carry ``takeProfitRate / openRate == 11.00``
+      (a +1000% TP), and all 230 carry ``isNoStopLoss == true``; position
+      3550406905 carries ``takeProfitRate: 0.0`` with
+      ``isNoTakeProfit: true``, proving "no TP" is representable in the same
+      shape. Both rate fields are ``None`` when the broker omits the key
+      entirely (older/other payload shapes must not crash the parser), and
+      both ``is_no_*`` flags default to ``False`` -- the absence of the flag
+      is not evidence of suppression. Reading the rate without the flag is a
+      trap: ``takeProfitRate`` is ``0.0``, not absent, on the suppressed
+      position, so the flag is what distinguishes "no TP" from a
+      would-be-zero rate.
     """
 
     position_id: str
@@ -207,6 +233,10 @@ class Position:
     leverage: int
     is_buy: bool
     open_date: str | None = None
+    take_profit_rate: float | None = None
+    is_no_take_profit: bool = False
+    stop_loss_rate: float | None = None
+    is_no_stop_loss: bool = False
     raw: dict[str, Any] = field(default_factory=dict)
 
 
@@ -280,8 +310,8 @@ class Balance:
 
 def compute_available_cash(
     credit: float,
-    orders_for_open: list[dict[str, Any]] | None = None,
-    orders: list[dict[str, Any]] | None = None,
+    orders_for_open: Sequence[Mapping[str, Any]],
+    orders: Sequence[Mapping[str, Any]],
 ) -> float:
     """Compute broker available cash from eToro's documented formula.
 
@@ -293,13 +323,40 @@ def compute_available_cash(
     straight off the raw JSON body before constructing the dataclass, and so
     it is trivially unit-testable against a hand-built sample payload.
     """
-    pending_for_open = sum(
-        float(order.get("amount", 0.0))
-        for order in (orders_for_open or [])
-        if int(order.get("mirrorID", 0)) == 0
-    )
-    pending_orders = sum(float(order.get("amount", 0.0)) for order in (orders or []))
-    return float(credit) - pending_for_open - pending_orders
+    def amount(row: Mapping[str, Any]) -> float:
+        if not isinstance(row, Mapping) or "amount" not in row:
+            raise ValueError("pending order is missing amount")
+        raw_value = row["amount"]
+        if isinstance(raw_value, bool):
+            raise ValueError("pending order amount must be numeric")
+        value = float(raw_value)
+        if not math.isfinite(value) or value < 0:
+            raise ValueError("pending order amount must be finite and non-negative")
+        return value
+
+    if not isinstance(orders_for_open, (list, tuple)) or not isinstance(orders, (list, tuple)):
+        raise ValueError("ordersForOpen and orders must be arrays")
+    if isinstance(credit, bool):
+        raise ValueError("credit must be numeric")
+    credit_value = float(credit)
+    if not math.isfinite(credit_value):
+        raise ValueError("credit must be finite")
+    pending_for_open = 0.0
+    for row in orders_for_open:
+        if not isinstance(row, Mapping) or "mirrorID" not in row:
+            raise ValueError("ordersForOpen row is missing mirrorID")
+        if isinstance(row["mirrorID"], bool):
+            raise ValueError("ordersForOpen mirrorID must be an integer")
+        try:
+            mirror_id = float(row["mirrorID"])
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("ordersForOpen mirrorID must be an integer") from exc
+        if not math.isfinite(mirror_id) or not mirror_id.is_integer():
+            raise ValueError("ordersForOpen mirrorID must be an integer")
+        row_amount = amount(row)
+        if mirror_id == 0:
+            pending_for_open += row_amount
+    return credit_value - pending_for_open - sum(amount(row) for row in orders)
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,10 +420,26 @@ class OrderRequest:
 
 @dataclass(frozen=True, slots=True)
 class CloseRequest:
-    """A full-close request body (DESIGN §4.3).
+    """A close request body (DESIGN §4.3; partial close decided
+    board nightwatch/handoff-2026-09-06.md §7).
 
-    ``units_to_deduct`` is always ``None`` — a full close is the only close
-    type this app performs; partial-close support is explicitly out of scope.
+    ``units_to_deduct=None`` (the default) is a **full** close — byte-identical
+    on the wire to this app's original, only behaviour: ``{"InstrumentId":
+    ..., "UnitsToDeduct": null}``. A caller that passes a positive
+    ``units_to_deduct`` gets a **partial** close instead, deducting exactly
+    that many units and leaving the position OPEN with the remainder.
+
+    Partial close was explicitly out of scope until 2026-09-06 (the operator
+    reversed an earlier "no" after considering the impact on the strategy as
+    a whole, board nightwatch/handoff-2026-09-06.md §7) because SCHG is tracked only as the
+    scalar ``schg_position_value``, not per-lot like UPRO — the executor that
+    picks *which* lot and *how much* has to be able to close less than a
+    whole position. This class only shapes the request body; it does NOT
+    enforce the broker's $10 ``minPositionExposure``/``minPositionAmount``
+    stub floor -- that requires the position's market value, which this
+    dataclass does not carry. See :func:`partial_close_leaves_legal_remainder`
+    for that check, which the (not-yet-built, out of scope here) lot-selection
+    executor must call before constructing a partial ``CloseRequest``.
     """
 
     position_id: str
@@ -374,19 +447,85 @@ class CloseRequest:
     units_to_deduct: float | None = None
 
     def __post_init__(self) -> None:
-        if self.units_to_deduct is not None:
+        if self.units_to_deduct is not None and self.units_to_deduct <= 0:
             raise ValueError(
-                "CloseRequest.units_to_deduct must be None: this app only "
-                "ever performs full closes (partial close is out of scope)"
+                f"CloseRequest.units_to_deduct must be positive or None, got "
+                f"{self.units_to_deduct!r}"
             )
 
     def to_json(self) -> dict[str, Any]:
         return {"InstrumentId": self.instrument_id, "UnitsToDeduct": self.units_to_deduct}
 
 
+#: The broker's $10 ``minPositionExposure``/``minPositionAmount`` stub floor
+#: (DESIGN §4.3, board nightwatch/handoff-2026-09-06.md §7) — both are $10, verified live
+#: 2026-09-05. A close, partial or full, may never leave a position worth
+#: less than this and more than zero.
+MIN_POSITION_VALUE_USD: Final = 10.0
+
+#: Floating-point slack for treating a remainder as "zero" (i.e. a full
+#: close). Deliberately far below any real position size or broker rounding.
+_FULL_CLOSE_EPSILON: Final = 1e-6
+
+
+def partial_close_leaves_legal_remainder(
+    position_market_value: float,
+    close_market_value: float,
+    *,
+    min_position_value: float = MIN_POSITION_VALUE_USD,
+) -> bool:
+    """Would closing ``close_market_value`` out of a position currently worth
+    ``position_market_value`` leave a legal remainder?
+
+    board nightwatch/handoff-2026-09-06.md §7, the SCHG close path decision: "order by cost,
+    size by market value" — this app orders lots for a close by ``openRate``
+    descending (cost basis, per share), but the partial amount, the shortfall
+    arithmetic, and this $10 check all use **market value**
+    (``units * price``, see :func:`mark_position`), never
+    ``Position.amount`` (cost basis, ``amount == units * openRate``,
+    227/227 verified). On an appreciated lot the two differ; using cost
+    basis here would be wrong on every appreciated lot.
+
+    **ASSUMPTION, explicitly unverified** (board nightwatch/handoff-2026-09-06.md §7): whether
+    the broker's $10 floor actually gates on a remainder's market value or
+    its cost basis is UNVERIFIED against the live account. This function
+    assumes MARKET VALUE. Confirm on the DEMO account 2026-09-11 (§8) before
+    trusting this on an appreciated lot; if the broker in fact gates on cost
+    basis, this is the one function to fix.
+
+    A remainder of (approximately) zero — i.e. a full close — is always
+    legal, matching this app's only production behaviour today. A nonzero
+    remainder is legal only if it is at least ``min_position_value``.
+
+    Worked example (board nightwatch/handoff-2026-09-06.md §7): need $51, positions worth
+    $50/$50/$60 -> close the $50 whole (remainder $0, legal), then take $1
+    from the $60 (remainder $59, legal). Taking $51 from the $60 instead
+    would leave a $9 stub and is illegal:
+
+    >>> partial_close_leaves_legal_remainder(50.0, 50.0)   # the $50, in full
+    True
+    >>> partial_close_leaves_legal_remainder(60.0, 1.0)    # $1 of the $60
+    True
+    >>> partial_close_leaves_legal_remainder(60.0, 51.0)   # $51 of the $60
+    False
+    """
+    remainder = position_market_value - close_market_value
+    if remainder <= _FULL_CLOSE_EPSILON:
+        return True
+    return remainder >= min_position_value
+
+
 @dataclass(frozen=True, slots=True)
 class OrderResult:
-    """The result of one poll of ``orders:lookup`` for a single order."""
+    """The result of one poll of ``orders:lookup`` for a single order.
+
+    ``status_label`` (added 2026-09-11) carries the broker's OWN name for the
+    status verbatim -- the live payload sends ``{"id": 3, "name": "Filled"}``,
+    and keeping ``name`` alongside the numeric ``id`` is what makes a future
+    enum drift (a code we map to one label that eToro calls something else)
+    visible instead of silent. ``None`` only when the payload stated a bare
+    numeric status with no label at all.
+    """
 
     order_id: str | None
     reference_id: str | None
@@ -396,6 +535,7 @@ class OrderResult:
     fill_units: float | None = None
     fill_amount_usd: float | None = None
     reject_reason: str | None = None
+    status_label: str | None = None
     raw: dict[str, Any] = field(default_factory=dict)
 
     @property

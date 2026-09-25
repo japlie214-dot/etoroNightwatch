@@ -15,14 +15,19 @@ from datetime import datetime, timezone
 
 import pytest
 
-from nightwatch.config import MarketDataConfig
+from nightwatch.config import MarketDataConfig, ReconciliationConfig
+from nightwatch.db.repo import Intent, LotAnnotation
 from nightwatch.engine.preflight import (
     GateResult,
+    find_broker_take_profits,
     ProvisionalClose,
     gate_10_price_data,
+    gate_11_reconciliation,
     notify_gate_10_failure,
+    notify_gate_11_failure,
 )
-from nightwatch.etoro.models import Candle, Rate
+from nightwatch.etoro.client import EtoroClient
+from nightwatch.etoro.models import Candle, Position, Rate
 
 SYMBOLS = ("SPY", "SCHG", "UPRO")
 
@@ -560,3 +565,441 @@ def test_notify_gate_10_failure_refuses_a_passing_result() -> None:
     notifier = _RecordingNotifier()
     with pytest.raises(ValueError):
         notify_gate_10_failure(notifier, result, trading_date="2026-09-04")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Gate 11 -- reconciliation (DESIGN §1.4 fix #3, §5; DESIGN_market_data.md
+# §4.5's "inverted gate 11"). engine/reconcile.py carries the actual
+# detection logic and its own dedicated tests (tests/test_reconcile.py);
+# these confirm gate 11 wraps it correctly, fails closed, and is wired the
+# same way as gate 10 (a pure function over already-fetched data, plus a
+# matching notify_* helper).
+# ---------------------------------------------------------------------------
+
+MANAGED_SYMBOLS = ("SCHG", "UPRO")
+INSTRUMENT_SYMBOLS = {3244: "UPRO", 1084: "SCHG", 3000: "SPY"}
+
+
+def _gate11_position(position_id: str, instrument_id: int) -> Position:
+    return Position(
+        position_id=position_id,
+        instrument_id=instrument_id,
+        units=1.0,
+        entry_price=50.0,
+        amount=50.0,
+        leverage=1,
+        is_buy=True,
+        open_date="2026-08-21T10:00:00+00:00",
+        raw={},
+    )
+
+
+def _gate11_annotation(position_id: str, symbol: str, *, is_open: bool = True) -> LotAnnotation:
+    return LotAnnotation(
+        position_id=position_id,
+        symbol=symbol,
+        book="catapult",
+        entry_date="2026-08-21",
+        entry_amount=50.0,
+        origin="app",
+        is_open=is_open,
+    )
+
+
+def test_gate_11_passes_when_broker_and_sidecar_fully_agree() -> None:
+    positions = [_gate11_position("pos-upro-1", 3244)]
+    annotations = [_gate11_annotation("pos-upro-1", "UPRO")]
+    result = gate_11_reconciliation(
+        positions,
+        annotations,
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+    )
+    assert isinstance(result, GateResult)
+    assert result.gate == 11
+    assert result.passed is True
+    assert result.details["discrepancies"] == []
+
+
+def test_gate_11_fails_closed_on_an_unmatched_broker_position() -> None:
+    """The one non-negotiable behaviour required by the task: any
+    non-empty discrepancy list fails this gate loudly."""
+    positions = [_gate11_position("pos-mystery", 3244)]
+    result = gate_11_reconciliation(
+        positions,
+        annotations=[],
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+    )
+    assert result.passed is False
+    assert result.gate == 11
+    assert "pos-mystery" in result.reason
+    assert len(result.details["discrepancies"]) == 1
+    assert result.details["discrepancies"][0]["kind"] == "unmatched_broker_position"
+
+
+def test_gate_11_fails_closed_on_an_unmatched_open_lot() -> None:
+    annotations = [_gate11_annotation("pos-vanished", "UPRO")]
+    result = gate_11_reconciliation(
+        positions=[],
+        annotations=annotations,
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+    )
+    assert result.passed is False
+    assert "pos-vanished" in result.reason
+    assert result.details["discrepancies"][0]["kind"] == "unmatched_open_lot"
+
+
+def test_gate_11_ignores_non_managed_symbol_positions() -> None:
+    """A position outside the managed set is display-only and must never
+    fail this gate (DESIGN.md §1.4, §6.D) -- even with zero sidecar rows."""
+    positions = [_gate11_position("pos-other", 6365)]
+    result = gate_11_reconciliation(
+        positions,
+        annotations=[],
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols={**INSTRUMENT_SYMBOLS, 6365: "IAU"},
+    )
+    assert result.passed is True
+
+
+def test_notify_gate_11_failure_calls_preflight_result_naming_the_gate() -> None:
+    positions = [_gate11_position("pos-mystery", 3244)]
+    result = gate_11_reconciliation(
+        positions,
+        annotations=[],
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+    )
+    notifier = _RecordingNotifier()
+    notify_gate_11_failure(notifier, result, trading_date="2026-09-06", session_id=7)  # type: ignore[arg-type]
+    assert len(notifier.calls) == 1
+    call = notifier.calls[0]
+    assert call["gate"] == 11
+    assert call["passed"] is False
+    assert "pos-mystery" in call["reason"]
+    assert call["session_id"] == 7
+
+
+def test_notify_gate_11_failure_refuses_a_passing_result() -> None:
+    positions = [_gate11_position("pos-upro-1", 3244)]
+    annotations = [_gate11_annotation("pos-upro-1", "UPRO")]
+    result = gate_11_reconciliation(
+        positions,
+        annotations,
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+    )
+    notifier = _RecordingNotifier()
+    with pytest.raises(ValueError):
+        notify_gate_11_failure(notifier, result, trading_date="2026-09-06")  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Gate 11's auto-adopt path (DESIGN_session.md §3.4, the operator's
+# 2026-09-06 "no forced human-in-the-loop" decision). The matching/adoption
+# logic itself is engine/reconcile.py's job and is exhaustively tested in
+# tests/test_reconcile.py -- these confirm gate 11 wires it in correctly:
+# opt-in via abandoned_intents, byte-identical behaviour when it is omitted,
+# and adoptions surfaced in details without ever flipping `passed` to False.
+# ---------------------------------------------------------------------------
+
+
+def _gate11_abandoned_intent(
+    *,
+    request_id: str = "req-1",
+    instrument_id: int = 1084,  # SCHG
+    symbol: str = "SCHG",
+    amount_usd: float = 50.0,
+    book: str = "catapult",
+) -> Intent:
+    return Intent(
+        session_id=1,
+        request_id=request_id,
+        sequence=1,
+        symbol=symbol,
+        side="buy",
+        instrument_id=instrument_id,
+        book=book,
+        amount_usd=amount_usd,
+        status="abandoned",
+    )
+
+
+def test_gate_11_default_omits_abandoned_intents_and_behaves_exactly_as_before() -> None:
+    """The load-bearing backward-compatibility test: every call site that
+    predates this feature (including every other test in this file) does
+    not pass ``abandoned_intents`` at all -- confirm that path is completely
+    unaffected, still failing closed on a bare unmatched position."""
+    positions = [_gate11_position("pos-mystery", 3244)]
+    result = gate_11_reconciliation(
+        positions,
+        annotations=[],
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+    )
+    assert result.passed is False
+    assert result.details["adoptions"] == []
+
+
+def test_gate_11_adopts_a_position_matching_an_abandoned_intent() -> None:
+    position = _gate11_position("pos-late-fill", 1084)  # SCHG
+    intent = _gate11_abandoned_intent()
+    result = gate_11_reconciliation(
+        [position],
+        annotations=[],
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+        abandoned_intents=[intent],
+    )
+    assert result.passed is True
+    assert result.details["discrepancies"] == []
+    assert len(result.details["adoptions"]) == 1
+    adoption = result.details["adoptions"][0]
+    assert adoption["position_id"] == "pos-late-fill"
+    assert adoption["entry_context_source"] == "adopted_from_abandoned_intent"
+    assert adoption["intent_request_id"] == "req-1"
+    assert "auto-adopted" in result.reason
+
+
+def test_gate_11_bare_unmatched_position_still_fails_with_unrelated_abandoned_intents() -> None:
+    """THE non-negotiable behaviour: an unmatched broker position with no
+    genuine provenance must still fail this gate, even when the
+    auto-adopt path is engaged for other positions in the same call."""
+    positions = [
+        _gate11_position("pos-late-fill", 1084),
+        _gate11_position("pos-mystery", 3244),  # UPRO, no matching intent
+    ]
+    intent = _gate11_abandoned_intent()
+    result = gate_11_reconciliation(
+        positions,
+        annotations=[],
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+        abandoned_intents=[intent],
+    )
+    assert result.passed is False
+    assert len(result.details["adoptions"]) == 1
+    assert result.details["adoptions"][0]["position_id"] == "pos-late-fill"
+    assert len(result.details["discrepancies"]) == 1
+    assert result.details["discrepancies"][0]["position_id"] == "pos-mystery"
+
+
+def test_gate_11_respects_reconciliation_config_size_tolerance() -> None:
+    """A tighter configured tolerance than the position's actual deviation
+    must still fail this gate closed -- the config value is not decorative."""
+    position = _gate11_position("pos-slippage", 1084)
+    object.__setattr__(position, "amount", 52.0)  # 4% over the intent's $50
+    intent = _gate11_abandoned_intent(amount_usd=50.0)
+    result = gate_11_reconciliation(
+        [position],
+        annotations=[],
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+        abandoned_intents=[intent],
+        reconciliation_config=ReconciliationConfig(abandoned_intent_size_tolerance_pct=0.02),
+    )
+    assert result.passed is False
+    assert result.details["adoptions"] == []
+
+    # The same mismatch, but with a wide-enough configured tolerance, adopts.
+    result_wide = gate_11_reconciliation(
+        [position],
+        annotations=[],
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+        abandoned_intents=[intent],
+        reconciliation_config=ReconciliationConfig(abandoned_intent_size_tolerance_pct=0.10),
+    )
+    assert result_wide.passed is True
+    assert len(result_wide.details["adoptions"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Gate 11's auto-RESOLVE path -- the mirror-image gap (DESIGN_session.md
+# §3.4). Same wiring contract as the adopt path above: opt-in via the same
+# ``abandoned_intents``, byte-identical behaviour when it is omitted, and
+# resolutions surfaced in details without ever flipping ``passed`` to False.
+# The matching logic is engine/reconcile.py's job and is exhaustively
+# tested in tests/test_reconcile.py.
+# ---------------------------------------------------------------------------
+
+
+def _gate11_abandoned_close_intent(
+    *,
+    request_id: str = "req-close-1",
+    symbol: str = "SCHG",
+    instrument_id: int = 1084,  # SCHG
+    book: str = "catapult",
+    position_id: str = "pos-vanished",
+) -> Intent:
+    return Intent(
+        session_id=1,
+        request_id=request_id,
+        sequence=1,
+        symbol=symbol,
+        side="close",
+        instrument_id=instrument_id,
+        book=book,
+        position_id=position_id,
+        status="abandoned",
+    )
+
+
+def test_gate_11_resolves_a_vanished_position_matching_an_abandoned_close_intent() -> None:
+    annotations = [_gate11_annotation("pos-vanished", "SCHG")]
+    intent = _gate11_abandoned_close_intent()
+    result = gate_11_reconciliation(
+        positions=[],
+        annotations=annotations,
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+        abandoned_intents=[intent],
+    )
+    assert result.passed is True
+    assert result.details["discrepancies"] == []
+    assert len(result.details["resolutions"]) == 1
+    resolution = result.details["resolutions"][0]
+    assert resolution["position_id"] == "pos-vanished"
+    assert resolution["exit_context_source"] == "resolved_from_abandoned_intent"
+    assert resolution["intent_request_id"] == "req-close-1"
+    assert "auto-resolved" in result.reason
+
+
+def test_gate_11_vanished_position_still_fails_with_no_matching_abandoned_close_intent() -> None:
+    """THE non-negotiable behaviour: a position that vanished for any
+    reason OTHER than one of our own abandoned close orders (broker-side
+    liquidation, or a hand-close in the eToro app) has no matching intent
+    and must still fail this gate -- this is the entire safety argument for
+    the auto-resolve path."""
+    annotations = [_gate11_annotation("pos-vanished", "SCHG")]
+    result = gate_11_reconciliation(
+        positions=[],
+        annotations=annotations,
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+        abandoned_intents=[],
+    )
+    assert result.passed is False
+    assert result.details["resolutions"] == []
+    assert result.details["discrepancies"][0]["kind"] == "unmatched_open_lot"
+
+
+def test_gate_11_default_omits_abandoned_intents_and_close_resolution_is_also_a_no_op() -> None:
+    """Same backward-compatibility guarantee as the adopt path: every call
+    site that predates this feature does not pass ``abandoned_intents`` at
+    all -- confirm the close-side path is completely unaffected too."""
+    annotations = [_gate11_annotation("pos-vanished", "SCHG")]
+    result = gate_11_reconciliation(
+        positions=[],
+        annotations=annotations,
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+    )
+    assert result.passed is False
+    assert result.details["resolutions"] == []
+
+
+def test_gate_11_both_adopt_and_resolve_paths_can_fire_in_one_call() -> None:
+    """The buy-side adopt and close-side resolve paths are independent and
+    both draw from the same ``abandoned_intents`` -- confirm they can both
+    fire together without interfering with each other."""
+    positions = [_gate11_position("pos-late-fill", 1084)]  # SCHG buy fill
+    annotations = [_gate11_annotation("pos-vanished", "SCHG")]  # SCHG vanished close
+    buy_intent = _gate11_abandoned_intent(request_id="req-buy-1")
+    close_intent = _gate11_abandoned_close_intent(request_id="req-close-1")
+    result = gate_11_reconciliation(
+        positions,
+        annotations=annotations,
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+        abandoned_intents=[buy_intent, close_intent],
+    )
+    assert result.passed is True
+    assert len(result.details["adoptions"]) == 1
+    assert result.details["adoptions"][0]["position_id"] == "pos-late-fill"
+    assert len(result.details["resolutions"]) == 1
+    assert result.details["resolutions"][0]["position_id"] == "pos-vanished"
+
+
+# ===========================================================================
+# Broker-side take-profit detection (DESIGN.md §6.A, 2026-09-11) --
+# `find_broker_take_profits`, the detection half only. Deliberately not a
+# gate: it is gate 12's input once gate 12 exists (see the TODO above the
+# function), and must never be folded into fail-closed gate 11, where the
+# live book's 229-of-230 TP-carrying positions would halt every session.
+#
+# Fixtures are REAL rows from
+# `data/probe_2026-09-11/adopt_fetch/adopt_portfolio_raw.json`, parsed
+# through the real parser rather than hand-built Position objects, so the
+# test exercises the parse and the detection together.
+# ===========================================================================
+
+_LIVE_TP_ROW: dict[str, object] = {
+    "positionID": 2867253750, "openDateTime": "2024-11-27T14:30:41.173Z",
+    "openRate": 27.65, "instrumentID": 1084, "isBuy": True,
+    "takeProfitRate": 304.15, "stopLossRate": 0.0001, "amount": 200.0,
+    "leverage": 1, "units": 7.233273, "isNoTakeProfit": False,
+    "isNoStopLoss": True,
+}
+
+_LIVE_NO_TP_ROW: dict[str, object] = {
+    "positionID": 3550406905, "openDateTime": "2026-08-19T13:30:09.647Z",
+    "openRate": 35.37, "instrumentID": 1084, "isBuy": True,
+    "takeProfitRate": 0.0, "stopLossRate": 0.0001, "amount": 500.0,
+    "leverage": 1, "units": 14.136273, "isNoTakeProfit": True,
+    "isNoStopLoss": True,
+}
+
+
+def test_find_broker_take_profits_detects_the_live_11x_take_profit() -> None:
+    position = EtoroClient._parse_position(_LIVE_TP_ROW)
+    found = find_broker_take_profits([position])
+    assert len(found) == 1
+    assert found[0].position_id == "2867253750"
+    assert found[0].instrument_id == 1084
+    assert found[0].take_profit_rate == pytest.approx(304.15)
+    assert found[0].multiple == pytest.approx(11.0, abs=1e-9)
+
+
+def test_find_broker_take_profits_does_not_flag_the_suppressed_position() -> None:
+    """positionID 3550406905 is the one live position with
+    isNoTakeProfit: true. Its takeProfitRate is 0.0 -- present and falsy --
+    so a rate-only check would be ambiguous; the flag is authoritative."""
+    position = EtoroClient._parse_position(_LIVE_NO_TP_ROW)
+    assert find_broker_take_profits([position]) == []
+
+
+def test_find_broker_take_profits_ignores_a_payload_missing_the_fields() -> None:
+    """"Not stated" is neither "suppressed" nor "detected" -- a payload with
+    no take-profit keys must not crash and must not produce a finding."""
+    position = _gate11_position("pos-no-tp-keys", 1084)
+    assert position.take_profit_rate is None
+    assert find_broker_take_profits([position]) == []
+
+
+def test_find_broker_take_profits_reports_mixed_books_in_input_order() -> None:
+    positions = [
+        EtoroClient._parse_position(_LIVE_NO_TP_ROW),
+        EtoroClient._parse_position(_LIVE_TP_ROW),
+        _gate11_position("pos-no-tp-keys", 1084),
+    ]
+    found = find_broker_take_profits(positions)
+    assert [f.position_id for f in found] == ["2867253750"]
+
+
+def test_find_broker_take_profits_is_detection_only_and_never_fails_gate_11() -> None:
+    """Explicit guard on the scoping decision: a TP-carrying position that
+    reconciles fine must still pass gate 11. If this ever flips, the live
+    book (229 of 230 positions carrying a TP) would halt every session."""
+    position = EtoroClient._parse_position(_LIVE_TP_ROW)
+    annotation = _gate11_annotation("2867253750", "SCHG")
+    result = gate_11_reconciliation(
+        [position],
+        annotations=[annotation],
+        managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+    )
+    assert result.passed is True
+    assert find_broker_take_profits([position]) != []

@@ -41,6 +41,7 @@ __all__ = [
     "RiskConfig",
     "TiingoConfig",
     "MarketDataConfig",
+    "ReconciliationConfig",
     "Config",
     "TIER_CAPS",
     "TIER_DRAWDOWN_BOUNDS",
@@ -480,8 +481,7 @@ class MarketDataConfig:
     #: when both are available to cross-check (DESIGN_market_data §3.1, §5.1,
     #: §8, §10.4).
     #:
-    #: **Set from a real observed distribution, 2026-09-05** (HANDOFF_2026-09
-    #: -05_evening.md §4; FINDINGS_window_live_2026-09-05.md §3): Tiingo raw
+    #: **Set from a real observed distribution, 2026-09-05** (board nightwatch/handoff-2026-09-05-evening.md §4; FINDINGS_window_live_2026-09-05.md §3): Tiingo raw
     #: ``close`` vs eToro candle ``close`` -- both raw, like-with-like, per
     #: the §4 basis split (an ``adjClose``-vs-eToro comparison at the window
     #: edge diverges 1.09% and would breach any sane tolerance; this
@@ -541,18 +541,68 @@ class MarketDataConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class ReconciliationConfig:
+    """Gate 11 tuning for the non-terminal-order state-based resolution path
+    (DESIGN_session.md §3.4, §14 item 2; the operator's 2026-09-06 decision
+    to remove the last forced human-in-the-loop from that path).
+
+    Both fields govern ``engine.reconcile``'s narrow auto-adopt path (an
+    unmatched broker position that matches one of this app's own persisted,
+    abandoned :class:`~nightwatch.db.repo.Intent` rows is adopted from that
+    record rather than failing gate 11 closed) -- never the general case of
+    an unmatched broker position with no such record, which still fails
+    closed exactly as before this decision.
+    """
+
+    #: How many consecutive trading sessions a non-terminal order is kept
+    #: alive by ``recover_by_reference_id`` polling (DESIGN_session.md §3.4)
+    #: before the session gives up polling it and marks the intent
+    #: ``'abandoned'`` instead -- switching from "still trying to learn what
+    #: happened" to "resolve against whatever the broker's account state
+    #: shows next". **OPERATOR-DECIDED, 2026-09-06: N = 3** (DESIGN_session.md
+    #: §14 item 2, board nightwatch/handoff-2026-09-06.md §9) -- an explicit operator choice,
+    #: not derived from any measurement or calibration. Kept here rather
+    #: than buried in code once the polling loop (``engine/session.py``, not
+    #: yet built) is written against it, so it stays one config knob away
+    #: from being changed if the operator revisits it later.
+    non_terminal_order_sessions_before_abandoned: int = 3
+    #: Max fractional deviation between an abandoned buy intent's requested
+    #: ``amount_usd`` and the broker position's actual ``amount`` (cost
+    #: basis) for the two to be considered the same order
+    #: (``engine.reconcile._match_abandoned_intent``). A market order's
+    #: actual fill notional can differ slightly from the requested USD
+    #: amount (price movement between decision and fill, unit rounding) --
+    #: this tolerates that ordinary slippage while still refusing to match
+    #: two orders of meaningfully different size. **Provisional, like every
+    #: other tolerance in this file (§10.4's standing rule) pending a real
+    #: observed distribution** -- 2% is chosen only as comfortably above
+    #: plausible market-order slippage on same-second execution and
+    #: comfortably below "this is actually a different order."
+    abandoned_intent_size_tolerance_pct: float = 0.02
+
+    def __post_init__(self) -> None:
+        if self.non_terminal_order_sessions_before_abandoned <= 0:
+            raise ConfigError(
+                "reconciliation.non_terminal_order_sessions_before_abandoned "
+                "must be positive"
+            )
+        if not 0.0 < self.abandoned_intent_size_tolerance_pct < 1.0:
+            raise ConfigError(
+                "reconciliation.abandoned_intent_size_tolerance_pct must be "
+                "in (0, 1)"
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class RiskConfig:
     """Hard caps enforced by preflight gate 12 (DESIGN §5)."""
 
-    max_orders_per_session: int = 10
     max_notional_per_session_usd: float = 5000.0
     max_daily_loss_usd: float | None = None
     #: Gate 2 aborts below this when the host is on battery.
     min_battery_percent: int = 40
 
     def __post_init__(self) -> None:
-        if self.max_orders_per_session <= 0:
-            raise ConfigError("risk.max_orders_per_session must be positive")
         if self.max_notional_per_session_usd <= 0:
             raise ConfigError("risk.max_notional_per_session_usd must be positive")
         if not 0 <= self.min_battery_percent <= 100:
@@ -572,6 +622,7 @@ class Config:
     risk: RiskConfig
     tiingo: TiingoConfig = field(default_factory=TiingoConfig)
     market_data: MarketDataConfig = field(default_factory=MarketDataConfig)
+    reconciliation: ReconciliationConfig = field(default_factory=ReconciliationConfig)
     #: Source paths, for ``status`` output and diagnostics.
     config_path: Path | None = None
     secrets_path: Path | None = None
@@ -788,7 +839,6 @@ def load_config(
 
     rk = _table(data, "risk")
     risk = RiskConfig(
-        max_orders_per_session=int(rk.get("max_orders_per_session", 10)),
         max_notional_per_session_usd=float(rk.get("max_notional_per_session_usd", 5000.0)),
         max_daily_loss_usd=(
             None
@@ -817,6 +867,16 @@ def load_config(
         ),
     )
 
+    rc = _table(data, "reconciliation")
+    reconciliation = ReconciliationConfig(
+        non_terminal_order_sessions_before_abandoned=int(
+            rc.get("non_terminal_order_sessions_before_abandoned", 3)
+        ),
+        abandoned_intent_size_tolerance_pct=float(
+            rc.get("abandoned_intent_size_tolerance_pct", 0.02)
+        ),
+    )
+
     return Config(
         mode=mode,
         etoro=etoro,
@@ -827,6 +887,7 @@ def load_config(
         risk=risk,
         tiingo=tiingo,
         market_data=market_data,
+        reconciliation=reconciliation,
         config_path=config_path,
         secrets_path=secrets_path,
         arm_flag_present=bool(environ.get(ARM_ENV_VAR, "").strip()),

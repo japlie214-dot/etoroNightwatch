@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import sqlite3
 
 import pytest
@@ -201,6 +202,29 @@ def test_intent_status_lifecycle_and_pending_listing(repo: Repo) -> None:
     assert repo.pending_intents() == []
 
 
+def test_abandoned_intents_listing(repo: Repo) -> None:
+    """The state-based resolution path's candidate set
+    (engine.reconcile.resolve_abandoned_intent_adoptions, DESIGN_session.md
+    §3.4): only intents actually marked 'abandoned' come back, regardless
+    of status or how many sessions they span."""
+    session = repo.create_session("2026-01-02", mode="live", environment="demo", armed=True)
+    abandoned_id = repo.insert_intent(
+        Intent(session_id=session.id, request_id="rid-abandoned", sequence=1, symbol="SCHG", side="buy", amount_usd=50.0)
+    )
+    repo.insert_intent(
+        Intent(session_id=session.id, request_id="rid-pending", sequence=2, symbol="SCHG", side="buy", amount_usd=50.0)
+    )
+    filled_id = repo.insert_intent(
+        Intent(session_id=session.id, request_id="rid-filled", sequence=3, symbol="SCHG", side="buy", amount_usd=50.0)
+    )
+    repo.set_intent_status(abandoned_id, "abandoned", resolved=True)
+    repo.set_intent_status(filled_id, "filled", resolved=True)
+
+    result = repo.abandoned_intents()
+    assert [i.request_id for i in result] == ["rid-abandoned"]
+    assert result[0].status == "abandoned"
+
+
 def test_order_round_trip_and_reference_lookup(repo: Repo) -> None:
     session = repo.create_session("2026-01-02", mode="live", environment="demo", armed=True)
     intent_id = repo.insert_intent(
@@ -285,7 +309,7 @@ def test_lot_annotation_round_trip(repo: Repo) -> None:
     assert row.is_open is True
     assert row.bucket_id is None
     assert row.created_at is not None
-    # migration 005, HANDOFF_2026-09-05_evening.md §3a: defaults to
+    # migration 005, board nightwatch/handoff-2026-09-05-evening.md §3a: defaults to
     # 'derived' -- every row this codebase writes today has measured, never
     # guessed, SPY context.
     assert row.entry_context_source == "derived"
@@ -298,6 +322,21 @@ def test_lot_annotation_entry_context_source_round_trips_explicitly(repo: Repo) 
     row = repo.get_lot_annotation("pos-assumed")
     assert row is not None
     assert row.entry_context_source == "assumed_out_of_window"
+
+
+def test_lot_annotation_adopted_from_abandoned_intent_round_trips(repo: Repo) -> None:
+    """Migration 006 (DESIGN_session.md §3.4, the operator's 2026-09-06 "no
+    forced human-in-the-loop" decision): a lot built by
+    ``engine.reconcile.resolve_abandoned_intent_adoptions`` is stamped with
+    this distinct entry_context_source and stays greppable/auditable
+    forever after, never silently indistinguishable from a normally-recorded
+    row."""
+    repo.insert_lot_annotation(
+        _annotation("pos-adopted", entry_context_source="adopted_from_abandoned_intent")
+    )
+    row = repo.get_lot_annotation("pos-adopted")
+    assert row is not None
+    assert row.entry_context_source == "adopted_from_abandoned_intent"
 
 
 def test_insert_lot_annotation_rejects_duplicate_position_id(repo: Repo) -> None:
@@ -406,6 +445,124 @@ def test_insert_lot_annotations_bulk_is_atomic_on_a_foreign_key_violation(repo: 
     # poison it) -- a fresh, valid write succeeds.
     repo.insert_lot_annotation(_annotation("pos-after-rollback"))
     assert repo.get_lot_annotation("pos-after-rollback") is not None
+
+
+def test_update_lot_annotation_updates_mutable_fields_in_place(repo: Repo) -> None:
+    """PARTIAL CLOSE write path (board nightwatch/handoff-2026-09-06.md §7): a position that
+    stays OPEN with reduced units needs its sidecar row updatable, not just
+    insert-or-skip."""
+    repo.insert_lot_annotation(_annotation("pos-1"))
+    row = repo.get_lot_annotation("pos-1")
+    assert row is not None
+
+    updated = dataclasses.replace(row, entry_tier=2)
+    repo.update_lot_annotation(updated)
+
+    got = repo.get_lot_annotation("pos-1")
+    assert got is not None
+    assert got.entry_tier == 2
+    # A partial close leaves the position OPEN -- is_open is untouched here
+    # because `updated` was built from the still-open row.
+    assert got.is_open is True
+
+
+def test_update_lot_annotation_leaves_the_relink_key_and_identity_untouched(
+    repo: Repo,
+) -> None:
+    """`entry_date`/`entry_amount` are the re-link key (§4.4) and must never
+    change after the first stamp; `position_id`/`symbol`/`book`/`origin` are
+    identity/provenance, also immutable here. The UPDATE statement simply
+    does not include those columns, so even a caller that (incorrectly)
+    supplies different values for them has no effect."""
+    repo.insert_lot_annotation(_annotation("pos-1", entry_amount=10.0, symbol="SCHG"))
+    original = repo.get_lot_annotation("pos-1")
+    assert original is not None
+
+    tampered = dataclasses.replace(
+        original, entry_amount=999.0, symbol="UPRO", entry_tier=1
+    )
+    repo.update_lot_annotation(tampered)
+
+    got = repo.get_lot_annotation("pos-1")
+    assert got is not None
+    assert got.entry_amount == 10.0
+    assert got.symbol == "SCHG"
+    assert got.entry_tier == 1  # the one field that WAS meant to change
+
+
+def test_update_lot_annotation_raises_when_no_row_exists(repo: Repo) -> None:
+    with pytest.raises(ValueError, match="pos-missing"):
+        repo.update_lot_annotation(_annotation("pos-missing"))
+
+
+def test_update_lot_annotation_rejects_bad_book_or_origin(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-1"))
+    with pytest.raises(ValueError, match="book"):
+        repo.update_lot_annotation(_annotation("pos-1", book="not-a-book"))
+    # Rejected before any write -- the row is unchanged.
+    assert repo.get_lot_annotation("pos-1").book == "catapult"  # type: ignore[union-attr]
+
+
+def test_lot_annotation_exit_context_source_defaults_to_none(repo: Repo) -> None:
+    """Migration 007: every row inserted today (no auto-resolve path has
+    run yet) has no special close-time provenance to record."""
+    repo.insert_lot_annotation(_annotation("pos-1"))
+    row = repo.get_lot_annotation("pos-1")
+    assert row is not None
+    assert row.exit_context_source is None
+
+
+def test_update_lot_annotation_can_stamp_exit_context_source(repo: Repo) -> None:
+    """Migration 007 (DESIGN_session.md §3.4, closing the mirror-image gap):
+    engine.reconcile.resolve_abandoned_close_intents marks an
+    auto-resolved close's annotation via exactly this write path -- is_open
+    flips to False and exit_context_source is stamped, greppable/auditable
+    forever after, unlike entry_context_source which update_lot_annotation
+    never touches."""
+    repo.insert_lot_annotation(_annotation("pos-1"))
+    row = repo.get_lot_annotation("pos-1")
+    assert row is not None
+
+    resolved = dataclasses.replace(
+        row, is_open=False, exit_context_source="resolved_from_abandoned_intent"
+    )
+    repo.update_lot_annotation(resolved)
+
+    got = repo.get_lot_annotation("pos-1")
+    assert got is not None
+    assert got.is_open is False
+    assert got.exit_context_source == "resolved_from_abandoned_intent"
+    # entry_context_source is untouched, exactly as before this migration.
+    assert got.entry_context_source == "derived"
+
+
+def test_update_lot_annotation_rejects_bad_exit_context_source(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-1"))
+    row = repo.get_lot_annotation("pos-1")
+    assert row is not None
+    with pytest.raises(ValueError, match="exit_context_source"):
+        repo.update_lot_annotation(
+            dataclasses.replace(row, exit_context_source="guessed")
+        )
+    # Rejected before any write -- the row is unchanged.
+    assert repo.get_lot_annotation("pos-1").exit_context_source is None  # type: ignore[union-attr]
+
+
+def test_insert_lot_annotation_rejects_bad_exit_context_source(repo: Repo) -> None:
+    with pytest.raises(ValueError, match="exit_context_source"):
+        repo.insert_lot_annotation(
+            _annotation("pos-bad-exit-context", exit_context_source="guessed")
+        )
+    assert repo.list_lot_annotations() == []
+
+
+def test_insert_lot_annotations_bulk_round_trips_exit_context_source(repo: Repo) -> None:
+    """Bulk insert (the §4.7 adoption backfill path) also carries this
+    column through -- it defaults to None like everywhere else, and is not
+    silently dropped by the batch INSERT."""
+    rows = [_annotation("pos-1"), _annotation("pos-2", symbol="UPRO")]
+    repo.insert_lot_annotations(rows)
+    assert repo.get_lot_annotation("pos-1").exit_context_source is None  # type: ignore[union-attr]
 
 
 # -- buckets ---------------------------------------------------------------

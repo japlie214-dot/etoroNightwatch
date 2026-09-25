@@ -14,6 +14,7 @@ import inspect
 import json
 import logging
 import uuid
+from pathlib import Path
 from typing import Any, Callable
 
 import httpx
@@ -217,6 +218,42 @@ def test_order_request_cannot_be_built_as_a_short() -> None:
 
 
 # ===========================================================================
+# close_position: full close stays byte-identical; partial close is now
+# expressible (board nightwatch/handoff-2026-09-06.md §7)
+# ===========================================================================
+
+
+def test_close_position_default_is_byte_identical_full_close() -> None:
+    """No ``units_to_deduct`` argument at all -- the pre-existing call shape
+    -- must still send exactly ``{"InstrumentId": ..., "UnitsToDeduct":
+    null}``, unchanged from before partial close existed."""
+    scripted = ScriptedTransport([httpx.Response(200, json={"orderId": "o-1"})])
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler), sleep=_no_sleep
+    )
+    client.close_position(
+        request_id=str(uuid.uuid4()), position_id="p-1", instrument_id=42
+    )
+    body = json.loads(scripted.requests[0].content)
+    assert body == {"InstrumentId": 42, "UnitsToDeduct": None}
+
+
+def test_close_position_accepts_units_to_deduct_for_a_partial_close() -> None:
+    scripted = ScriptedTransport([httpx.Response(200, json={"orderId": "o-2"})])
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler), sleep=_no_sleep
+    )
+    client.close_position(
+        request_id=str(uuid.uuid4()),
+        position_id="p-1",
+        instrument_id=42,
+        units_to_deduct=3.5,
+    )
+    body = json.loads(scripted.requests[0].content)
+    assert body == {"InstrumentId": 42, "UnitsToDeduct": 3.5}
+
+
+# ===========================================================================
 # Available-cash formula correctness (DESIGN §1.1, §4.5)
 #
 # Corrected 2026-09-05 (SEVERE, real-account live probe): the formula's
@@ -275,6 +312,29 @@ def test_get_balance_raises_rather_than_silently_zero_on_the_real_balances_shape
         client.get_balance()
 
 
+@pytest.mark.parametrize(
+    "portfolio",
+    [
+        {"credit": 10.0, "ordersForOpen": []},
+        {"credit": 10.0, "orders": []},
+        {"credit": 10.0, "ordersForOpen": [], "orders": [{}]},
+        {"credit": 10.0, "ordersForOpen": [{"amount": 5.0}], "orders": []},
+        {"credit": 10.0, "ordersForOpen": {}, "orders": []},
+        {"credit": 10.0, "ordersForOpen": [], "orders": [{"amount": "bad"}]},
+        {"credit": True, "ordersForOpen": [], "orders": []},
+    ],
+)
+def test_get_balance_rejects_incomplete_or_malformed_pending_order_fields(
+    portfolio: dict[str, Any],
+) -> None:
+    scripted = ScriptedTransport(
+        [httpx.Response(200, json={"clientPortfolio": portfolio})]
+    )
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(EtoroValidationError):
+        client.get_balance()
+
+
 def test_get_balance_and_get_portfolio_share_the_same_endpoint() -> None:
     """Both now read the portfolio endpoint (not two different endpoints) --
     confirm `get_balance` never touches `/balances` any more."""
@@ -313,14 +373,22 @@ def test_poll_to_terminal_stops_at_a_real_fill_not_at_waiting_for_market() -> No
         httpx.Response(
             200, json={"orderId": "o1", "referenceId": "r1", "status": 11}
         ),
+        # The REAL live fill shape (nested status object + positionExecutions),
+        # not the flat one this test used to guess at -- see
+        # data/probe_2026-09-11/order_latency_run2/RAW_orders_lookup_payload.json.
         httpx.Response(
             200,
             json={
                 "orderId": "o1",
                 "referenceId": "r1",
-                "status": 3,
-                "units": 1.5,
-                "executionPrice": 66.0,
+                "status": {"id": 3, "name": "Filled", "errorCode": 0},
+                "requestedUnits": 1.5,
+                "positionExecutions": [
+                    {
+                        "positionId": 3598679249,
+                        "openingData": {"units": 1.5, "avgPrice": 66.0},
+                    }
+                ],
             },
         ),
     ]
@@ -338,6 +406,9 @@ def test_poll_to_terminal_stops_at_a_real_fill_not_at_waiting_for_market() -> No
     assert result.order.status is OrderStatus.FILLED
     assert result.order.is_filled is True
     assert result.attempts == 3
+    assert result.order.position_id == "3598679249"
+    assert result.order.fill_units == 1.5
+    assert result.order.fill_price == 66.0
 
 
 def test_poll_timeout_on_a_still_queued_order_never_reports_a_fill() -> None:
@@ -389,6 +460,348 @@ def test_rejected_status_is_terminal_and_never_a_fill() -> None:
 
 
 # ===========================================================================
+# orders:lookup parsing, against the REAL captured live payload
+#
+# Every one of these is a regression test for the 2026-09-11 bug: the parser
+# read a guessed flat shape, and a parse miss was CAUGHT and defaulted to
+# OrderStatus.RECEIVED -- so an order that filled in ~163ms was polled for 90s,
+# booked as a timeout, and its position left open and unclosable because
+# position_id had silently become None.
+# ===========================================================================
+
+
+def test_lookup_close_order_uses_documented_endpoint_and_parses_closed_position() -> None:
+    payload = {
+        "orderID": 382291007,
+        "statusID": 3,
+        "referenceID": "close-request-1",
+        "positions": [{"positionID": 3601194005, "units": 1.25, "amount": 50.0}],
+    }
+    scripted = ScriptedTransport([httpx.Response(200, json=payload)])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+
+    result = client.lookup_close_order(382291007)
+
+    assert result.status is OrderStatus.FILLED
+    assert result.order_id == "382291007"
+    assert result.position_id == "3601194005"
+    request = scripted.requests[0]
+    assert request.url.path == "/api/v1/trading/info/demo/close-orders/382291007"
+    assert client.last_close_lookup_responses[0]["status_code"] == 200
+    assert json.loads(client.last_close_lookup_responses[0]["body"]) == payload
+
+
+@pytest.mark.parametrize(
+    "payload,match",
+    [
+        ({"orderID": 9, "statusID": 999, "positions": []}, "unknown statusID"),
+        ({"orderID": 9, "statusID": 1, "positions": {}}, "positions must be a list"),
+        ({"orderID": 9, "statusID": 3, "positions": []}, "no affected position ID"),
+    ],
+)
+def test_lookup_close_order_rejects_unknown_or_malformed_status_payloads(
+    payload: dict[str, Any], match: str,
+) -> None:
+    client = EtoroClient(
+        _config(),
+        transport=httpx.MockTransport(
+            ScriptedTransport([httpx.Response(200, json=payload)]).handler
+        ),
+    )
+    with pytest.raises(EtoroValidationError, match=match):
+        client.lookup_close_order(9)
+
+REAL_ORDERS_LOOKUP_PAYLOAD = (
+    Path(__file__).resolve().parents[1]
+    / "data"
+    / "probe_2026-09-11"
+    / "order_latency_run2"
+    / "RAW_orders_lookup_payload.json"
+)
+
+
+def _real_lookup_payload() -> dict[str, Any]:
+    """The actual live orders:lookup response captured 2026-09-11.
+
+    Loaded from the captured file rather than retyped, so the fixture can
+    never drift from what eToro really sent.
+    """
+    return json.loads(REAL_ORDERS_LOOKUP_PAYLOAD.read_text(encoding="utf-8"))
+
+
+def _parse_real(**overrides: Any) -> Any:
+    payload = _real_lookup_payload()
+    payload.update(overrides)
+    return EtoroClient._parse_order_result(payload)
+
+
+def test_demo_order_lookup_uses_legacy_get_after_v2_404() -> None:
+    payload = json.loads((Path(__file__).parent / "fixtures/etoro_contracts/legacy_order_lookup.json").read_text())
+    payload["orderID"] = 382239291
+    payload["referenceID"] = "sanitized-request-id"
+    payload["positions"][0]["positionID"] = 3601294502
+    scripted = ScriptedTransport([
+        httpx.Response(404, json={"message": "Order category not found"}),
+        httpx.Response(200, json=payload),
+    ])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    captured: list[dict[str, Any]] = []
+
+    result = client.lookup_order(order_id="382239291", response_capture=captured)
+
+    assert result.order_id == "382239291"
+    assert result.position_id == "3601294502"
+    assert result.fill_units == pytest.approx(1.415628)
+    assert result.fill_price == pytest.approx(35.29)
+    assert "token" not in result.raw and "CID" not in result.raw
+    assert [request.url.path for request in scripted.requests] == [
+        "/api/v2/trading/info/demo/orders:lookup",
+        "/api/v1/trading/info/demo/orders/382239291",
+    ]
+    assert [response["status_code"] for response in captured] == [404, 200]
+    assert [response["path"] for response in captured] == [
+        "/api/v2/trading/info/demo/orders:lookup",
+        "/api/v1/trading/info/demo/orders/382239291",
+    ]
+
+
+def test_order_lookup_never_uses_deprecated_fallback_for_real_or_reference_id() -> None:
+    real_config = EtoroConfig(
+        environment=EtoroEnvironment.REAL,
+        secrets={"ETORO_PRIVATE_KEY": "real_private_key_for_test", "ETORO_PUBLIC_KEY": "public_key_for_test"},
+    )
+    for config, kwargs in (
+        (real_config, {"order_id": "382239291"}),
+        (_config(), {"reference_id": "known-request-id"}),
+    ):
+        scripted = ScriptedTransport([httpx.Response(404, json={"message": "not found"})])
+        client = EtoroClient(config, transport=httpx.MockTransport(scripted.handler))
+        with pytest.raises(EtoroValidationError):
+            client.lookup_order(**kwargs)
+        assert len(scripted.requests) == 1
+
+
+def test_real_payload_nested_status_object_parses_to_filled_not_received() -> None:
+    """`status` is `{"id": 3, "name": "Filled"}`, not an int. The old parser
+    did `int(dict)`, caught the TypeError, and defaulted to RECEIVED -- i.e.
+    reported every single filled order as still pending."""
+    assert _real_lookup_payload()["status"] == {"id": 3, "name": "Filled", "errorCode": 0}
+    result = _parse_real()
+    assert result.status is OrderStatus.FILLED
+    assert result.status is not OrderStatus.RECEIVED
+    assert result.is_filled is True
+    assert result.is_terminal is True
+    assert result.status_label == "Filled"
+
+
+def test_real_payload_position_id_resolves_from_position_executions() -> None:
+    """There is no top-level `positionId`; it lives at
+    `positionExecutions[0].positionId`. Losing it is what stranded two live
+    demo positions -- a filled position we cannot name cannot be closed."""
+    payload = _real_lookup_payload()
+    assert "positionId" not in payload
+    assert _parse_real().position_id == "3598679249"
+
+
+@pytest.mark.parametrize(
+    "status_id,status_name",
+    [(9, "CanceledPartiallyFilled"), (10, "RejectedPartiallyFilled")],
+)
+def test_partially_filled_terminal_orders_keep_their_position_id(
+    status_id: int, status_name: str
+) -> None:
+    result = _parse_real(status={"id": status_id, "name": status_name})
+    assert result.is_terminal is True
+    assert result.is_filled is True
+    assert result.position_id == "3598679249"
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("orderId", ""),
+        ("orderId", True),
+        ("orderId", {}),
+        ("referenceId", " "),
+        ("positionId", ""),
+        ("positionId", True),
+        ("positionId", {}),
+    ],
+)
+def test_order_lookup_ids_must_be_nonempty_strings_or_nonbool_integers(
+    field: str, value: Any
+) -> None:
+    with pytest.raises(EtoroValidationError, match="non-empty string or integer"):
+        _parse_real(**{field: value})
+
+
+def test_order_lookup_rejects_conflicting_cased_order_ids() -> None:
+    payload = _real_lookup_payload()
+    payload["orderID"] = 123
+    with pytest.raises(EtoroValidationError, match="conflicting order ids"):
+        EtoroClient._parse_order_result(payload)
+
+
+def test_position_id_is_found_in_any_execution_and_ambiguous_ids_raise() -> None:
+    payload = _real_lookup_payload()
+    del payload["positionExecutions"][0]["positionId"]
+    payload["positionExecutions"].append({"positionId": 3598679249})
+    assert EtoroClient._parse_order_result(payload).position_id == "3598679249"
+
+    payload["positionExecutions"].append({"positionId": 3598679250})
+    with pytest.raises(EtoroValidationError, match="multiple position ids"):
+        EtoroClient._parse_order_result(payload)
+
+
+def test_real_payload_units_and_price_resolve_from_the_execution() -> None:
+    """No `units` key exists at all (it is `requestedUnits` at the top level
+    and `positionExecutions[0].openingData.units` on the execution), and the
+    fill price is `openingData.avgPrice`, not `executionPrice`."""
+    payload = _real_lookup_payload()
+    assert "units" not in payload
+    assert "executionPrice" not in payload
+    result = _parse_real()
+    assert result.fill_units == 1.418439
+    assert result.fill_price == 35.22
+    assert result.order_id == "380689943"
+
+
+def test_executed_units_win_over_merely_requested_units() -> None:
+    """`requestedUnits` is what we asked for, not what filled. When the
+    execution states its own units they must win, or a partial fill would be
+    reported as a full one."""
+    payload = _real_lookup_payload()
+    payload["requestedUnits"] = 99.0
+    payload["positionExecutions"][0]["openingData"]["units"] = 1.0
+    assert EtoroClient._parse_order_result(payload).fill_units == 1.0
+
+
+# -- the core regression: a parse miss must never become a default ----------
+
+
+def test_unparseable_status_raises_and_never_silently_becomes_received() -> None:
+    """THE regression test for this bug class. A status the parser cannot
+    understand must be loud. The old code's `except (TypeError, ValueError):
+    status = OrderStatus.RECEIVED` substituted a *non-terminal* status for
+    "I don't know", which is what converted fills into timeouts."""
+    for broken in (
+        {"name": "Filled"},
+        {"id": "not-a-number"},
+        {"id": 9999},
+        {"id": 3.9},
+        {"id": True},
+        "Filled",
+        None,
+    ):
+        with pytest.raises(EtoroValidationError):
+            _parse_real(status=broken)
+
+
+def test_missing_status_key_entirely_raises() -> None:
+    payload = _real_lookup_payload()
+    del payload["status"]
+    with pytest.raises(EtoroValidationError):
+        EtoroClient._parse_order_result(payload)
+
+
+def test_missing_legacy_status_does_not_echo_write_token() -> None:
+    payload = json.loads((Path(__file__).parent / "fixtures/etoro_contracts/legacy_order_lookup.json").read_text())
+    del payload["statusID"]
+    payload["token"] = "sensitive-write-capability"
+    with pytest.raises(EtoroValidationError) as caught:
+        EtoroClient._parse_order_result(payload)
+    assert "sensitive-write-capability" not in str(caught.value)
+
+
+def test_filled_order_with_no_resolvable_position_id_raises() -> None:
+    """A fill we cannot attach a position id to is an unclosable position.
+    That is position-identity-critical, so it raises rather than yielding
+    `position_id=None` and a cheerful FILLED."""
+    payload = _real_lookup_payload()
+    payload["positionExecutions"] = []
+    with pytest.raises(EtoroValidationError):
+        EtoroClient._parse_order_result(payload)
+
+    payload = _real_lookup_payload()
+    del payload["positionExecutions"][0]["positionId"]
+    with pytest.raises(EtoroValidationError):
+        EtoroClient._parse_order_result(payload)
+
+
+def test_malformed_position_executions_container_raises() -> None:
+    for broken in ({"positionId": 1}, "nope", [42]):
+        with pytest.raises(EtoroValidationError):
+            _parse_real(positionExecutions=broken)
+
+    with pytest.raises(EtoroValidationError, match="opening/closingData"):
+        _parse_real(positionExecutions=[{"positionId": 123, "openingData": []}])
+
+
+def test_non_numeric_stated_numeric_field_raises_rather_than_becoming_none() -> None:
+    """"Absent" and "present but garbage" are different facts. Absent is
+    allowed to be None; garbage must raise, not fall through to the next
+    candidate key and not silently become None."""
+    payload = _real_lookup_payload()
+    payload["positionExecutions"][0]["openingData"]["avgPrice"] = "thirty-five"
+    with pytest.raises(EtoroValidationError):
+        EtoroClient._parse_order_result(payload)
+
+    payload = _real_lookup_payload()
+    payload["positionExecutions"][0]["openingData"]["units"] = {"value": 1.0}
+    with pytest.raises(EtoroValidationError):
+        EtoroClient._parse_order_result(payload)
+
+
+def test_optional_fields_may_be_genuinely_absent_without_raising() -> None:
+    """The flip side: a non-identity field the broker simply did not state
+    parses to None. Only silence about a *miss* is forbidden."""
+    payload = _real_lookup_payload()
+    del payload["positionExecutions"][0]["openingData"]
+    del payload["positionExecutions"][0]["initialExposureAccountCurrency"]
+    del payload["requestedUnits"]
+    del payload["requestedAmount"]
+    result = EtoroClient._parse_order_result(payload)
+    assert result.status is OrderStatus.FILLED
+    assert result.position_id == "3598679249"
+    assert result.fill_units is None
+    assert result.fill_price is None
+    assert result.fill_amount_usd is None
+
+
+def test_non_filled_order_without_a_position_id_is_fine() -> None:
+    """Before a fill there genuinely is no position yet; None there is a
+    fact, not a parse miss."""
+    payload = _real_lookup_payload()
+    payload["status"] = {"id": 11, "name": "WaitingForMarket"}
+    payload["positionExecutions"] = []
+    result = EtoroClient._parse_order_result(payload)
+    assert result.status is OrderStatus.WAITING_FOR_MARKET
+    assert result.position_id is None
+    assert result.is_filled is False
+
+
+def test_broker_error_code_becomes_a_visible_reject_reason() -> None:
+    payload = _real_lookup_payload()
+    payload["status"] = {"id": 4, "name": "Rejected", "errorCode": 1207}
+    result = EtoroClient._parse_order_result(payload)
+    assert result.status is OrderStatus.REJECTED
+    assert result.reject_reason is not None
+    assert "1207" in result.reject_reason
+
+
+def test_parse_failure_is_never_read_as_never_received_by_recovery() -> None:
+    """`recover_by_reference_id` returning None means "safe to resubmit".
+    A payload we could not parse must never be allowed to authorise a
+    duplicate live order -- only the API's own 404 may."""
+    scripted = ScriptedTransport(
+        [httpx.Response(200, json={"orderId": "o-x", "status": {"name": "Filled"}})]
+    )
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(EtoroValidationError):
+        client.recover_by_reference_id("some-ref")
+
+
+# ===========================================================================
 # Rate limiting integration
 # ===========================================================================
 
@@ -397,7 +810,7 @@ def test_429_response_honours_retry_after_header() -> None:
     scripted = ScriptedTransport(
         [
             httpx.Response(429, headers={"Retry-After": "5"}, json={"error": "rate limited"}),
-            httpx.Response(200, json={"credit": 50.0}),
+            httpx.Response(200, json={"credit": 50.0, "orders": [], "ordersForOpen": []}),
         ]
     )
     sleeps: list[float] = []
@@ -412,7 +825,13 @@ def test_429_response_honours_retry_after_header() -> None:
 
 def test_reconcile_from_rate_limit_headers_tightens_local_bucket() -> None:
     scripted = ScriptedTransport(
-        [httpx.Response(200, json={"credit": 1.0}, headers={"RateLimit-Remaining": "2"})]
+        [
+            httpx.Response(
+                200,
+                json={"credit": 1.0, "orders": [], "ordersForOpen": []},
+                headers={"RateLimit-Remaining": "2"},
+            )
+        ]
     )
     client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
     client.get_balance()
@@ -426,7 +845,12 @@ def test_reconcile_from_rate_limit_headers_tightens_local_bucket() -> None:
 
 def test_5xx_is_retried_with_backoff_then_succeeds() -> None:
     scripted = ScriptedTransport(
-        [httpx.Response(502, text="bad gateway"), httpx.Response(200, json={"credit": 100.0})]
+        [
+            httpx.Response(502, text="bad gateway"),
+            httpx.Response(
+                200, json={"credit": 100.0, "orders": [], "ordersForOpen": []}
+            ),
+        ]
     )
     sleeps: list[float] = []
     client = EtoroClient(
@@ -474,7 +898,9 @@ def test_network_error_is_retried_then_succeeds() -> None:
         calls["n"] += 1
         if calls["n"] < 2:
             raise httpx.ConnectError("boom", request=request)
-        return httpx.Response(200, json={"credit": 10.0})
+        return httpx.Response(
+            200, json={"credit": 10.0, "orders": [], "ordersForOpen": []}
+        )
 
     client = EtoroClient(
         _config(), transport=httpx.MockTransport(flaky_handler), sleep=_no_sleep
@@ -537,9 +963,13 @@ def test_lost_response_is_recovered_by_reference_id_never_resubmitted() -> None:
             return httpx.Response(
                 200,
                 json={
+                    # Deliberately the FLAT spelling, to keep the
+                    # lower-precedence fallback path covered alongside the
+                    # real nested shape exercised elsewhere in this file.
                     "orderId": "o-99",
                     "referenceId": request_id,
                     "status": 3,
+                    "positionId": "p-99",
                     "units": 2.0,
                     "executionPrice": 55.0,
                 },
@@ -686,6 +1116,89 @@ def test_resolve_instrument_id_caches_in_the_database_not_just_memory(repo: Repo
     second = client2.resolve_instrument_id("SPY")
     assert second == 123
     assert calls["n"] == 1
+
+
+def test_search_instrument_accepts_top_level_list_payload() -> None:
+    scripted = ScriptedTransport(
+        [httpx.Response(200, json=[{"instrumentId": 123, "internalSymbolFull": "SPY"}])]
+    )
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    assert client.search_instrument("SPY").instrument_id == 123
+
+
+def test_search_instrument_rejects_unrecognized_object_envelope() -> None:
+    scripted = ScriptedTransport(
+        [
+            httpx.Response(
+                200,
+                json={"instrumentId": 123, "internalSymbolFull": "SPY"},
+            )
+        ]
+    )
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(EtoroValidationError, match="array of objects"):
+        client.search_instrument("SPY")
+
+
+def test_fuzzy_search_result_is_rejected_and_never_cached() -> None:
+    cached: list[Any] = []
+
+    class CacheSpy:
+        def get_instrument(self, symbol: str) -> None:
+            return None
+
+        def upsert_instrument(self, instrument: Any) -> None:
+            cached.append(instrument)
+
+    scripted = ScriptedTransport(
+        [
+            httpx.Response(
+                200,
+                json={"items": [{"instrumentId": 999, "internalSymbolFull": "SPYD"}]},
+            )
+        ]
+    )
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler), repo=CacheSpy())
+    with pytest.raises(EtoroValidationError, match="exact instrument"):
+        client.resolve_instrument_id("SPY")
+    assert cached == []
+
+
+@pytest.mark.parametrize(
+    "items",
+    [
+        [{"instrumentId": 123.9, "internalSymbolFull": "SPY"}],
+        [
+            {"instrumentId": 123, "internalSymbolFull": "SPY"},
+            {"instrumentId": 124, "internalSymbolFull": "SPY"},
+        ],
+    ],
+)
+def test_search_instrument_rejects_lossy_or_ambiguous_exact_ids(
+    items: list[dict[str, Any]],
+) -> None:
+    scripted = ScriptedTransport([httpx.Response(200, json={"items": items})])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(EtoroValidationError):
+        client.search_instrument("SPY")
+
+
+def test_duplicate_exact_search_rows_are_ok_only_when_the_id_agrees() -> None:
+    scripted = ScriptedTransport(
+        [
+            httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {"instrumentId": 123, "internalSymbolFull": "SPY"},
+                        {"instrumentId": 123, "internalSymbolFull": "SPY"},
+                    ]
+                },
+            )
+        ]
+    )
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    assert client.search_instrument("SPY").instrument_id == 123
 
 
 # ===========================================================================
@@ -1004,9 +1517,291 @@ def test_verify_environment_passes_when_signal_matches() -> None:
 
 
 def test_verify_environment_is_inconclusive_not_a_failure_when_no_signal() -> None:
-    scripted = ScriptedTransport([httpx.Response(200, json={"credit": 100.0})])
-    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    """No marker in the body AND an inconclusive segment probe -> no raise.
+
+    "Unable to confirm" stays "no mismatch detected", never an exception --
+    callers needing positive confirmation must check probe_environment()
+    themselves (order_latency.evaluate_demo_confirmation does).
+    """
+    client = EtoroClient(
+        _config(),
+        transport=httpx.MockTransport(
+            _env_router(balances={"credit": 100.0}, demo_status=403, real_status=403)
+        ),
+    )
     client.verify_environment()  # inconclusive must not raise
+
+
+# ---------------------------------------------------------------------------
+# 2026-09-11 regression suite: verify_environment was a SILENT NO-OP.
+#
+# _detect_environment only scanned the TOP LEVEL of the /balances body. The
+# live body (captured read-only today under both configs, saved at
+# data/probe_2026-09-11/env_probe_real/ and env_probe_demo/) carries no marker
+# at any depth, so the function returned None unconditionally -- on the REAL
+# account as much as on demo -- and gate 7 guarded nothing.
+#
+# LIVE_BALANCES_* below are the captured bodies verbatim, balance floats
+# included, deliberately NOT trimmed to the "interesting" keys: the whole
+# point is that a test built from a hand-written idea of the payload is what
+# let this ship in the first place.
+# ---------------------------------------------------------------------------
+
+#: Captured verbatim 2026-09-11 from GET /api/v1/balances, config environment
+#: = "real" (data/probe_2026-09-11/env_probe_real/20260911T150945Z_balances_raw.json).
+LIVE_BALANCES_REAL = {
+    "gcid": 18049964,
+    "totalBalance": 56792.27,
+    "displayCurrency": "USD",
+    "balances": [
+        {
+            "accountId": "17761031",
+            "accountType": "Trading",
+            "subType": None,
+            "balance": 56792.27,
+            "currency": "USD",
+            "displayBalance": 56792.27,
+            "displayCurrency": "USD",
+            "exchangeRate": 1,
+        }
+    ],
+}
+
+#: Captured verbatim 2026-09-11 from GET /api/v1/balances, config environment
+#: = "demo" (data/probe_2026-09-11/env_probe_demo/20260911T151136Z_balances_raw.json).
+#: Structurally IDENTICAL to the real one -- same gcid, same accountId, same
+#: accountType, same subType. Only the balance float differs, and by 0.03%.
+LIVE_BALANCES_DEMO = {
+    "gcid": 18049964,
+    "totalBalance": 56775.82,
+    "displayCurrency": "USD",
+    "balances": [
+        {
+            "accountId": "17761031",
+            "accountType": "Trading",
+            "subType": None,
+            "balance": 56775.82,
+            "currency": "USD",
+            "displayBalance": 56775.82,
+            "displayCurrency": "USD",
+            "exchangeRate": 1,
+        }
+    ],
+}
+
+#: The live 403 body eToro returns for the path segment a credential is NOT
+#: bound to (captured today in both directions).
+LIVE_403_BODY = {
+    "errorCode": "InsufficientPermissions",
+    "errorMessage": "UserToken does not have permission to access",
+}
+
+
+def _env_router(
+    *,
+    balances: dict[str, Any],
+    demo_status: int,
+    real_status: int,
+) -> Any:
+    """A MockTransport handler routing by path, not by call order.
+
+    verify_environment may make one request (marker found in the body) or
+    three (marker absent -> two segment probes), so an order-based
+    ScriptedTransport would couple these tests to that branch.
+    """
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path == "/api/v1/balances":
+            return httpx.Response(200, json=balances)
+        if path == "/api/v1/trading/info/demo/portfolio":
+            return httpx.Response(
+                demo_status,
+                json={"clientPortfolio": {"positions": []}} if demo_status < 300 else LIVE_403_BODY,
+            )
+        if path == "/api/v1/trading/info/portfolio":
+            return httpx.Response(
+                real_status,
+                json={"clientPortfolio": {"positions": []}} if real_status < 300 else LIVE_403_BODY,
+            )
+        raise AssertionError(f"unexpected path {path!r}")
+
+    return handler
+
+
+def test_detect_environment_returns_none_for_the_real_live_balances_body() -> None:
+    """REGRESSION: the exact payload the old top-level scan silently missed.
+
+    This must stay None -- the body genuinely has no marker. The assertion
+    that matters is paired with the test below: a detector that returned
+    "real" here would be inventing a signal.
+    """
+    assert EtoroClient._detect_environment(LIVE_BALANCES_REAL) is None
+
+
+def test_detect_environment_cannot_tell_the_live_demo_and_real_bodies_apart() -> None:
+    """REGRESSION, the core finding: /balances cannot discriminate at all.
+
+    Both live bodies yield the same verdict, so ANY gate relying solely on
+    this function is a no-op. This test is what would have caught the
+    shipped defect: it fails the moment someone claims /balances can confirm
+    an environment.
+    """
+    assert EtoroClient._detect_environment(LIVE_BALANCES_REAL) == (
+        EtoroClient._detect_environment(LIVE_BALANCES_DEMO)
+    )
+    assert EtoroClient._detect_environment(LIVE_BALANCES_DEMO) is None
+
+
+def test_detect_environment_does_not_mistake_account_type_trading_for_an_environment() -> None:
+    """The nested key IS named accountType -- but "Trading" is an account
+    kind. A recursive scan that accepted any accountType value would now
+    confidently return garbage."""
+    assert EtoroClient._detect_environment({"balances": [{"accountType": "Trading"}]}) is None
+
+
+def test_detect_environment_now_descends_into_nested_structures() -> None:
+    """The specific bug: markers below the top level were invisible. If eToro
+    ever adds one in the per-account rows, it must be found."""
+    assert EtoroClient._detect_environment({"balances": [{"accountType": "Demo"}]}) == "demo"
+    assert EtoroClient._detect_environment({"balances": [{"isDemo": True}]}) == "demo"
+    assert EtoroClient._detect_environment({"a": {"b": {"c": {"environment": "real"}}}}) == "real"
+
+
+def test_probe_environment_positively_identifies_demo() -> None:
+    """Live-observed pattern: a demo-bound credential gets 200 on the demo
+    segment and 403 on the real one."""
+    client = EtoroClient(
+        _config(),
+        transport=httpx.MockTransport(
+            _env_router(balances=LIVE_BALANCES_DEMO, demo_status=200, real_status=403)
+        ),
+    )
+    assert client.probe_environment() == "demo"
+
+
+def test_probe_environment_positively_identifies_real() -> None:
+    """The mirror image, also observed live today."""
+    client = EtoroClient(
+        _config(
+            environment=EtoroEnvironment.REAL,
+            secrets={
+                "ETORO_PRIVATE_KEY": "real_write_private_key_1234567890",
+                "ETORO_READ_PRIVATE_KEY": "real_read_private_key_1234567890",
+                "ETORO_PUBLIC_KEY": "real_shared_public_key_1234567890",
+            },
+        ),
+        transport=httpx.MockTransport(
+            _env_router(balances=LIVE_BALANCES_REAL, demo_status=403, real_status=200)
+        ),
+    )
+    assert client.probe_environment() == "real"
+
+
+def test_probe_environment_returns_none_when_both_segments_are_allowed() -> None:
+    """Not a discriminating answer -> None (refuse), never a coin flip."""
+    client = EtoroClient(
+        _config(),
+        transport=httpx.MockTransport(
+            _env_router(balances=LIVE_BALANCES_DEMO, demo_status=200, real_status=200)
+        ),
+    )
+    assert client.probe_environment() is None
+
+
+def test_probe_environment_returns_none_when_both_segments_are_denied() -> None:
+    client = EtoroClient(
+        _config(),
+        transport=httpx.MockTransport(
+            _env_router(balances=LIVE_BALANCES_DEMO, demo_status=403, real_status=403)
+        ),
+    )
+    assert client.probe_environment() is None
+
+
+def test_probe_environment_returns_none_when_a_probe_fails_inconclusively() -> None:
+    """A 500 says nothing about the credential's binding and must not be
+    collapsed into "denied" -- otherwise a flaky server manufactures a
+    confident environment verdict."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/api/v1/trading/info/demo/portfolio":
+            return httpx.Response(500, json={"error": "boom"})
+        return httpx.Response(200, json={"clientPortfolio": {"positions": []}})
+
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(handler), max_attempts=1
+    )
+    assert client.probe_environment() is None
+
+
+def test_verify_environment_now_detects_a_mismatch_the_body_alone_could_not() -> None:
+    """REGRESSION, the severity case: configured demo, but the credential is
+    REAL-bound. The old implementation returned silently here -- on the real
+    account -- because the body scan found nothing. It must now raise."""
+    client = EtoroClient(
+        _config(),  # configured demo
+        transport=httpx.MockTransport(
+            _env_router(balances=LIVE_BALANCES_REAL, demo_status=403, real_status=200)
+        ),
+    )
+    with pytest.raises(EtoroEnvironmentMismatchError):
+        client.verify_environment()
+
+
+def test_verify_environment_accepts_a_matching_segment_probe() -> None:
+    client = EtoroClient(
+        _config(),  # configured demo
+        transport=httpx.MockTransport(
+            _env_router(balances=LIVE_BALANCES_DEMO, demo_status=200, real_status=403)
+        ),
+    )
+    client.verify_environment()  # must not raise
+
+
+def test_a_body_with_no_marker_and_no_probe_signal_still_yields_none() -> None:
+    """Step 4's third case: unable to confirm stays unable to confirm.
+
+    The harness gate consumes exactly this None and refuses on it; nothing
+    in today's fix softens that path.
+    """
+    from nightwatch.probes.order_latency import evaluate_demo_confirmation
+
+    client = EtoroClient(
+        _config(),
+        transport=httpx.MockTransport(
+            _env_router(balances=LIVE_BALANCES_DEMO, demo_status=403, real_status=403)
+        ),
+    )
+    detected = EtoroClient._detect_environment(LIVE_BALANCES_DEMO)
+    if detected is None:
+        detected = client.probe_environment()
+    assert detected is None
+
+    decision = evaluate_demo_confirmation(
+        config_environment="demo",
+        credential_label="demo:write",
+        verify_environment_ok=True,
+        verify_environment_error=None,
+        detected_signal=detected,
+    )
+    assert decision.confirmed is False
+    assert any("did not POSITIVELY confirm demo" in r for r in decision.reasons)
+
+
+def test_a_positive_demo_probe_is_what_finally_lets_the_gate_confirm() -> None:
+    """The counterpart: the fix makes confirmation POSSIBLE (that was the
+    point), without touching any of the other three signals."""
+    from nightwatch.probes.order_latency import evaluate_demo_confirmation
+
+    decision = evaluate_demo_confirmation(
+        config_environment="demo",
+        credential_label="demo:write",
+        verify_environment_ok=True,
+        verify_environment_error=None,
+        detected_signal="demo",
+    )
+    assert decision.confirmed is True
 
 
 # ===========================================================================
@@ -1019,7 +1814,7 @@ def test_last_server_date_is_captured_from_response_headers() -> None:
         [
             httpx.Response(
                 200,
-                json={"credit": 1.0},
+                json={"credit": 1.0, "orders": [], "ordersForOpen": []},
                 headers={"Date": "Fri, 02 Jan 2026 12:00:00 GMT"},
             )
         ]
@@ -1032,7 +1827,7 @@ def test_last_server_date_is_captured_from_response_headers() -> None:
 
 # ===========================================================================
 # _parse_position / get_portfolio (DESIGN_market_data.md §4.2, §4.5, §10.7;
-# HANDOFF_2026-09-04_market_data.md §5) -- the `currentRate`/`invested`/
+# board nightwatch/handoff-2026-09-04-market-data.md §5) -- the `currentRate`/`invested`/
 # `unrealizedPL`/`symbol` field-mapping bug.
 #
 # Deliberately exercised against a REALISTIC, NON-EMPTY payload throughout:
@@ -1219,7 +2014,7 @@ def test_trade_history_still_accepts_the_items_envelope() -> None:
     """The list fix must not break the envelope form -- it is unknown whether
     eToro returns one shape on one endpoint/version and the other elsewhere,
     and this project has already been burned by assuming a convention
-    transfers (HANDOFF_2026-09-05.md §9, the positionID/positionId casing
+    transfers (board nightwatch/handoff-2026-09-05.md §9, the positionID/positionId casing
     trap)."""
     rows = [
         {
@@ -1252,3 +2047,149 @@ def test_trade_history_raises_on_a_body_that_is_neither_list_nor_object() -> Non
     client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
     with pytest.raises(EtoroValidationError):
         client.get_trade_history(start_date="2020-01-01", end_date="2026-12-31")
+
+
+# ===========================================================================
+# Broker-side take-profit / stop-loss parsing (DESIGN.md §6.A "Broker-side
+# exits", 2026-09-11). These keys were always in the portfolio payload and
+# were simply never read, so the app could not see a broker-authored exit it
+# never asked for.
+#
+# The three rows below are REAL, verbatim rows from the live-account capture
+# `data/probe_2026-09-11/adopt_fetch/adopt_portfolio_raw.json` (230 open
+# positions, instrumentID 1084 == SCHG) -- not hand-built fixtures. Trimmed
+# only of fields irrelevant here; every key asserted on is byte-identical to
+# the capture.
+# ===========================================================================
+
+#: A typical position: takeProfitRate / openRate == 11.00 exactly, i.e. the
+#: broker's declared defaultTakeProfitPercentage of +1000% for the SCHG
+#: leverage config this app orders into. 229 of the 230 live rows look like
+#: this; all 230 carry isNoStopLoss == true with stopLossRate 0.0001.
+_REAL_TP_ROW_11X: dict[str, Any] = {
+    "positionID": 2867253750, "CID": 17761031,
+    "openDateTime": "2024-11-27T14:30:41.173Z", "openRate": 27.65,
+    "instrumentID": 1084, "isBuy": True, "takeProfitRate": 304.15,
+    "stopLossRate": 0.0001, "amount": 200.0, "leverage": 1,
+    "units": 7.233273, "isNoTakeProfit": False, "isNoStopLoss": True,
+}
+
+#: A drifted one (10.9x) -- the TP rate is set at open and does not track
+#: later changes, so the ratio is not uniformly 11.00 across the book.
+_REAL_TP_ROW_10_9X: dict[str, Any] = {
+    "positionID": 3486954727, "CID": 17761031,
+    "openDateTime": "2026-06-18T13:30:23.643Z", "openRate": 33.82,
+    "instrumentID": 1084, "isBuy": True, "takeProfitRate": 368.5,
+    "stopLossRate": 0.0001, "amount": 500.0, "leverage": 1,
+    "units": 14.784151, "isNoTakeProfit": False, "isNoStopLoss": True,
+}
+
+#: The single live position with NO take-profit (positionID 3550406905) --
+#: proof that "no TP" is representable in this exact payload shape, and the
+#: reason the boolean flag, not the rate, is authoritative: the rate here is
+#: 0.0, which is present-and-falsy, not absent.
+_REAL_NO_TP_ROW: dict[str, Any] = {
+    "positionID": 3550406905, "CID": 17761031,
+    "openDateTime": "2026-08-19T13:30:09.647Z", "openRate": 35.37,
+    "instrumentID": 1084, "isBuy": True, "takeProfitRate": 0.0,
+    "stopLossRate": 0.0001, "amount": 500.0, "leverage": 1,
+    "units": 14.136273, "isNoTakeProfit": True, "isNoStopLoss": True,
+}
+
+
+def test_parse_position_reads_the_broker_take_profit_it_used_to_discard() -> None:
+    position = EtoroClient._parse_position(_REAL_TP_ROW_11X)
+    assert position.take_profit_rate == pytest.approx(304.15)
+    assert position.is_no_take_profit is False
+    # The live shape: an 11x take-profit nobody in this app requested.
+    assert position.take_profit_rate / position.entry_price == pytest.approx(11.0, abs=1e-9)
+
+
+def test_parse_position_reads_the_stop_loss_pair_too() -> None:
+    """Falls out of the same payload keys; every live row carries
+    isNoStopLoss == true alongside a nominal 0.0001 stopLossRate."""
+    position = EtoroClient._parse_position(_REAL_TP_ROW_11X)
+    assert position.stop_loss_rate == pytest.approx(0.0001)
+    assert position.is_no_stop_loss is True
+
+
+def test_parse_position_preserves_the_no_take_profit_case_exactly() -> None:
+    """takeProfitRate 0.0 is present-and-falsy: it must parse to 0.0, not
+    None, and isNoTakeProfit must survive as True."""
+    position = EtoroClient._parse_position(_REAL_NO_TP_ROW)
+    assert position.take_profit_rate == 0.0
+    assert position.take_profit_rate is not None
+    assert position.is_no_take_profit is True
+
+
+def test_parse_position_tolerates_a_payload_with_no_take_profit_keys_at_all() -> None:
+    """The pre-2026-09-11 fixtures (and any older payload shape) have neither
+    key. That must parse, not raise: these fields carry no position-identity
+    meaning, unlike units/openRate/amount."""
+    position = EtoroClient._parse_position(_REAL_SCHG_ROWS[0])
+    assert position.take_profit_rate is None
+    assert position.is_no_take_profit is False
+    assert position.stop_loss_rate is None
+    assert position.is_no_stop_loss is False
+
+
+def test_close_position_reads_the_real_nested_order_for_close_shape() -> None:
+    """Confirmed live 2026-09-11 (see
+    data/probe_2026-09-11/order_latency_run3/RAW_close_position_response_body.json):
+    a close response carries NO top-level orderId/orderID/id -- the id is at
+    `orderForClose.orderID`. The old `or`-chain returned "", and polling with
+    an empty order id gets a 400, so a successfully submitted close became
+    untrackable."""
+    body = {
+        "orderForClose": {
+            "positionID": 3598687197,
+            "instrumentID": 1084,
+            "orderID": 380818802,
+            "orderType": 19,
+            "statusID": 1,
+        },
+        "token": "tok",
+    }
+    scripted = ScriptedTransport([httpx.Response(200, json=body)])
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler), sleep=_no_sleep
+    )
+    order_id = client.close_position(
+        request_id=str(uuid.uuid4()), position_id="3598687197", instrument_id=1084
+    )
+    assert order_id == "380818802"
+    assert client.last_write_response_body == body
+
+
+def test_close_write_http_rejection_preserves_body_without_retrying() -> None:
+    body = {"message": "Position is already closed", "code": "POSITION_CLOSED"}
+    scripted = ScriptedTransport([httpx.Response(422, json=body)])
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler), sleep=_no_sleep
+    )
+    with pytest.raises(EtoroValidationError) as caught:
+        client.close_position(
+            request_id=str(uuid.uuid4()), position_id="p1", instrument_id=1084
+        )
+    assert caught.value.status_code == 422
+    assert client.last_write_response_body == body
+    assert len(scripted.requests) == 1
+
+
+def test_write_response_with_no_order_id_anywhere_never_returns_empty_string() -> None:
+    """The silent `else ""` is the bug; an unusable id must be loud. The
+    referenceId recovery path is tried first (404 here = eToro has no record
+    of it), and only then does this raise."""
+    scripted = ScriptedTransport(
+        [
+            httpx.Response(200, json={"somethingElse": {"nope": 1}}),
+            httpx.Response(404, json={"message": "No external operation was found"}),
+        ]
+    )
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler), sleep=_no_sleep
+    )
+    with pytest.raises(EtoroValidationError):
+        client.close_position(
+            request_id=str(uuid.uuid4()), position_id="p1", instrument_id=1084
+        )

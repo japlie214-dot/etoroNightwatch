@@ -1,0 +1,23 @@
+{
+  "instrumentDisplayDatas": [
+    {
+      "distributionType": 1,
+      "exchangeID": 5,
+      "hasExpirationDate": false,
+      "images": [
+        {
+          "height": 1.25,
+          "instrumentID": 424242,
+          "uri": "sample",
+          "width": 1.25
+        }
+      ],
+      "instrumentDisplayName": "sample",
+      "instrumentID": 424242,
+      "instrumentTypeID": 6,
+      "isInternalInstrument": false,
+      "priceSource": "sample",
+      "symbolFull": "SCHG"
+    }
+  ]
+}

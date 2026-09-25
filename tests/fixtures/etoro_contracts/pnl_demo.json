@@ -1,0 +1,17 @@
+{
+  "clientPortfolio": {
+    "accountCurrencyId": 1,
+    "bonusCredit": 1.25,
+    "credit": 1.25,
+    "entryOrders": [],
+    "exitOrders": [],
+    "mirrors": [],
+    "orders": [],
+    "ordersForClose": [],
+    "ordersForCloseMultiple": [],
+    "ordersForOpen": [],
+    "positions": [],
+    "stockOrders": [],
+    "unrealizedPnL": 1.25
+  }
+}

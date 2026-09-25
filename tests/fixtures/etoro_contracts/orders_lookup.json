@@ -1,0 +1,67 @@
+{
+  "accountId": 900002,
+  "action": "open",
+  "asset": {
+    "currency": "USD",
+    "instrumentId": 424242,
+    "leverage": 1,
+    "settlementType": "real",
+    "side": "buy",
+    "symbol": "SCHG"
+  },
+  "etoroOrderTypeId": 17,
+  "frozenAmount": 1.25,
+  "gcid": 900001,
+  "lastUpdate": "2026-09-11T12:34:56Z",
+  "openActionType": "sample",
+  "openStopLossRate": 1.25,
+  "openTakeProfitRate": 1.25,
+  "orderCurrency": "USD",
+  "orderId": 900005,
+  "portfolioId": 900003,
+  "positionExecutions": [
+    {
+      "addedFunds": 1.25,
+      "initialExposureAccountCurrency": 1.25,
+      "initialExposureAssetCurrency": 1.25,
+      "investedAmountCurrency": 1,
+      "marginAccountCurrency": 1.25,
+      "marginAssetCurrency": 1.25,
+      "openingData": {
+        "avgConversionRate": 1.25,
+        "avgPrice": 1.25,
+        "contracts": 1.25,
+        "executionTime": "2026-09-11T12:34:56Z",
+        "fees": 1.25,
+        "marketSpread": 1.25,
+        "markup": 1.25,
+        "openTime": "2026-09-11T12:34:56Z",
+        "orderId": 900005,
+        "priceId": 0,
+        "taxes": 1.25,
+        "units": 1.25
+      },
+      "positionId": 900004,
+      "remainingContracts": 1.25,
+      "remainingUnits": 1.25,
+      "state": "sample",
+      "stopLossRate": 1.25,
+      "takeProfitRate": 1.25
+    }
+  ],
+  "positionsToClose": [],
+  "requestTime": "2026-09-11T12:34:56Z",
+  "requestType": "sample",
+  "requestedAmount": 1.25,
+  "requestedContracts": 1.25,
+  "requestedUnits": 1.25,
+  "status": {
+    "errorCode": 0,
+    "id": 3,
+    "name": "Filled"
+  },
+  "stopLossType": "sample",
+  "totalCosts": 1.25,
+  "transaction": "buy",
+  "type": "sample"
+}

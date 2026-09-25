@@ -1,5 +1,5 @@
 -- Migration 005: lot_annotations.entry_context_source
--- (HANDOFF_2026-09-05_evening.md §3a, DESIGN_market_data.md §4.4, §4.7).
+-- (board nightwatch/handoff-2026-09-05-evening.md §3a, DESIGN_market_data.md §4.4, §4.7).
 --
 -- §3a's ATH-floor/adopt-halt work distinguishes a lot whose SPY entry
 -- context was genuinely measured (every row market.adopt writes today --
@@ -14,7 +14,7 @@
 -- Provenance only, exactly like the existing `origin` column (§4.4) -- never
 -- an access gate. Every row written before this migration (there are none
 -- live yet; the adoption migration has never been run against the real
--- account, HANDOFF_2026-09-05_evening.md §6 item 8) and every row `origin
+-- account, board nightwatch/handoff-2026-09-05-evening.md §6 item 8) and every row `origin
 -- ='app'`/`'adopted'` writes today gets 'derived': a value genuinely
 -- computed from measured history or a live stamped close, never guessed.
 -- 'assumed_out_of_window' is reserved for the not-yet-built override path

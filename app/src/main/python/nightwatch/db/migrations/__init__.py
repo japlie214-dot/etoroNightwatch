@@ -98,14 +98,9 @@ def discover() -> list[Migration]:
 def migrate(conn: sqlite3.Connection) -> int:
     """Bring ``conn`` up to the newest schema version.
 
-    Each migration's DDL runs inside an explicit ``BEGIN``/``COMMIT`` wrapped
-    around the script — SQLite DDL is transactional, so a failed migration
-    leaves no half-built schema.  The ``schema_version`` row is then written as
-    a separate parameterised statement.  The narrow gap between the two is
-    covered by requiring every migration to be idempotent (``IF NOT EXISTS``,
-    as the baseline is): a crash in the gap simply re-runs the migration next
-    time, which is a no-op, and the version is then recorded.  It errs towards
-    "run twice", never towards "recorded but not applied".
+    Each migration's DDL and ``schema_version`` row are committed together.
+    ``executescript()`` commits before running, so ``BEGIN`` is part of the
+    script; the parameterised version insert then joins that open transaction.
 
     Returns:
         The schema version after migrating.
@@ -114,14 +109,18 @@ def migrate(conn: sqlite3.Connection) -> int:
     for migration in discover():
         if migration.version <= version:
             continue
-        # executescript() issues an implicit COMMIT first, so the transaction
-        # has to be declared inside the script text, not around the call.
-        conn.executescript(f"BEGIN;\n{migration.sql}\nCOMMIT;")
-        conn.execute(
-            "INSERT OR REPLACE INTO schema_version (version, name, applied_at) "
-            "VALUES (?, ?, ?)",
-            (migration.version, migration.name, _now()),
-        )
-        conn.commit()
+        # executescript() commits any prior transaction, but leaves this BEGIN
+        # open so the version row can join the same transaction.
+        try:
+            conn.executescript(f"BEGIN;\n{migration.sql}")
+            conn.execute(
+                "INSERT OR REPLACE INTO schema_version (version, name, applied_at) "
+                "VALUES (?, ?, ?)",
+                (migration.version, migration.name, _now()),
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
         version = migration.version
     return version

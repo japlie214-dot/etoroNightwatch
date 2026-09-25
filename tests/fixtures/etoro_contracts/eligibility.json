@@ -1,0 +1,45 @@
+{
+  "currency": "USD",
+  "eligibilities": [
+    {
+      "allowClosePosition": true,
+      "allowEntryOrders": true,
+      "allowExitOrders": true,
+      "allowMitOrders": true,
+      "allowOpenPosition": true,
+      "allowPartialClosePosition": true,
+      "allowTrailingStopLoss": true,
+      "allowedOrderQuantityType": "sample",
+      "instrumentId": 424242,
+      "leverageConfigs": [
+        {
+          "allowEditStopLoss": true,
+          "allowEditTakeProfit": true,
+          "allowStopLossTakeProfit": true,
+          "defaultStopLossPercentage": 1.25,
+          "defaultTakeProfitPercentage": 1.25,
+          "direction": "sample",
+          "isPotential": false,
+          "leverageValues": [
+            1
+          ],
+          "maxStopLossPercentage": 1.25,
+          "maxTakeProfitPercentage": 1.25,
+          "minPositionAmount": 1.25,
+          "minStopLossPercentage": 1.25,
+          "minTakeProfitPercentage": 1.25,
+          "settlementType": "real"
+        }
+      ],
+      "maxUnitsPerOrder": 1.25,
+      "minPositionExposure": 1.25,
+      "orderFillBehaviorType": "sample",
+      "requiresW8Ben": true,
+      "symbol": "SCHG",
+      "tradeUnitType": "sample",
+      "unitsQuantityType": "sample"
+    }
+  ],
+  "notFoundInstrumentIds": [],
+  "notFoundSymbols": []
+}

@@ -1,0 +1,24 @@
+{
+  "candles": [
+    {
+      "candles": [
+        {
+          "close": 1.25,
+          "fromDate": "2026-09-11T00:00:00Z",
+          "high": 1.25,
+          "instrumentID": 424242,
+          "low": 1.25,
+          "open": 1.25,
+          "volume": 1.25
+        }
+      ],
+      "instrumentId": 424242,
+      "rangeClose": 1.25,
+      "rangeHigh": 1.25,
+      "rangeLow": 1.25,
+      "rangeOpen": 1.25,
+      "volume": 1.25
+    }
+  ],
+  "interval": "OneDay"
+}

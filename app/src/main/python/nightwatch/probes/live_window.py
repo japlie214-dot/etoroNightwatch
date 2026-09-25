@@ -1,11 +1,11 @@
 """Pure, off-device-testable logic for the 2026-09-11 live probe.
 
-Built for ``tools/probe_live_2026-09-11.py`` (HANDOFF_2026-09-05.md §7 items 4
+Built for ``tools/probe_live_2026-09-11.py`` (board nightwatch/handoff-2026-09-05.md §7 items 4
 and 7, DESIGN_market_data.md §10.5/§10.6/§10.9-§10.13, and the new operator fee
 report). Everything in this module is plain arithmetic and dict/list
 manipulation -- no ``httpx``, no ``time.sleep``, no file I/O -- specifically so
 it can be exercised by the desktop test suite (which cannot reach eToro at
-all, HANDOFF.md §2/§9) without a live payload. The probe script does the
+all, board nightwatch/handoff.md §2/§9) without a live payload. The probe script does the
 network I/O and calls into this module for the parts that are worth getting
 right and worth testing.
 
@@ -41,7 +41,7 @@ __all__ = [
 # Parser read-key registry -- keep in sync with etoro/client.py (2026-09-05).
 # ---------------------------------------------------------------------------
 
-#: For each of the six parsers HANDOFF_2026-09-05.md §6/§8 lists as
+#: For each of the six parsers board nightwatch/handoff-2026-09-05.md §6/§8 lists as
 #: "unverified against live payloads", the set of raw JSON keys that parser's
 #: *current* code actually reads (top-level keys only for the two that do no
 #: field-level parsing at all -- ``get_instruments``/``get_costs`` -- see the
@@ -256,7 +256,7 @@ class RequiredKeyDiff:
     parser_name: str
     missing_groups: tuple[frozenset[str], ...]
     """Groups where NONE of the alternatives are present in the payload --
-    a genuine gap, the same defect class HANDOFF_2026-09-05.md §4 names."""
+    a genuine gap, the same defect class board nightwatch/handoff-2026-09-05.md §4 names."""
     satisfied_groups: tuple[tuple[frozenset[str], str], ...]
     """(group, key_that_satisfied_it) for every group with >=1 key present."""
     unused_in_payload: frozenset[str]
@@ -336,7 +336,7 @@ def partition_trades_by_instrument(
 ) -> dict[Any, InstrumentFeeSummary]:
     """Partition closed trades by instrument and sum ``fees``/``investment``.
 
-    HANDOFF_2026-09-05.md §5: across all 120 real closed trades, Sigma
+    board nightwatch/handoff-2026-09-05.md §5: across all 120 real closed trades, Sigma
     ``fees`` = -$380.40 -- non-zero *somewhere* in this account's history.
     The operator's new fee report hypothesises plain-ETF (SCHG) trades never
     carry a fee, unlike leveraged/other instruments (UPRO, or the 18
@@ -401,7 +401,7 @@ def verify_sleeve_arithmetic(
     """Compare freshly measured sleeve figures against DESIGN_market_data.md
     §10.11's recorded ("documented") figures.
 
-    HANDOFF_2026-09-05.md §11 is explicit: this document family has twice let
+    board nightwatch/handoff-2026-09-05.md §11 is explicit: this document family has twice let
     a plausible number sit next to a measured one, and the fix is to
     re-measure immediately before any migration rather than reuse a prior
     session's numbers as inputs. Returns one :class:`SleeveMismatch` per
@@ -479,7 +479,7 @@ def reconcile_fee_hypothesis(
     """Settle (for one order) whether a fee is hidden inside the position
     ``amount``, charged separately against cash, or not charged at all.
 
-    The operator's hypothesis (HANDOFF_2026-09-05.md's brief for this probe):
+    The operator's hypothesis (board nightwatch/handoff-2026-09-05.md's brief for this probe):
     a $100 SCHG buy whose response *disclosed* a fee nonetheless produced a
     $100 position and no extra cash deduction -- i.e. ``amount`` may already
     net out fee-vs-shares, making fees irrelevant to this app's arithmetic
