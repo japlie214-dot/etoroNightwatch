@@ -16,7 +16,7 @@ its mirror-image auto-resolve path (an ``unmatched_open_lot`` -- a stuck
 CLOSE that later filled -- resolved the same way) to
 :func:`nightwatch.engine.reconcile.resolve_abandoned_close_intents` -- see
 :func:`gate_11_reconciliation`'s own docstring. Neither gate has a
-production caller yet -- ``run_preflight`` does not exist (see below) -- so
+production caller yet -- ``run_preflight`` exists (see below) -- so
 both are reachable and tested but not yet wired into a running session;
 that wiring is explicitly out of scope here. Same for the session-level
 polling loop that decides an order is non-terminal for long enough to be
@@ -25,13 +25,13 @@ marked ``'abandoned'`` in the first place (``engine/session.py``) -- see
 "how many sessions" threshold is configured; **operator-decided,
 2026-09-06: N = 3** (DESIGN_session.md §14 item 2, board nightwatch/handoff-2026-09-06.md
 §9) -- no longer a proposed placeholder.
-The other ten gates remain comment-only stubs; do not infer they are
+Gates 1, 10 and 11 are built; the other nine remain comment-only stubs; do not infer they are
 implemented because this file grew.
 
-# TODO(step 6, DESIGN §5): implement each remaining gate (all but 10 and 11)
+# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 10 and 11)
 # as a function returning a db.repo.PreflightCheck, run in order, ALL must
 # pass:
-#   1. Halt switch          - host.halt_flag_path() exists, or /halt was set
+#   1. Halt switch          - IMPLEMENTED below (gate_1_halt)
 #   2. Power & permissions   - battery >=40% or charging; battery-optimization
 #      exemption granted; AlarmManager.canScheduleExactAlarms(); wake lock
 #      acquired (host.power_status())
@@ -60,8 +60,8 @@ implemented because this file grew.
 # db.repo.Repo.record_preflight_check, send the Telegram abort message naming
 # the gate, and -- per DESIGN §5 -- hold the wake lock rather than returning
 # to Doze, so run_preflight()'s caller must not release on failure. That
-# orchestration function (run_preflight) does not exist yet; gates 10 and 11
-# below are pure functions over already-fetched data for exactly that reason
+# orchestration function (run_preflight) exists; gates 10 and 11
+# below remain pure functions over already-fetched data
 # -- neither has an opinion on wake locks, sessions, or how its inputs were
 # obtained.
 
@@ -122,6 +122,7 @@ from typing import Callable, Mapping, Sequence
 from ..config import MarketDataConfig, ReconciliationConfig
 from ..db.repo import Intent, LotAnnotation, PreflightCheck, Repo
 from ..etoro.models import Candle, Position, Rate
+from ..host import Host
 from ..notify.telegram import TelegramNotifier
 from .reconcile import (
     Adoption,
@@ -139,6 +140,7 @@ __all__ = [
     "PreflightOutcome",
     "unimplemented_gate",
     "run_preflight",
+    "gate_1_halt",
     "ProvisionalClose",
     "INTRADAY_CANDLE_INTERVALS",
     "BrokerTakeProfit",
@@ -215,6 +217,13 @@ class PreflightOutcome:
     passed: bool
     results: tuple[GateResult, ...]
     failed: GateResult | None
+
+
+def gate_1_halt(host: Host) -> GateResult:
+    path = host.halt_flag_path()
+    if path.exists():
+        return GateResult(1, "Halt switch", False, f"HALT flag present: {path}", {"path": str(path)})
+    return GateResult(1, "Halt switch", True, "no HALT flag", {"path": str(path)})
 
 
 def unimplemented_gate(number: int, name: str) -> GateSpec:
@@ -669,8 +678,8 @@ def notify_gate_10_failure(
 
     **What this function deliberately does NOT do:** hold the wake lock,
     or decide the session should actually halt. Those are the calling
-    session orchestrator's responsibility (``run_preflight()``, not yet
-    built -- DESIGN §5's "the caller must not release [the wake lock] on
+    session orchestrator's responsibility (``run_preflight()`` exists --
+    DESIGN §5's "the caller must not release [the wake lock] on
     failure"). Raising this function's scope to cover that orchestration
     would mean inventing gates 1-9/12 and the session loop just to give
     gate 10 somewhere to be called from, which is explicitly out of scope.
@@ -872,7 +881,7 @@ class BrokerTakeProfit:
 
 
 # TODO(gate 12, DESIGN §5 -- "Risk caps", still a comment-only stub above):
-# gate 12 is the honest home for this, and ``run_preflight()`` (not built)
+# gate 12 is the honest home for this, and ``run_preflight()`` (built)
 # is what must call it. A broker-side take-profit is an *exit this app did
 # not author and cannot currently suppress* -- a risk-cap fact, not a
 # reconciliation mismatch. It is deliberately NOT folded into
@@ -956,7 +965,7 @@ def notify_gate_11_failure(
     (position id, symbol, which of the two directions).
 
     Deliberately does NOT hold the wake lock or decide the session should
-    halt -- that is ``run_preflight()``'s job, not yet built (see module
+    halt -- that is ``run_preflight()``'s job, now built (see module
     docstring); scoping this function to cover that orchestration would
     mean building the session loop just to give gate 11 somewhere to be
     called from.
