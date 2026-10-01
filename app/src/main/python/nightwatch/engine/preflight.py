@@ -25,10 +25,10 @@ marked ``'abandoned'`` in the first place (``engine/session.py``) -- see
 "how many sessions" threshold is configured; **operator-decided,
 2026-09-06: N = 3** (DESIGN_session.md §14 item 2, board nightwatch/handoff-2026-09-06.md
 §9) -- no longer a proposed placeholder.
-Gates 1, 10 and 11 are built; the other nine remain comment-only stubs; do not infer they are
+Gates 1, 4, 10 and 11 are built; the other eight remain comment-only stubs; do not infer they are
 implemented because this file grew.
 
-# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 10 and 11)
+# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 10 and 11)
 # as a function returning a db.repo.PreflightCheck, run in order, ALL must
 # pass:
 #   1. Halt switch          - IMPLEMENTED below (gate_1_halt)
@@ -36,7 +36,7 @@ implemented because this file grew.
 #      exemption granted; AlarmManager.canScheduleExactAlarms(); wake lock
 #      acquired (host.power_status())
 #   3. Network               - DNS/HTTPS to public-api.etoro.com within 90s
-#   4. Clock                 - local vs API Date header, <= 60s skew
+#   4. Clock                 - IMPLEMENTED below (gate_4_clock)
 #   5. Database              - opens; schema_version matches; no unfinished
 #      prior session (db.repo.Repo.unfinished_sessions())
 #   6. Auth                  - GET /balances == 200
@@ -117,6 +117,7 @@ import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Callable, Mapping, Sequence
 
 from ..config import MarketDataConfig, ReconciliationConfig
@@ -141,6 +142,7 @@ __all__ = [
     "unimplemented_gate",
     "run_preflight",
     "gate_1_halt",
+    "gate_4_clock",
     "ProvisionalClose",
     "INTRADAY_CANDLE_INTERVALS",
     "BrokerTakeProfit",
@@ -224,6 +226,36 @@ def gate_1_halt(host: Host) -> GateResult:
     if path.exists():
         return GateResult(1, "Halt switch", False, f"HALT flag present: {path}", {"path": str(path)})
     return GateResult(1, "Halt switch", True, "no HALT flag", {"path": str(path)})
+
+
+def gate_4_clock(
+    *, local_now: datetime, server_date: str | None, max_skew_seconds: float = 60.0
+) -> GateResult:
+    if local_now.utcoffset() is None:
+        raise ValueError("local_now must be timezone-aware")
+    details: dict[str, object] = {"local_now": local_now.isoformat()}
+    if server_date is None:
+        return GateResult(4, "Clock", False, "no server Date header observed", details)
+    details["server_date"] = server_date
+    try:
+        server = parsedate_to_datetime(server_date)
+    except (TypeError, ValueError):
+        return GateResult(
+            4, "Clock", False, f"unparseable server Date header: {server_date!r}", details,
+        )
+    if server.utcoffset() is None:
+        return GateResult(
+            4, "Clock", False, f"unparseable server Date header: {server_date!r}", details,
+        )
+    skew = (local_now - server).total_seconds()
+    details["skew_seconds"] = skew
+    passed = not (abs(skew) > max_skew_seconds)
+    reason = (
+        f"clock skew {skew:+.1f}s within {max_skew_seconds:.0f}s"
+        if passed
+        else f"clock skew {skew:+.1f}s exceeds {max_skew_seconds:.0f}s"
+    )
+    return GateResult(4, "Clock", passed, reason, details)
 
 
 def unimplemented_gate(number: int, name: str) -> GateSpec:
