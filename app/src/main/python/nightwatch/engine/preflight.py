@@ -111,15 +111,16 @@ module's own docstring.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 from ..config import MarketDataConfig, ReconciliationConfig
-from ..db.repo import Intent, LotAnnotation
+from ..db.repo import Intent, LotAnnotation, PreflightCheck, Repo
 from ..etoro.models import Candle, Position, Rate
 from ..notify.telegram import TelegramNotifier
 from .reconcile import (
@@ -133,6 +134,11 @@ from .reconcile import (
 
 __all__ = [
     "GateResult",
+    "GateCheck",
+    "GateSpec",
+    "PreflightOutcome",
+    "unimplemented_gate",
+    "run_preflight",
     "ProvisionalClose",
     "INTRADAY_CANDLE_INTERVALS",
     "BrokerTakeProfit",
@@ -192,6 +198,64 @@ class GateResult:
     passed: bool
     reason: str
     details: dict[str, object] = field(default_factory=dict)
+
+
+GateCheck = Callable[[], GateResult]
+
+
+@dataclass(frozen=True)
+class GateSpec:
+    number: int
+    name: str
+    check: GateCheck
+
+
+@dataclass(frozen=True)
+class PreflightOutcome:
+    passed: bool
+    results: tuple[GateResult, ...]
+    failed: GateResult | None
+
+
+def unimplemented_gate(number: int, name: str) -> GateSpec:
+    return GateSpec(number, name, lambda: GateResult(number, name, False, "not implemented"))
+
+
+def run_preflight(
+    gates: Sequence[GateSpec], *, repo: Repo, session_id: int
+) -> PreflightOutcome:
+    """Run all twelve gates in order, persisting each attempted verdict."""
+    if sorted(spec.number for spec in gates) != list(range(1, 13)):
+        raise ValueError("run_preflight requires gates 1..12, each exactly once")
+
+    results: list[GateResult] = []
+    for spec in sorted(gates, key=lambda spec: spec.number):
+        try:
+            result = spec.check()
+            if result.gate != spec.number:
+                result = GateResult(
+                    spec.number, spec.name, False,
+                    f"gate {spec.number} returned result for gate {result.gate}",
+                )
+        except Exception as exc:
+            result = GateResult(
+                spec.number, spec.name, False,
+                f"exception: {type(exc).__name__}: {exc}",
+            )
+        repo.record_preflight_check(PreflightCheck(
+            session_id=session_id,
+            gate=result.gate,
+            name=result.name,
+            passed=result.passed,
+            detail=json.dumps(
+                {"reason": result.reason, "details": result.details},
+                default=str, sort_keys=True,
+            ),
+        ))
+        results.append(result)
+        if not result.passed:
+            return PreflightOutcome(False, tuple(results), result)
+    return PreflightOutcome(True, tuple(results), None)
 
 
 @dataclass(frozen=True, slots=True)
