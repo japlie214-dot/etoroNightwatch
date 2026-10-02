@@ -25,10 +25,10 @@ marked ``'abandoned'`` in the first place (``engine/session.py``) -- see
 "how many sessions" threshold is configured; **operator-decided,
 2026-09-06: N = 3** (DESIGN_session.md §14 item 2, board nightwatch/handoff-2026-09-06.md
 §9) -- no longer a proposed placeholder.
-Gates 1, 4, 9, 10 and 11 are built; the other seven remain comment-only stubs; do not infer they are
+Gates 1, 4, 5, 9, 10 and 11 are built; the other six remain comment-only stubs; do not infer they are
 implemented because this file grew.
 
-# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 9, 10 and 11)
+# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 5, 9, 10 and 11)
 # as a function returning a db.repo.PreflightCheck, run in order, ALL must
 # pass:
 #   1. Halt switch          - IMPLEMENTED below (gate_1_halt)
@@ -37,8 +37,7 @@ implemented because this file grew.
 #      acquired (host.power_status())
 #   3. Network               - DNS/HTTPS to public-api.etoro.com within 90s
 #   4. Clock                 - IMPLEMENTED below (gate_4_clock)
-#   5. Database              - opens; schema_version matches; no unfinished
-#      prior session (db.repo.Repo.unfinished_sessions())
+#   5. Database              - IMPLEMENTED below (gate_5_database)
 #   6. Auth                  - GET /balances == 200
 #   7. Environment match     - config says real/demo and the key is bound the
 #      same way, PROBED not trusted
@@ -121,6 +120,7 @@ from email.utils import parsedate_to_datetime
 from typing import Callable, Mapping, Sequence
 
 from ..config import MarketDataConfig, ReconciliationConfig
+from ..db import migrations
 from ..db.repo import Intent, LotAnnotation, PreflightCheck, Repo
 from ..etoro.models import Candle, Position, Rate
 from ..host import Host
@@ -143,6 +143,7 @@ __all__ = [
     "run_preflight",
     "gate_1_halt",
     "gate_4_clock",
+    "gate_5_database",
     "gate_9_calendar",
     "ProvisionalClose",
     "INTRADAY_CANDLE_INTERVALS",
@@ -257,6 +258,31 @@ def gate_4_clock(
         else f"clock skew {skew:+.1f}s exceeds {max_skew_seconds:.0f}s"
     )
     return GateResult(4, "Clock", passed, reason, details)
+
+
+def gate_5_database(*, repo: Repo, session_id: int) -> GateResult:
+    rows = repo.conn.execute("PRAGMA quick_check").fetchall()
+    if [tuple(r) for r in rows] != [("ok",)]:
+        texts = [str(r[0]) for r in rows[:5]]
+        first_row_text = texts[0] if texts else "no rows"
+        return GateResult(
+            5, "database", False, f"database quick_check failed: {first_row_text}",
+            {"quick_check": texts},
+        )
+
+    actual = repo.schema_version()
+    expected = migrations.discover()[-1].version
+    if actual != expected:
+        return GateResult(5, "database", False, f"schema version {actual}, code expects {expected}")
+
+    # T007 trap: the current session is started, so exclude it from unfinished sessions.
+    others = [s for s in repo.unfinished_sessions() if s.id != session_id]
+    if others:
+        reason = f"{len(others)} unfinished prior session(s): " + ", ".join(
+            f"{s.trading_date} (id {s.id}, state {s.state})" for s in others
+        )
+        return GateResult(5, "database", False, reason, {"unfinished_ids": [s.id for s in others]})
+    return GateResult(5, "database", True, "database ok", {"schema_version": actual})
 
 
 def gate_9_calendar(*, trading_date: date, calendar: object | None = None) -> GateResult:
