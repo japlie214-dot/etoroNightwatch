@@ -25,10 +25,10 @@ marked ``'abandoned'`` in the first place (``engine/session.py``) -- see
 "how many sessions" threshold is configured; **operator-decided,
 2026-09-06: N = 3** (DESIGN_session.md §14 item 2, board nightwatch/handoff-2026-09-06.md
 §9) -- no longer a proposed placeholder.
-Gates 1, 4, 10 and 11 are built; the other eight remain comment-only stubs; do not infer they are
+Gates 1, 4, 9, 10 and 11 are built; the other seven remain comment-only stubs; do not infer they are
 implemented because this file grew.
 
-# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 10 and 11)
+# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 9, 10 and 11)
 # as a function returning a db.repo.PreflightCheck, run in order, ALL must
 # pass:
 #   1. Halt switch          - IMPLEMENTED below (gate_1_halt)
@@ -44,7 +44,7 @@ implemented because this file grew.
 #      same way, PROBED not trusted
 #   8. Instruments           - UPRO/SCHG/SPY resolve; allowOpenPosition;
 #      minPositionExposure <= order_size
-#   9. Calendar (DESIGN_market_data.md §6 gate 9) - exchange_calendars XNYS
+#   9. Calendar              - IMPLEMENTED below (gate_9_calendar)
 #      via `.sessions` membership, NOT `.is_session()` (raises
 #      DateOutOfBounds under pandas 3.0.5, DESIGN_market_data.md §2.6).
 #      market/calendar.py stays a cross-check, not the authority.
@@ -116,7 +116,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, Mapping, Sequence
 
@@ -143,6 +143,7 @@ __all__ = [
     "run_preflight",
     "gate_1_halt",
     "gate_4_clock",
+    "gate_9_calendar",
     "ProvisionalClose",
     "INTRADAY_CANDLE_INTERVALS",
     "BrokerTakeProfit",
@@ -256,6 +257,48 @@ def gate_4_clock(
         else f"clock skew {skew:+.1f}s exceeds {max_skew_seconds:.0f}s"
     )
     return GateResult(4, "Clock", passed, reason, details)
+
+
+def gate_9_calendar(*, trading_date: date, calendar: object | None = None) -> GateResult:
+    """XNYS is the authority; market/calendar.py is only a cross-check."""
+    from zoneinfo import ZoneInfo
+
+    import pandas as pd
+
+    from ..market import calendar as market_calendar
+
+    if calendar is None:
+        import exchange_calendars
+
+        calendar = exchange_calendars.get_calendar("XNYS")
+
+    ts = pd.Timestamp(trading_date)
+    first, last = calendar.first_session, calendar.last_session
+    if ts < first or ts > last:
+        return GateResult(
+            9, "calendar", False,
+            f"trading date {trading_date.isoformat()} outside calendar range {first.date()}..{last.date()}",
+        )
+    details: dict[str, object] = {
+        "crosscheck_is_trading_day": market_calendar.is_trading_day(trading_date),
+    }
+    if ts not in calendar.sessions:
+        return GateResult(
+            9, "calendar", False, f"{trading_date.isoformat()} is not an XNYS session", details,
+        )
+
+    close_utc = calendar.session_close(ts)
+    close_et = close_utc.astimezone(ZoneInfo("America/New_York"))
+    close_et_text = close_et.strftime("%H:%M")
+    crosscheck_close_et = market_calendar.session_close(trading_date).strftime("%H:%M")
+    details.update({
+        "close_utc": close_utc.isoformat(),
+        "close_et": close_et_text,
+        "early_close": close_et_text != "16:00",
+        "crosscheck_close_et": crosscheck_close_et,
+        "crosscheck_agrees": details["crosscheck_is_trading_day"] and crosscheck_close_et == close_et_text,
+    })
+    return GateResult(9, "calendar", True, f"XNYS session; close {close_et:%H:%M} ET", details)
 
 
 def unimplemented_gate(number: int, name: str) -> GateSpec:
