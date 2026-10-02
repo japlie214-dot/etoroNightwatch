@@ -25,10 +25,10 @@ marked ``'abandoned'`` in the first place (``engine/session.py``) -- see
 "how many sessions" threshold is configured; **operator-decided,
 2026-09-06: N = 3** (DESIGN_session.md §14 item 2, board nightwatch/handoff-2026-09-06.md
 §9) -- no longer a proposed placeholder.
-Gates 1, 4, 5, 9, 10 and 11 are built; the other six remain comment-only stubs; do not infer they are
+Gates 1, 4, 5, 6, 7, 8, 9, 10 and 11 are built; the other three remain comment-only stubs; do not infer they are
 implemented because this file grew.
 
-# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 5, 9, 10 and 11)
+# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 5, 6, 7, 8, 9, 10 and 11)
 # as a function returning a db.repo.PreflightCheck, run in order, ALL must
 # pass:
 #   1. Halt switch          - IMPLEMENTED below (gate_1_halt)
@@ -38,11 +38,9 @@ implemented because this file grew.
 #   3. Network               - DNS/HTTPS to public-api.etoro.com within 90s
 #   4. Clock                 - IMPLEMENTED below (gate_4_clock)
 #   5. Database              - IMPLEMENTED below (gate_5_database)
-#   6. Auth                  - GET /balances == 200
-#   7. Environment match     - config says real/demo and the key is bound the
-#      same way, PROBED not trusted
-#   8. Instruments           - UPRO/SCHG/SPY resolve; allowOpenPosition;
-#      minPositionExposure <= order_size
+#   6. Auth                  - IMPLEMENTED below (gate_6_auth)
+#   7. Environment match     - IMPLEMENTED below (gate_7_environment)
+#   8. Instruments           - IMPLEMENTED below (gate_8_instruments)
 #   9. Calendar              - IMPLEMENTED below (gate_9_calendar)
 #      via `.sessions` membership, NOT `.is_session()` (raises
 #      DateOutOfBounds under pandas 3.0.5, DESIGN_market_data.md §2.6).
@@ -119,9 +117,11 @@ from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, Mapping, Sequence
 
-from ..config import MarketDataConfig, ReconciliationConfig
+from ..config import MarketDataConfig, ReconciliationConfig, SymbolConfig
 from ..db import migrations
 from ..db.repo import Intent, LotAnnotation, PreflightCheck, Repo
+from ..etoro.client import EtoroClient
+from ..etoro.errors import EtoroAuthError, EtoroEligibilityError, EtoroError
 from ..etoro.models import Candle, Position, Rate
 from ..host import Host
 from ..notify.telegram import TelegramNotifier
@@ -144,6 +144,9 @@ __all__ = [
     "gate_1_halt",
     "gate_4_clock",
     "gate_5_database",
+    "gate_6_auth",
+    "gate_7_environment",
+    "gate_8_instruments",
     "gate_9_calendar",
     "ProvisionalClose",
     "INTRADAY_CANDLE_INTERVALS",
@@ -283,6 +286,79 @@ def gate_5_database(*, repo: Repo, session_id: int) -> GateResult:
         )
         return GateResult(5, "database", False, reason, {"unfinished_ids": [s.id for s in others]})
     return GateResult(5, "database", True, "database ok", {"schema_version": actual})
+
+
+def gate_6_auth(*, client: EtoroClient) -> GateResult:
+    """Use the session's authenticated portfolio read, not DESIGN's GET /balances."""
+    try:
+        client.get_balance()
+    except EtoroAuthError as exc:
+        return GateResult(6, "auth", False, f"auth refused: {exc}")
+    except EtoroError as exc:
+        return GateResult(
+            6, "auth", False, f"auth check inconclusive: {type(exc).__name__}: {exc}",
+        )
+    return GateResult(
+        6, "auth", True, "authenticated read ok", {"environment": client.environment},
+    )
+
+
+def gate_7_environment(*, client: EtoroClient) -> GateResult:
+    """Require positive confirmation, unlike verify_environment's unknown-is-OK."""
+    configured = client.environment
+    detected = None
+    try:
+        detected = client.probe_environment()
+    except EtoroError as exc:
+        return GateResult(
+            7, "environment", False,
+            f"environment probe error: {type(exc).__name__}: {exc}",
+            {"configured": configured, "detected": detected},
+        )
+    details = {"configured": configured, "detected": detected}
+    if detected is None:
+        return GateResult(
+            7, "environment", False, "credential environment could not be confirmed", details,
+        )
+    if detected != configured:
+        return GateResult(
+            7, "environment", False,
+            f"config says {configured}, credential is bound to {detected}", details,
+        )
+    return GateResult(7, "environment", True, f"credential bound to {detected}", details)
+
+
+def gate_8_instruments(
+    *, client: EtoroClient, symbols: SymbolConfig, order_sizes: Mapping[str, float],
+) -> GateResult:
+    """Resolve every symbol and check traded symbols at their actual order amounts."""
+    if set(order_sizes) != set(symbols.traded) or any(size <= 0 for size in order_sizes.values()):
+        raise ValueError("order_sizes must contain exactly the traded symbols with positive amounts")
+    ids = {}
+    for s in symbols.all:
+        try:
+            ids[s] = client.resolve_instrument_id(s)
+        except EtoroError as exc:
+            return GateResult(
+                8, "instruments", False, f"{s} unresolvable: {type(exc).__name__}: {exc}",
+            )
+    min_position_exposure = {}
+    for s in symbols.traded:
+        try:
+            elig = client.check_eligibility_for_order(ids[s], order_sizes[s])
+        except EtoroEligibilityError as exc:
+            return GateResult(8, "instruments", False, f"{s} not orderable: {exc}")
+        except EtoroError as exc:
+            return GateResult(
+                8, "instruments", False,
+                f"{s} eligibility check error: {type(exc).__name__}: {exc}",
+            )
+        min_position_exposure[s] = elig.min_position_exposure
+    return GateResult(8, "instruments", True, "instruments ok", {
+        "instrument_ids": ids,
+        "order_sizes": dict(order_sizes),
+        "min_position_exposure": min_position_exposure,
+    })
 
 
 def gate_9_calendar(*, trading_date: date, calendar: object | None = None) -> GateResult:
