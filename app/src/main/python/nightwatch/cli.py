@@ -2,9 +2,9 @@
 
 Subcommands: ``run | seed | webapp | status | halt | resume | initdb``.
 
-``initdb``, ``halt``, ``resume`` and ``status`` are real today -- they only
-touch the database and the halt flag, neither of which depends on any
-not-yet-built module. The rest (``run``, ``seed``, ``webapp``) need pieces
+``run`` performs dry-run preflight only. ``initdb``, ``halt``, ``resume``
+and ``status`` touch the database and the halt flag. The rest
+(``seed``, ``webapp``) need pieces
 that later build steps deliver (DESIGN §10) and print a clear
 "not implemented yet" message naming the blocking step, then exit non-zero,
 rather than silently doing nothing or crashing with a traceback.
@@ -13,19 +13,23 @@ rather than silently doing nothing or crashing with a traceback.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
+from datetime import date, datetime
 from pathlib import Path
 from typing import Sequence
+from zoneinfo import ZoneInfo
 
 from .config import ConfigError, load_config
 from .db.repo import Repo, default_db_path
+from .engine.session import run_session
+from .etoro.client import EtoroClient
 from .host import Host, get_host
 
 __all__ = ["main", "build_parser", "set_halt", "clear_halt"]
 
 #: Which build step (DESIGN §10) each not-yet-implemented subcommand needs.
 _NOT_YET_IMPLEMENTED = {
-    "run": (6, "the session engine: preflight, executor, idempotency, reconciliation"),
     "seed": (3, "the market calendar + bar store + seeding"),
     "webapp": (8, "the embedded FastAPI dashboard"),
 }
@@ -45,7 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("run", help="run one trading session (build step 6)")
+    run = sub.add_parser("run", help="run one trading session (dry-run preflight)")
+    run.add_argument("--date", type=date.fromisoformat, default=None, help="trading date YYYY-MM-DD")
     seed = sub.add_parser("seed", help="seed daily bar history (build step 3)")
     seed.add_argument("--count", type=int, default=400, help="bars to seed per symbol")
     sub.add_parser("webapp", help="serve the embedded dashboard (build step 8)")
@@ -59,6 +64,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    host = get_host()
+    try:
+        config = load_config(config_path=args.config, secrets_path=args.secrets, host=host)
+    except ConfigError as exc:
+        print(f"config: ERROR - {exc}", file=sys.stderr)
+        return 1
+    trading_date = args.date or datetime.now(ZoneInfo("America/New_York")).date()
+    with Repo.open(default_db_path(host), host=host) as repo:
+        client = EtoroClient(config.etoro, role="read", repo=repo)
+        try:
+            result = run_session(
+                host=host, config=config, repo=repo, client=client, trading_date=trading_date,
+            )
+            print(f"status: {result.status}")
+            print(f"session_id: {result.session_id}")
+            print(f"failed_gate: {result.failed_gate}")
+            print(f"reason: {result.reason}")
+            if result.session_id is not None:
+                for row in repo.get_preflight_checks(result.session_id):
+                    reason = json.loads(row.detail)["reason"]
+                    print(f"gate {row.gate} {row.name} {'PASS' if row.passed else 'FAIL'} {reason}")
+        finally:
+            client.close()
+    return 0 if result.status in ("preflight_passed", "already_ran") else 1
 
 
 def _cmd_initdb(args: argparse.Namespace) -> int:
@@ -252,6 +284,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "run":
+        return _cmd_run(args)
     if args.command == "initdb":
         return _cmd_initdb(args)
     if args.command == "status":

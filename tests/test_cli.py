@@ -65,7 +65,7 @@ def test_status_after_initdb_shows_session_count(host: DesktopHost, capsys: pyte
     assert "latest session: none" in out
 
 
-@pytest.mark.parametrize("command", ["run", "seed", "webapp"])
+@pytest.mark.parametrize("command", ["seed", "webapp"])
 def test_not_yet_implemented_commands_exit_non_zero(command: str) -> None:
     rc = cli.main([command])
     assert rc != 0
