@@ -595,16 +595,24 @@ class ReconciliationConfig:
 
 @dataclass(frozen=True, slots=True)
 class RiskConfig:
-    """Hard caps enforced by preflight gate 12 (DESIGN §5)."""
+    """Risk caps; daily loss is an alert threshold; never halts (T010).
+
+    Gate 12 checks the open-lot cap; session notional is evaluated elsewhere.
+    """
 
     max_notional_per_session_usd: float = 5000.0
     max_daily_loss_usd: float | None = None
     #: Gate 2 aborts below this when the host is on battery.
     min_battery_percent: int = 40
+    max_open_lots: int | None = None
 
     def __post_init__(self) -> None:
         if self.max_notional_per_session_usd <= 0:
             raise ConfigError("risk.max_notional_per_session_usd must be positive")
+        if self.max_daily_loss_usd is not None and self.max_daily_loss_usd <= 0:
+            raise ConfigError("risk.max_daily_loss_usd must be positive")
+        if self.max_open_lots is not None and self.max_open_lots < 1:
+            raise ConfigError("risk.max_open_lots must be at least 1")
         if not 0 <= self.min_battery_percent <= 100:
             raise ConfigError("risk.min_battery_percent must be between 0 and 100")
 
@@ -846,6 +854,11 @@ def load_config(
             else float(rk["max_daily_loss_usd"])
         ),
         min_battery_percent=int(rk.get("min_battery_percent", 40)),
+        max_open_lots=(
+            None
+            if rk.get("max_open_lots") in (None, "")
+            else int(rk["max_open_lots"])
+        ),
     )
 
     tg_market = _table(data, "tiingo")

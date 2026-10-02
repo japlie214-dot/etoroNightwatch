@@ -25,10 +25,10 @@ marked ``'abandoned'`` in the first place (``engine/session.py``) -- see
 "how many sessions" threshold is configured; **operator-decided,
 2026-09-06: N = 3** (DESIGN_session.md §14 item 2, board nightwatch/handoff-2026-09-06.md
 §9) -- no longer a proposed placeholder.
-Gates 1, 4, 5, 6, 7, 8, 9, 10 and 11 are built; the other three remain comment-only stubs; do not infer they are
+Gates 1, 4, 5, 6, 7, 8, 9, 10, 11 and 12 are built; the other two remain comment-only stubs; do not infer they are
 implemented because this file grew.
 
-# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 5, 6, 7, 8, 9, 10 and 11)
+# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 5, 6, 7, 8, 9, 10, 11 and 12)
 # as a function returning a db.repo.PreflightCheck, run in order, ALL must
 # pass:
 #   1. Halt switch          - IMPLEMENTED below (gate_1_halt)
@@ -47,11 +47,10 @@ implemented because this file grew.
 #      market/calendar.py stays a cross-check, not the authority.
 #  11. Reconciliation        - IMPLEMENTED below (gate_11_reconciliation);
 #      see that function and engine/reconcile.py, not this stub list.
-#  12. Risk caps             - session order count/notional vs config.risk;
-#      also the intended caller of `find_broker_take_profits` below (added
-#      2026-09-11, DESIGN.md §6.A) -- a broker-side take-profit this app
-#      never asked for is a risk fact, and the detection half of it is
-#      implemented and tested here even though gate 12 itself is not.
+#  12. Risk caps             - IMPLEMENTED below (gate_12_risk_caps);
+#      configured open-lot cap and open-lot count; session notional and
+#      daily loss (alert-only) are evaluated elsewhere. Broker TPs are
+#      information only and never fail this gate.
 #
 # Any failure: persist ALL attempted PreflightCheck rows via
 # db.repo.Repo.record_preflight_check, send the Telegram abort message naming
@@ -117,7 +116,7 @@ from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, Mapping, Sequence
 
-from ..config import MarketDataConfig, ReconciliationConfig, SymbolConfig
+from ..config import MarketDataConfig, ReconciliationConfig, RiskConfig, SymbolConfig
 from ..db import migrations
 from ..db.repo import Intent, LotAnnotation, PreflightCheck, Repo
 from ..etoro.client import EtoroClient
@@ -148,6 +147,7 @@ __all__ = [
     "gate_7_environment",
     "gate_8_instruments",
     "gate_9_calendar",
+    "gate_12_risk_caps",
     "ProvisionalClose",
     "INTRADAY_CANDLE_INTERVALS",
     "BrokerTakeProfit",
@@ -401,6 +401,32 @@ def gate_9_calendar(*, trading_date: date, calendar: object | None = None) -> Ga
         "crosscheck_agrees": details["crosscheck_is_trading_day"] and crosscheck_close_et == close_et_text,
     })
     return GateResult(9, "calendar", True, f"XNYS session; close {close_et:%H:%M} ET", details)
+
+
+def gate_12_risk_caps(
+    *, risk: RiskConfig, repo: Repo, positions: Sequence[Position]
+) -> GateResult:
+    """Check the configured open-lot cap; broker TPs are information only."""
+    open_lots = len(repo.list_lot_annotations(is_open=True))
+    tps = find_broker_take_profits(positions)
+    details: dict[str, object] = {
+        "max_notional_per_session_usd": risk.max_notional_per_session_usd,
+        "max_daily_loss_usd": risk.max_daily_loss_usd,
+        "max_open_lots": risk.max_open_lots,
+        "open_lots": open_lots,
+        "broker_take_profit_count": len(tps),
+        "evaluated_elsewhere": ["max_notional_per_session_usd", "max_daily_loss_usd"],
+    }
+    if risk.max_open_lots is None:
+        return GateResult(
+            12, "risk_caps", False, "risk limits unset: max_open_lots", details,
+        )
+    if open_lots > risk.max_open_lots:
+        return GateResult(
+            12, "risk_caps", False,
+            f"{open_lots} open lots exceed max_open_lots {risk.max_open_lots}", details,
+        )
+    return GateResult(12, "risk_caps", True, "risk caps ok", details)
 
 
 def unimplemented_gate(number: int, name: str) -> GateSpec:
@@ -1057,17 +1083,10 @@ class BrokerTakeProfit:
     multiple: float | None
 
 
-# TODO(gate 12, DESIGN §5 -- "Risk caps", still a comment-only stub above):
-# gate 12 is the honest home for this, and ``run_preflight()`` (built)
-# is what must call it. A broker-side take-profit is an *exit this app did
-# not author and cannot currently suppress* -- a risk-cap fact, not a
-# reconciliation mismatch. It is deliberately NOT folded into
-# :func:`gate_11_reconciliation`: gate 11 is fail-closed, and on the live
-# account 229 of 230 positions carry a TP today, so wiring this there would
-# halt every session from now on over a condition that is currently normal
-# and has never fired. Until gate 12 exists this function has no production
-# caller; that is stated plainly rather than papered over with scaffolding
-# nothing runs.
+# Gate 12 reports this as information only, never a failure. It is NOT
+# folded into fail-closed gate 11: 229 of 230 legacy live positions carry
+# a TP, so wiring it there would halt every session. Production session
+# wiring remains the S6 executor's job.
 def find_broker_take_profits(
     positions: Sequence[Position],
 ) -> list[BrokerTakeProfit]:

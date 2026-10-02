@@ -13,6 +13,7 @@ from nightwatch.config import (
     EtoroEnvironment,
     MissingCredentialError,
     ReconciliationConfig,
+    RiskConfig,
     StrategyConfig,
     TradingMode,
     load_config,
@@ -25,12 +26,50 @@ def test_load_config_defaults(config_path: Path, secrets_path: Path, host: Deskt
     assert config.mode is TradingMode.DRY_RUN
     assert config.etoro.environment is EtoroEnvironment.DEMO
     assert config.symbols.all == ("SPY", "SCHG", "UPRO")
+    assert config.risk.max_open_lots is None
     # ReconciliationConfig's defaults load even with no [reconciliation]
     # section in config.toml at all (MINIMAL_CONFIG_TOML has none) -- the
     # PROPOSED-but-unconfirmed N=3 default, and the auto-adopt size
     # tolerance, both come through untouched.
     assert config.reconciliation.non_terminal_order_sessions_before_abandoned == 3
     assert config.reconciliation.abandoned_intent_size_tolerance_pct == 0.02
+
+
+def test_load_config_operator_risk_limits(tmp_path: Path) -> None:
+    config = load_config(
+        config_path=Path(__file__).resolve().parents[1] / "config" / "config.toml",
+        secrets_path=tmp_path / "absent.env",
+        env={},
+    )
+    assert config.risk.max_daily_loss_usd == 500.0
+    assert config.risk.max_open_lots == 100
+    assert config.risk.max_notional_per_session_usd == 5000.0
+
+
+@pytest.mark.parametrize("value, expected", [('""', None), ("2", 2)])
+def test_load_config_max_open_lots(
+    config_path: Path, tmp_path: Path, value: str, expected: int | None
+) -> None:
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + f"max_open_lots = {value}\n",
+        encoding="utf-8",
+    )
+    config = load_config(
+        config_path=config_path, secrets_path=tmp_path / "absent.env", env={},
+    )
+    assert config.risk.max_open_lots == expected
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_risk_config_rejects_non_positive_open_lot_cap(value: int) -> None:
+    with pytest.raises(ConfigError, match="risk.max_open_lots must be at least 1"):
+        RiskConfig(max_open_lots=value)
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_risk_config_rejects_non_positive_daily_loss_threshold(value: float) -> None:
+    with pytest.raises(ConfigError, match="risk.max_daily_loss_usd must be positive"):
+        RiskConfig(max_daily_loss_usd=value)
 
 
 def test_load_config_reconciliation_section_overrides_defaults(

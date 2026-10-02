@@ -154,9 +154,11 @@ port = 8080         # must be above 1024: binding lower requires root on Android
 # Risk caps — preflight gate 12 (DESIGN §5).
 # ---------------------------------------------------------------------------
 [risk]
+# operator decision 2026-10-02
 max_notional_per_session_usd = 5000.0
-# Daily loss guard; comment out to disable.
-# max_daily_loss_usd         = 500.0
+# daily loss ALERT threshold; never halts (T010)
+max_daily_loss_usd           = 500.0
+max_open_lots                = 100
 # Gate 2 aborts the session if the host is on battery below this level.
 min_battery_percent          = 40
 
