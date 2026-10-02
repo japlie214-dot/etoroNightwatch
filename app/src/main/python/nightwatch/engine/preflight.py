@@ -25,17 +25,12 @@ marked ``'abandoned'`` in the first place (``engine/session.py``) -- see
 "how many sessions" threshold is configured; **operator-decided,
 2026-09-06: N = 3** (DESIGN_session.md §14 item 2, board nightwatch/handoff-2026-09-06.md
 §9) -- no longer a proposed placeholder.
-Gates 1, 4, 5, 6, 7, 8, 9, 10, 11 and 12 are built; the other two remain comment-only stubs; do not infer they are
-implemented because this file grew.
+All twelve gates are built.
 
-# TODO(step 6, DESIGN §5): implement each remaining gate (all but 1, 4, 5, 6, 7, 8, 9, 10, 11 and 12)
-# as a function returning a db.repo.PreflightCheck, run in order, ALL must
-# pass:
+# Gates run in order; ALL must pass:
 #   1. Halt switch          - IMPLEMENTED below (gate_1_halt)
-#   2. Power & permissions   - battery >=40% or charging; battery-optimization
-#      exemption granted; AlarmManager.canScheduleExactAlarms(); wake lock
-#      acquired (host.power_status())
-#   3. Network               - DNS/HTTPS to public-api.etoro.com within 90s
+#   2. Power & permissions   - IMPLEMENTED below (gate_2_power)
+#   3. Network               - IMPLEMENTED below (gate_3_network)
 #   4. Clock                 - IMPLEMENTED below (gate_4_clock)
 #   5. Database              - IMPLEMENTED below (gate_5_database)
 #   6. Auth                  - IMPLEMENTED below (gate_6_auth)
@@ -111,10 +106,13 @@ import json
 import logging
 import math
 import re
-from dataclasses import dataclass, field
+import time
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Callable, Mapping, Sequence
+
+import httpx
 
 from ..config import MarketDataConfig, ReconciliationConfig, RiskConfig, SymbolConfig
 from ..db import migrations
@@ -122,7 +120,7 @@ from ..db.repo import Intent, LotAnnotation, PreflightCheck, Repo
 from ..etoro.client import EtoroClient
 from ..etoro.errors import EtoroAuthError, EtoroEligibilityError, EtoroError
 from ..etoro.models import Candle, Position, Rate
-from ..host import Host
+from ..host import Host, PowerStatus
 from ..notify.telegram import TelegramNotifier
 from .reconcile import (
     Adoption,
@@ -141,6 +139,9 @@ __all__ = [
     "unimplemented_gate",
     "run_preflight",
     "gate_1_halt",
+    "gate_2_power",
+    "gate_3_network",
+    "etoro_reachability_probe",
     "gate_4_clock",
     "gate_5_database",
     "gate_6_auth",
@@ -231,6 +232,62 @@ def gate_1_halt(host: Host) -> GateResult:
     if path.exists():
         return GateResult(1, "Halt switch", False, f"HALT flag present: {path}", {"path": str(path)})
     return GateResult(1, "Halt switch", True, "no HALT flag", {"path": str(path)})
+
+
+def gate_2_power(*, status: PowerStatus, min_battery_percent: int) -> GateResult:
+    details = asdict(status)
+    if not status.is_charging and (
+        status.battery_percent is None or status.battery_percent < min_battery_percent
+    ):
+        reason = f"on battery at {status.battery_percent}% (< {min_battery_percent}%)"
+    elif not status.ignoring_battery_optimizations:
+        reason = "battery-optimization exemption not granted"
+    elif not status.can_schedule_exact_alarms:
+        reason = "exact alarms not permitted"
+    elif not status.wake_lock_held:
+        reason = "wake lock not held"
+    else:
+        return GateResult(2, "power", True, "power ok", details)
+    return GateResult(2, "power", False, reason, details)
+
+
+def gate_3_network(
+    *, probe: Callable[[], None], timeout_seconds: float = 90.0,
+    interval_seconds: float = 5.0, sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> GateResult:
+    start = clock()
+    attempts = 0
+    while True:
+        attempts += 1
+        try:
+            probe()
+        except Exception as exc:
+            last_error = f"{type(exc).__name__}: {exc}"
+        else:
+            elapsed = clock() - start
+            return GateResult(
+                3, "network", True, f"reachable after {attempts} attempt(s)",
+                {"attempts": attempts, "elapsed_seconds": round(elapsed, 1)},
+            )
+        if clock() - start + interval_seconds > timeout_seconds:
+            break
+        sleep(interval_seconds)
+    elapsed = clock() - start
+    return GateResult(
+        3, "network", False,
+        f"no network after {attempts} attempt(s) in {elapsed:.0f}s: {last_error}",
+        {"attempts": attempts, "elapsed_seconds": round(elapsed, 1)},
+    )
+
+
+def etoro_reachability_probe(
+    base_url: str = "https://public-api.etoro.com", timeout: float = 10.0,
+) -> Callable[[], None]:
+    def probe() -> None:
+        httpx.get(base_url + "/", timeout=timeout, follow_redirects=False)
+
+    return probe
 
 
 def gate_4_clock(
