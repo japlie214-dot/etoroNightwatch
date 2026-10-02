@@ -837,7 +837,7 @@ is not re-litigated:
 does not fit, stop placing further orders for the session and accept the shortfall — the same
 fail-soft degradation the sell-to-target loop (DESIGN_session.md §4.8) already accepts when its
 own iteration cap or minimum-top-up floor is hit. `hard_deadline` derives from the market
-calendar (T-30 minus a safety margin); `p95_latency` derives from Friday 2026-09-11's measurement
+calendar (session close minus a safety margin; the order window runs from the T-30 session start to this deadline, per DESIGN_session.md §3.2/§5; corrected 2026-10-02, trunk/T011); `p95_latency` derives from Friday 2026-09-11's measurement
 (`tools/probe_order_latency_2026-09-11.py`, whose `project_session_budget` function already
 computes exactly this per-order-latency-times-order-count projection against DESIGN_session.md
 §4.9's 2-3-lots-today / ~10-lots-mature growth curve). This self-adjusts as the book grows — the

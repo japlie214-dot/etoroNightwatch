@@ -190,15 +190,14 @@ def test_a_real_measured_latency_does_not_trip_the_placeholder_warning(
 # ===========================================================================
 
 
-def test_hard_deadline_is_t30_minus_margin_on_a_regular_close_day():
+def test_hard_deadline_is_close_minus_margin_on_a_regular_close_day():
     # 2026-09-11 (Friday) is an ordinary NYSE trading day: 16:00 ET close.
     trading_date = date(2026, 9, 11)
     deadline = compute_hard_deadline(trading_date, margin_minutes=5.0)
     expected_close = datetime(2026, 9, 11, 16, 0, 0, tzinfo=EASTERN)
-    expected = expected_close - timedelta(seconds=T30_BUDGET_SECONDS) - timedelta(minutes=5.0)
+    expected = expected_close - timedelta(minutes=5.0)
     assert deadline == expected
-    # T-30 (30 min) + 5 min margin = 35 minutes before the 16:00 ET close.
-    assert deadline == expected_close - timedelta(minutes=35)
+    assert deadline == datetime(2026, 9, 11, 15, 55, 0, tzinfo=EASTERN)
 
 
 def test_hard_deadline_honors_an_early_close_day():
@@ -207,14 +206,42 @@ def test_hard_deadline_honors_an_early_close_day():
     trading_date = date(2026, 11, 27)
     deadline = compute_hard_deadline(trading_date, margin_minutes=0.0)
     expected_close = datetime(2026, 11, 27, 13, 0, 0, tzinfo=EASTERN)
-    assert deadline == expected_close - timedelta(seconds=T30_BUDGET_SECONDS)
+    assert deadline == expected_close
 
 
-def test_zero_margin_is_exactly_t30():
+def test_zero_margin_is_exactly_close():
     trading_date = date(2026, 9, 11)
     deadline = compute_hard_deadline(trading_date, margin_minutes=0.0)
     expected_close = datetime(2026, 9, 11, 16, 0, 0, tzinfo=EASTERN)
-    assert deadline == expected_close - timedelta(minutes=30)
+    assert deadline == expected_close
+
+
+def test_regular_close_order_window_is_non_empty():
+    deadline = compute_hard_deadline(date(2026, 9, 11), margin_minutes=5.0)
+    close = datetime(2026, 9, 11, 16, 0, 0, tzinfo=EASTERN)
+    session_start = close - timedelta(seconds=T30_BUDGET_SECONDS)
+    assert deadline - session_start == timedelta(minutes=25)
+
+
+def test_early_close_deadline_is_strictly_after_session_start():
+    deadline = compute_hard_deadline(date(2026, 11, 27), margin_minutes=5.0)
+    assert deadline == datetime(2026, 11, 27, 12, 55, 0, tzinfo=EASTERN)
+    assert deadline > datetime(2026, 11, 27, 12, 30, 0, tzinfo=EASTERN)
+
+
+def test_margin_that_leaves_no_order_window_is_rejected():
+    with pytest.raises(ValueError) as exc_info:
+        compute_hard_deadline(date(2026, 9, 11), margin_minutes=30)
+    assert str(exc_info.value) == (
+        "margin_minutes must be < 30 so the order window is non-empty, got 30"
+    )
+
+
+def test_margin_just_below_the_whole_window_is_allowed():
+    deadline = compute_hard_deadline(date(2026, 9, 11), margin_minutes=29.9)
+    close = datetime(2026, 9, 11, 16, 0, 0, tzinfo=EASTERN)
+    assert deadline == close - timedelta(minutes=29.9)
+    assert deadline > close - timedelta(seconds=T30_BUDGET_SECONDS)
 
 
 def test_negative_margin_is_rejected():
@@ -228,11 +255,12 @@ def test_margin_minutes_has_no_default_and_is_keyword_only():
 
 
 def test_compute_hard_deadline_feeds_check_order_budget_end_to_end():
-    # An order whose projected finish lands comfortably before T-30-minus-
+    # An order whose projected finish lands comfortably before close-minus-
     # margin is allowed; one that would land after it is not -- exercised
     # together the way a real caller (once one exists) would use both.
     trading_date = date(2026, 9, 11)
     deadline = compute_hard_deadline(trading_date, margin_minutes=5.0)
+    assert deadline == datetime(2026, 9, 11, 15, 55, 0, tzinfo=EASTERN)
     comfortably_early = deadline - timedelta(minutes=10)
     decision = check_order_budget(
         now=comfortably_early, hard_deadline=deadline, p95_latency_seconds=10.0
@@ -244,6 +272,28 @@ def test_compute_hard_deadline_feeds_check_order_budget_end_to_end():
         now=just_before_deadline, hard_deadline=deadline, p95_latency_seconds=10.0
     )
     assert decision2.allowed is False
+
+
+def test_order_is_allowed_one_minute_after_session_start_with_measured_latency():
+    deadline = compute_hard_deadline(date(2026, 9, 11), margin_minutes=5.0)
+    now = datetime(2026, 9, 11, 15, 31, 0, tzinfo=EASTERN)
+    decision = check_order_budget(
+        now=now, hard_deadline=deadline, p95_latency_seconds=10.0
+    )
+    assert decision.allowed is True
+
+
+def test_placeholder_still_refuses_one_minute_after_session_start():
+    deadline = compute_hard_deadline(date(2026, 9, 11), margin_minutes=5.0)
+    now = datetime(2026, 9, 11, 15, 31, 0, tzinfo=EASTERN)
+    decision = check_order_budget(
+        now=now,
+        hard_deadline=deadline,
+        p95_latency_seconds=PLACEHOLDER_P95_LATENCY_SECONDS,
+    )
+    assert PLACEHOLDER_P95_LATENCY_SECONDS == 3600.0
+    assert decision.allowed is False
+    assert decision.used_placeholder_latency is True
 
 
 # ===========================================================================

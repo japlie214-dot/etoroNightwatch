@@ -194,7 +194,7 @@ def check_order_budget(
             own datetime subtraction does with them, not a silent fix-up).
         hard_deadline: The instant beyond which no further close order may be
             projected to finish. Build this with :func:`compute_hard_deadline`
-            (T-30 minus a configured margin, derived from the market
+            (session close minus a configured margin, derived from the market
             calendar) -- never a hardcoded time of day.
         p95_latency_seconds: The measured (or, until Friday, placeholder --
             see :data:`PLACEHOLDER_P95_LATENCY_SECONDS`) p95 time-to-terminal
@@ -263,8 +263,9 @@ def check_order_budget(
 
 
 def compute_hard_deadline(trading_date: date, *, margin_minutes: float) -> datetime:
-    """``hard_deadline`` = T-30 minus a configured margin, derived from the
-    market calendar (DESIGN §4.1) -- never a hardcoded time of day.
+    """``hard_deadline`` = session close minus a configured margin. The order
+    window runs from T-30 (session start) to this deadline. The close is derived
+    from the market calendar (DESIGN §4.1) -- never a hardcoded time of day.
 
     T-30 itself is not re-derived here: it is
     `probes/order_latency.py`'s own :data:`~nightwatch.probes.order_latency.
@@ -272,31 +273,35 @@ def compute_hard_deadline(trading_date: date, *, margin_minutes: float) -> datet
     "the two-phase session's whole margin against the market close"), so this
     module and Friday's measurement harness share one single definition of
     what T-30 means rather than two constants that could silently drift
-    apart. `margin_minutes` narrows that window further -- this gate's own
-    extra safety margin on top of T-30, not a replacement for it.
+    apart. `margin_minutes` narrows that window by moving the deadline before
+    the close, while keeping it strictly after the T-30 session start.
 
     Args:
         trading_date: The NYSE trading date this session is running for.
             `market/calendar.py`'s `session_close_datetime` resolves this to
             the correct 16:00/13:00 ET close, honoring early-close days --
             this function does not special-case half-days itself.
-        margin_minutes: Extra margin subtracted beyond T-30, keyword-only
+        margin_minutes: Safety margin subtracted from session close, keyword-only
             with no default so a caller must make an explicit choice rather
             than inherit an implicit "0 extra margin" by omission. Must be
-            >= 0 -- a negative margin would mean *extending* past T-30, which
-            is not what this function is for.
+            >= 0 and < T30_BUDGET_SECONDS / 60 so the deadline does not extend
+            past the close and the order window remains non-empty.
 
     Returns:
         A tz-aware `America/New_York` datetime: the hard deadline to pass as
         `check_order_budget`'s `hard_deadline`.
 
     Raises:
-        ValueError: if `margin_minutes` is negative.
+        ValueError: if `margin_minutes` is negative or leaves no order window.
     """
     if margin_minutes < 0:
         raise ValueError(f"margin_minutes must be >= 0, got {margin_minutes!r}")
+    if margin_minutes >= T30_BUDGET_SECONDS / 60:
+        raise ValueError(
+            f"margin_minutes must be < {T30_BUDGET_SECONDS / 60:g} so the order window is non-empty, got {margin_minutes!r}"
+        )
     close_dt = session_close_datetime(trading_date)
-    return close_dt - timedelta(seconds=T30_BUDGET_SECONDS) - timedelta(minutes=margin_minutes)
+    return close_dt - timedelta(minutes=margin_minutes)
 
 
 # ---------------------------------------------------------------------------
