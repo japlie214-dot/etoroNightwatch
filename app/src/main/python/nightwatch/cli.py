@@ -98,7 +98,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     print(f"gate {row.gate} {row.name} {'PASS' if row.passed else 'FAIL'} {reason}")
         finally:
             client.close()
-    return 0 if result.status in ("signal_ready", "already_ran") else 1
+    return 0 if result.status in ("would_have_done", "already_ran") else 1
 
 
 def _cmd_initdb(args: argparse.Namespace) -> int:

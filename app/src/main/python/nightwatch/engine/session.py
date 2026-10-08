@@ -1,6 +1,6 @@
 """Daily session orchestration (doc/DESIGN_session.md §5).
 
-S6b: preflight, T-30 market rerun and SPY signal assembly.
+S6c-1: preflight, SPY signal and phase A dry-run decision.
 """
 
 from __future__ import annotations
@@ -9,18 +9,20 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 import logging
 import time
-from typing import Callable, Sequence
+from typing import Callable, Mapping, Sequence
 
 import httpx
 
-from ..config import Config
-from ..db.repo import PriceWindowFingerprint, Repo, utcnow
+from ..config import Config, TradingMode
+from ..db.repo import Decision, PriceWindowFingerprint, Repo, utcnow
 from ..etoro.client import EtoroClient
-from ..etoro.models import Candle, Position, Rate
+from ..etoro.models import Balance, Candle, Position, Rate
 from ..host import Host, get_host
 from ..market.calendar import session_close_datetime
 from ..market.source import IexQuote, TiingoClient
-from ..market.window import WindowAssemblyError, assemble_spy_signal, resolve_provisional_close
+from ..market.window import AssembledSignal, WindowAssemblyError, assemble_spy_signal, resolve_provisional_close
+from ..strategy.ladder import decide, LadderConfig, LadderLot, ReentryBucket, LadderInputs, LadderIntent
+from ..strategy.state import load
 from .preflight import (
     GateResult, GateSpec, etoro_reachability_probe, gate_1_halt,
     gate_2_power, gate_3_network, gate_4_clock, gate_5_database,
@@ -144,12 +146,97 @@ def build_preflight_gates(
     ]
 
 
+class DecideInputError(Exception):
+    pass
+
+
+def build_ladder_inputs(
+    *, iso: str, year: int, signal: AssembledSignal, prices: Mapping[str, float],
+    positions: Sequence[Position], symbol_by_instrument: Mapping[int, str],
+    balance: Balance, repo: Repo, cash_reserve_usd: float,
+) -> tuple[LadderInputs, list[str]]:
+    notes = []
+    managed = {}
+    unmanaged = 0
+    for p in positions:
+        if p.instrument_id not in symbol_by_instrument:
+            unmanaged += 1
+            continue
+        if not p.is_buy:
+            notes.append(f"ignored short position {p.position_id}")
+            continue
+        managed[p.position_id] = p
+    if unmanaged:
+        notes.append(f"{unmanaged} position(s) in unmanaged instruments ignored")
+    cash = max(0.0, balance.available_cash - cash_reserve_usd)
+    schg_value = sum(p.units * prices["SCHG"] for p in managed.values()
+                     if symbol_by_instrument[p.instrument_id] == "SCHG")
+    lots = []
+    for a in repo.list_lot_annotations(is_open=True):
+        if a.symbol != "UPRO":
+            continue
+        if a.entry_reference_spy is None:
+            raise DecideInputError(f"position {a.position_id} has no entry_reference_spy")
+        p = managed.get(a.position_id)
+        if p is None:
+            raise DecideInputError(f"position {a.position_id} missing at broker")
+        lots.append(LadderLot(
+            symbol="UPRO", book=a.book, units=p.units, entry_price=p.entry_price,
+            cost_basis=p.amount, entry_date=a.entry_date,
+            entry_reference_spy=a.entry_reference_spy, entry_spy_ath=a.entry_spy_ath,
+            entry_spy_close=a.entry_spy_close, entry_spy_drawdown=a.entry_spy_drawdown,
+            entry_tier=a.entry_tier, bucket_id=a.bucket_id, position_ref=a.position_id,
+        ))
+    annotated = {lot.position_ref for lot in lots}
+    unannotated = sum(1 for p in managed.values()
+                      if symbol_by_instrument[p.instrument_id] == "UPRO" and p.position_id not in annotated)
+    if unannotated:
+        notes.append(f"{unannotated} UPRO position(s) not annotated (adoption is S4): excluded from lots and equity")
+    buckets = []
+    for b in repo.active_buckets():
+        if b.last_reference_spy is None:
+            raise DecideInputError(f"bucket {b.bucket_id} has no last_reference_spy")
+        buckets.append(ReentryBucket(
+            bucket_id=b.bucket_id, sale_date=b.sale_date, sale_spy_close=b.sale_spy_close,
+            proceeds=b.proceeds, tranche_amount=b.tranche_amount, created_bar=b.created_bar,
+            tranches_bought=b.tranches_bought, last_reference_spy=b.last_reference_spy,
+        ))
+    mean = repo.mean_schg_value(year - 1)
+    if mean is None:
+        notes.append("no prior-year SCHG values")
+    return LadderInputs(
+        trading_date=iso, year=year, spy=signal.spy_context, cone_z=signal.cone_5_z,
+        upro_price=prices["UPRO"], schg_price=prices["SCHG"], cash=cash,
+        equity=cash + sum(lot.units * prices["UPRO"] for lot in lots) + schg_value,
+        schg_position_value=schg_value, open_lots=lots, buckets=buckets,
+        prior_year_schg_values=() if mean is None else (mean,),
+    ), notes
+
+
+def arming_refusals(config: Config) -> list[str]:
+    refusals = []
+    if config.mode is not TradingMode.LIVE:
+        refusals.append(f"mode is {config.mode.value}, not live")
+    if not config.arm_flag_present:
+        refusals.append("NIGHTWATCH_ARM not set")
+    names = [name for name in ("max_notional_per_session_usd", "max_daily_loss_usd", "max_open_lots")
+             if getattr(config.risk, name) is None]
+    if names:
+        refusals.append(f"risk limits unset: {', '.join(names)}")
+    return refusals
+
+
+def intent_to_dict(i: LadderIntent) -> dict:
+    return {"symbol": i.symbol, "side": i.side, "amount": i.amount,
+            "position_ref": i.position_ref, "reason": i.reason, "book": i.book}
+
+
 def run_session(
     *, host: Host, config: Config, repo: Repo, client: EtoroClient, trading_date: date,
     tiingo: TiingoClient, wait: bool = True,
     sleep_until: Callable[[datetime], None] = _sleep_until,
 ) -> SessionResult:
-    """Run dry-run preflight and assemble the SPY signal.
+    """Run dry-run preflight and phase A, stopping at the arm gate.
 
     Construct the client with role="read", repo=repo so gate 8 caches missing
     instrument rows before gate 11 reads them.
@@ -218,6 +305,48 @@ def run_session(
         window_end=fp.window_end, bar_count=fp.bar_count, series_sha256=fp.series_sha256,
         source=fp.source, source_fetched_at=fp.source_fetched_at,
     ))
-    reason = f"dry run: cone_5_z={sig.cone_5_z}, drawdown={sig.spy_context.drawdown}, tier={sig.spy_context.tier}; decide not built (S6c)"
+    try:
+        positions = client.get_portfolio()
+        balance = client.get_balance()
+    except Exception as exc:
+        reason = f"decide inputs: {type(exc).__name__}: {exc}"
+        repo.finish_session(s.id, state="aborted", outcome=reason)
+        return SessionResult(s.id, "decide_failed", None, reason)
+    try:
+        inputs, notes = build_ladder_inputs(
+            iso=iso, year=trading_date.year, signal=sig,
+            prices={s: mi.provisional_closes[s].value for s in mi.provisional_closes},
+            positions=positions, symbol_by_instrument={v: k for k, v in mi.instrument_ids.items()},
+            balance=balance, repo=repo, cash_reserve_usd=config.strategy.cash_reserve_usd,
+        )
+    except DecideInputError as exc:
+        reason = f"decide inputs: {type(exc).__name__}: {exc}"
+        repo.finish_session(s.id, state="aborted", outcome=reason)
+        return SessionResult(s.id, "decide_failed", None, reason)
+    if config.strategy.budget_override_usd is not None:
+        notes.append("budget_override_usd set but not honoured (ladder has no field)")
+    try:
+        state = load(repo)
+        d = decide(inputs, state, LadderConfig.from_strategy_config(config.strategy))
+    except Exception as exc:
+        reason = f"decide inputs: {type(exc).__name__}: {exc}"
+        repo.finish_session(s.id, state="aborted", outcome=reason)
+        return SessionResult(s.id, "decide_failed", None, reason)
+    repo.insert_decision(Decision(
+        session_id=s.id, trading_date=iso, intents=[intent_to_dict(i) for i in d.intents],
+        cone_z=inputs.cone_z, spy_close=inputs.spy.close, spy_ath=inputs.spy.ath,
+        drawdown=inputs.spy.drawdown, tier=inputs.spy.tier, budget=d.new_state.budget,
+        order_size=d.new_state.order_size, cash_target=d.new_state.cash_target,
+        equity=inputs.equity, cash=inputs.cash,
+        reason="phase A, pre-settlement, buy intents provisional; dry run: " + d.reason,
+    ))
+    refusals = arming_refusals(config)
+    summary = "; ".join(f"{i.side} {i.symbol} ${i.amount:.2f}" if i.amount is not None
+                        else f"{i.side} {i.symbol} lot {i.position_ref}" for i in d.intents) or "none"
+    reason = f"would have done {len(d.intents)} intent(s): {summary}; ladder: {d.reason}; arming refused: {'; '.join(refusals)}"
+    if notes:
+        reason += f"; inputs: {'; '.join(notes)}"
+    if d.warnings:
+        reason += f"; warnings: {'; '.join(d.warnings)}"
     repo.finish_session(s.id, state="finished", outcome=reason)
-    return SessionResult(s.id, "signal_ready", None, reason)
+    return SessionResult(s.id, "would_have_done", None, reason)

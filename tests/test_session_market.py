@@ -11,7 +11,8 @@ from nightwatch.config import load_config
 from nightwatch.db.repo import LotAnnotation, PriceWindowFingerprint
 from nightwatch.engine import session
 from nightwatch.engine.preflight import GateResult, GateSpec
-from nightwatch.etoro.models import Candle, Eligibility, Rate
+from nightwatch.etoro.models import Balance, Candle, Eligibility, Position, Rate
+from nightwatch.strategy.ladder import SpyContext
 from nightwatch.market.source import IexQuote
 
 
@@ -59,7 +60,7 @@ class MarketClient:
         return self.candles[instrument_id]
 
     def get_balance(self):
-        return 1000.0
+        return Balance(1000.0, None, 1000.0)
 
     def probe_environment(self):
         return self.environment
@@ -80,7 +81,7 @@ def market_client():
 def assembled_signal():
     return SimpleNamespace(
         fingerprint=PriceWindowFingerprint("2026-10-02", "SPY", "2010-01-04", "2026-10-01", 4000, "a" * 64, "tiingo", NOW.isoformat()),
-        cone_5_z=1.25, spy_context=SimpleNamespace(drawdown=-0.05, tier=1),
+        cone_5_z=1.25, spy_context=SpyContext(ath=100 / 0.95, close=100, drawdown=-0.05, tier=1),
     )
 
 
@@ -182,7 +183,8 @@ def test_session_market(repo, host, config, monkeypatch, wait, path):
         ("SCHG", "catapult", 120, True), ("UPRO", "reentry", 130, True),
         ("SCHG", "reentry", None, True), ("UPRO", "catapult", 999, False),
     ]):
-        repo.insert_lot_annotation(LotAnnotation(str(n), symbol, book, "2026-10-01", 100, "app", entry_spy_ath=ath, is_open=is_open))
+        repo.insert_lot_annotation(LotAnnotation(str(n), symbol, book, "2026-10-01", 100, "app", entry_reference_spy=100, entry_spy_ath=ath, is_open=is_open))
+    client.get_portfolio = lambda: [Position("1", IDS["UPRO"], 1, 100, 100, 1, True)]
     result = session.run_session(host=host, config=config, repo=repo, client=client, tiingo=tiingo, trading_date=DAY, wait=wait, sleep_until=sleep_until)
     assert sleeps == ([session.session_close_datetime(DAY) - timedelta(minutes=30)] if wait else [])
     assert len(tiingo.calls) == 2 and len(client.market_calls) == 8
@@ -206,8 +208,9 @@ def test_session_market(repo, host, config, monkeypatch, wait, path):
             assert result.reason == "signal: ValueError: bad history"
             assert repo.list_price_window_fingerprints("SPY") == []
         else:
-            assert result.status == "signal_ready" and row.state == "finished"
-            assert result.reason == "dry run: cone_5_z=1.25, drawdown=-0.05, tier=1; decide not built (S6c)"
+            assert result.status == "would_have_done" and row.state == "finished"
+            assert result.reason.startswith("would have done ")
+            assert "arming refused: mode is dry_run, not live; NIGHTWATCH_ARM not set" in result.reason
             assert repo.list_price_window_fingerprints("SPY") == [assembled_signal().fingerprint]
 
 

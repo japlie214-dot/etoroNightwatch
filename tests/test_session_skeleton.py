@@ -114,8 +114,8 @@ def test_session_verdict_persisted(repo, host, config, monkeypatch, failed_gate)
     checks = repo.get_preflight_checks(row.id)
     assert [c.gate for c in checks] == expected_numbers
     if failed_gate is None:
-        assert result.status == "signal_ready"
-        assert "cone_5_z=" in result.reason
+        assert result.status == "would_have_done"
+        assert "arming refused" in result.reason
         assert row.state == "finished" and row.preflight_verdict == "pass"
         assert row.finished_at is not None
         assert all(c.passed for c in checks)
@@ -191,7 +191,7 @@ def test_fetch_server_date(monkeypatch, connect_error):
     assert calls == [("https://example.test/", {"timeout": 2.0, "follow_redirects": False})]
 
 
-@pytest.mark.parametrize("status", ["preflight_failed", "refused_armed", "signal_ready", "already_ran", "rerun_failed", "signal_failed"])
+@pytest.mark.parametrize("status", ["preflight_failed", "refused_armed", "would_have_done", "already_ran", "rerun_failed", "signal_failed", "decide_failed"])
 @pytest.mark.parametrize("no_wait", [False, True])
 def test_cli_run_summary(host, config, monkeypatch, capsys, status, no_wait):
     client = FakeClient()
@@ -216,14 +216,17 @@ def test_cli_run_summary(host, config, monkeypatch, capsys, status, no_wait):
         s = repo.create_session("2026-10-03", "dry_run", "demo", False)
         failed = status == "preflight_failed"
         repo.record_preflight_check(PreflightCheck(s.id, 3, "network", not failed, json.dumps({"reason": "offline" if failed else "ok"})))
-        return session.SessionResult(s.id, status, 3 if failed else None, "preflight gate 3 network: offline" if failed else "ok")
+        reason = "would have done 0 intent(s): none; arming refused: NIGHTWATCH_ARM not set" if status == "would_have_done" else "ok"
+        return session.SessionResult(s.id, status, 3 if failed else None, "preflight gate 3 network: offline" if failed else reason)
 
     monkeypatch.setattr(cli, "EtoroClient", make_client)
     monkeypatch.setattr(cli, "run_session", run_session)
-    assert cli.main(["run", "--date", "2026-10-03"] + (["--no-wait"] if no_wait else [])) == (0 if status in ("signal_ready", "already_ran") else 1)
+    assert cli.main(["run", "--date", "2026-10-03"] + (["--no-wait"] if no_wait else [])) == (0 if status in ("would_have_done", "already_ran") else 1)
     out = capsys.readouterr().out
     assert f"status: {status}" in out
     assert "session_id:" in out and "failed_gate:" in out and "reason:" in out
+    if status == "would_have_done":
+        assert "reason: would have done 0 intent(s): none; arming refused: NIGHTWATCH_ARM not set" in out
     if status == "preflight_failed":
         assert "failed_gate: 3" in out and "gate 3 network FAIL offline" in out
     elif status == "refused_armed":
