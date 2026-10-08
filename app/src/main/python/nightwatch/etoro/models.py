@@ -548,6 +548,16 @@ class OrderResult:
         return self.status in FILLED_ORDER_STATUSES
 
 
+@dataclass(frozen=True)
+class EditPositionAck:
+    """Acceptance of an asynchronous position edit, not confirmation of it."""
+
+    operation_id: str | None
+    position_id: str | None
+    reference_id: str | None
+    status_code: int
+
+
 @dataclass(frozen=True, slots=True)
 class TradeHistoryEntry:
     """One row of ``GET /trading/info/trade/history`` (DESIGN_market_data.md §10.5).

@@ -27,10 +27,11 @@ from nightwatch.etoro.errors import (
     EtoroAuthError,
     EtoroEligibilityError,
     EtoroEnvironmentMismatchError,
+    EtoroRateLimitError,
     EtoroServerError,
     EtoroValidationError,
 )
-from nightwatch.etoro.models import OrderRequest, OrderStatus, mark_position
+from nightwatch.etoro.models import EditPositionAck, OrderRequest, OrderStatus, mark_position
 from nightwatch.host import DesktopHost
 from nightwatch.logging_setup import configure_logging, log_path_for_today
 
@@ -251,6 +252,98 @@ def test_close_position_accepts_units_to_deduct_for_a_partial_close() -> None:
     )
     body = json.loads(scripted.requests[0].content)
     assert body == {"InstrumentId": 42, "UnitsToDeduct": 3.5}
+
+
+# ===========================================================================
+# clear_take_profit: demo-only, asynchronous, never retried (T012)
+# ===========================================================================
+
+
+def test_clear_take_profit_sends_demo_patch_and_parses_ack() -> None:
+    request_id = str(uuid.uuid4())
+    scripted = ScriptedTransport([httpx.Response(202, json={
+        "operationId": 123, "positionId": 3550406905, "referenceId": request_id,
+    })])
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler), sleep=_no_sleep
+    )
+    ack = client.clear_take_profit(request_id, "3550406905")
+    assert ack == EditPositionAck("123", "3550406905", request_id, 202)
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        ack.status_code = 200
+    assert len(scripted.requests) == 1
+    request = scripted.requests[0]
+    assert request.method == "PATCH"
+    assert request.url.path == "/api/v2/trading/demo/positions/3550406905"
+    assert json.loads(request.content) == {"clearTakeProfit": True}
+    assert request.headers["x-request-id"] == request_id
+
+
+@pytest.mark.parametrize("response", [
+    httpx.Response(200), httpx.Response(200, json=[]), httpx.Response(202, json={}),
+])
+def test_clear_take_profit_empty_or_non_object_body(response: httpx.Response) -> None:
+    scripted = ScriptedTransport([response])
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler), sleep=_no_sleep
+    )
+    assert client.clear_take_profit("request-1", "3550406905") == EditPositionAck(
+        None, None, None, response.status_code
+    )
+    assert len(scripted.requests) == 1
+
+
+def test_clear_take_profit_refuses_wrong_position() -> None:
+    scripted = ScriptedTransport([httpx.Response(202, json={"positionId": 123})])
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler), sleep=_no_sleep
+    )
+    with pytest.raises(EtoroValidationError, match="expected 3550406905"):
+        client.clear_take_profit("request-1", "3550406905")
+    assert len(scripted.requests) == 1
+
+
+@pytest.mark.parametrize("request_id, position_id, message", [
+    ("", "3550406905", "request_id"),
+    ("request-1", "", "position_id"),
+    ("request-1", "12/../x", "position_id"),
+])
+def test_clear_take_profit_invalid_input_never_sends(
+    request_id: str, position_id: str, message: str,
+) -> None:
+    scripted = ScriptedTransport([])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(ValueError, match=message):
+        client.clear_take_profit(request_id, position_id)
+    assert len(scripted.requests) == 0
+
+
+def test_clear_take_profit_real_mode_never_sends() -> None:
+    config = _config(environment=EtoroEnvironment.REAL, secrets={
+        "ETORO_PRIVATE_KEY": "fake_private_key_for_tests",
+        "ETORO_PUBLIC_KEY": "fake_public_key_for_tests",
+    })
+    scripted = ScriptedTransport([])
+    client = EtoroClient(config, transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(EtoroValidationError, match="unconfirmed"):
+        client.clear_take_profit("request-1", "3550406905")
+    assert len(scripted.requests) == 0
+
+
+@pytest.mark.parametrize("status_code, error", [
+    (429, EtoroRateLimitError), (400, EtoroValidationError), (500, EtoroServerError),
+    (204, EtoroValidationError),
+])
+def test_clear_take_profit_errors_never_retry(status_code: int, error: type[Exception]) -> None:
+    scripted = ScriptedTransport([httpx.Response(status_code)])
+    sleeps: list[float] = []
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler), sleep=sleeps.append
+    )
+    with pytest.raises(error):
+        client.clear_take_profit("request-1", "3550406905")
+    assert len(scripted.requests) == 1
+    assert sleeps == []
 
 
 # ===========================================================================

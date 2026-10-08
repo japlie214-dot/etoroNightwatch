@@ -54,6 +54,7 @@ from .models import (
     Balance,
     Candle,
     CloseRequest,
+    EditPositionAck,
     Eligibility,
     EligibilityBatchResult,
     InstrumentSearchResult,
@@ -1498,6 +1499,49 @@ class EtoroClient:
         return self._order_id_from_write_response(
             response, request_id=request_id, what="close_position"
         )
+
+    def clear_take_profit(self, request_id: str, position_id: str) -> EditPositionAck:
+        """Remove a demo position's broker take-profit with one PATCH.
+
+        The caller must persist ``request_id`` before this call. Acceptance
+        is asynchronous: the caller must re-read the portfolio and check with
+        ``find_broker_take_profits`` to confirm removal.
+        """
+        if not request_id:
+            raise ValueError("clear_take_profit: request_id must be non-empty")
+        if not position_id or not position_id.isdigit():
+            raise ValueError("clear_take_profit: position_id must be non-empty and all digits")
+        if self._demo() == "":
+            raise EtoroValidationError("clear_take_profit: real-account path unconfirmed (T012)")
+        response = self._request(
+            "PATCH",
+            f"/api/v2/trading/{self._demo()}positions/{position_id}",
+            request_class="write",
+            json_body={"clearTakeProfit": True},
+            request_id=request_id,
+        )
+        if response.status_code not in (200, 202):
+            raise EtoroValidationError(
+                f"clear_take_profit: tool refused unexpected status {response.status_code}",
+                status_code=response.status_code,
+            )
+        try:
+            data = response.json()
+        except ValueError:
+            data = None
+        if not isinstance(data, Mapping):
+            data = {}
+        ack = EditPositionAck(
+            operation_id=str(data["operationId"]) if "operationId" in data else None,
+            position_id=str(data["positionId"]) if "positionId" in data else None,
+            reference_id=str(data["referenceId"]) if "referenceId" in data else None,
+            status_code=response.status_code,
+        )
+        if ack.position_id is not None and ack.position_id != position_id:
+            raise EtoroValidationError(
+                f"clear_take_profit: tool refused positionId {ack.position_id}, expected {position_id}"
+            )
+        return ack
 
     # -- orders:lookup, poll to terminal, referenceId recovery ---------------
 
