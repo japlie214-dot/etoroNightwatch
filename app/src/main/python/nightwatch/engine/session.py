@@ -1,6 +1,6 @@
 """Daily session orchestration (doc/DESIGN_session.md §5).
 
-S6c-1: preflight, SPY signal and phase A dry-run decision.
+S6c-2: preflight, SPY signal, phase A dry-run decision and portfolio snapshot.
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Callable, Mapping, Sequence
 import httpx
 
 from ..config import Config, TradingMode
-from ..db.repo import Decision, PriceWindowFingerprint, Repo, utcnow
+from ..db.repo import Decision, PortfolioSnapshot, PriceWindowFingerprint, Repo, SnapshotPosition, utcnow
 from ..etoro.client import EtoroClient
 from ..etoro.models import Balance, Candle, Position, Rate
 from ..host import Host, get_host
@@ -148,6 +148,55 @@ def build_preflight_gates(
 
 class DecideInputError(Exception):
     pass
+
+
+class SnapshotError(Exception):
+    pass
+
+
+def build_snapshot(
+    *, session_id: int, taken_at: str, pnl: Mapping, available_cash: float | None,
+    symbol_by_instrument: Mapping[int, str], session_prices: Mapping[str, float],
+    sleeve: Mapping[str, float],
+) -> PortfolioSnapshot:
+    if "clientPortfolio" not in pnl:
+        raise SnapshotError("snapshot refused: pnl has no clientPortfolio")
+    cp = pnl["clientPortfolio"]
+    positions = []
+    missing = []
+    mark_check = []
+    checked = set()
+    for p in cp["positions"]:
+        u = p.get("unrealizedPnL") or {}
+        position = SnapshotPosition(
+            position_id=str(p["positionID"]), instrument_id=p.get("instrumentID"),
+            symbol=symbol_by_instrument.get(p.get("instrumentID")), units=p.get("units"),
+            entry_price=p.get("openRate"), current_price=u.get("closeRate"),
+            amount=p.get("amount"), leverage=p.get("leverage"),
+            unrealized_pnl=u.get("pnL"), open_date=p.get("openDateTime"),
+        )
+        positions.append(position)
+        if position.current_price is None or position.unrealized_pnl is None or position.amount is None:
+            missing.append(position.position_id)
+        s = position.symbol
+        if s is not None and position.instrument_id not in checked:
+            price = session_prices.get(s)
+            broker = position.current_price
+            mark_check.append({"symbol": s, "session_price": price, "broker_close_rate": broker,
+                               "diff_pct": None if broker is None or price is None or price == 0
+                               else round(100 * (broker - price) / price, 3)})
+            checked.add(position.instrument_id)
+    complete = not missing and cp.get("accountCurrencyId") == 1
+    cash = cp["credit"]
+    return PortfolioSnapshot(
+        session_id=session_id, taken_at=taken_at, cash=cash, available_cash=available_cash,
+        equity=cash + sum(p.amount + p.unrealized_pnl for p in positions) if complete else None,
+        unrealized_pnl=cp.get("unrealizedPnL"), realized_pnl=None, positions=positions,
+        raw={"version": 1, "phase": "post_decision", "source": "pnl", "complete": complete,
+             "missing": missing, "account_currency_id": cp.get("accountCurrencyId"),
+             "managed_instrument_ids": sorted(symbol_by_instrument), "sleeve": dict(sleeve),
+             "mark_check": mark_check, "pnl": pnl},
+    )
 
 
 def build_ladder_inputs(
@@ -348,5 +397,19 @@ def run_session(
         reason += f"; inputs: {'; '.join(notes)}"
     if d.warnings:
         reason += f"; warnings: {'; '.join(d.warnings)}"
+    try:
+        pnl = client.get_pnl()
+        snap = build_snapshot(
+            session_id=s.id, taken_at=utcnow(), pnl=pnl, available_cash=balance.available_cash,
+            symbol_by_instrument={v: k for k, v in mi.instrument_ids.items()},
+            session_prices={s: mi.provisional_closes[s].value for s in mi.provisional_closes},
+            sleeve={"cash_reserve_usd": config.strategy.cash_reserve_usd,
+                    "sleeve_cash": inputs.cash, "sleeve_equity": inputs.equity,
+                    "schg_position_value": inputs.schg_position_value},
+        )
+        sid = repo.insert_snapshot(snap)
+        reason += f"; snapshot {sid}: {len(snap.positions)} position(s), equity={snap.equity}, complete={snap.raw['complete']}"
+    except Exception as e:
+        reason += f"; snapshot failed: {type(e).__name__}: {e}"
     repo.finish_session(s.id, state="finished", outcome=reason)
     return SessionResult(s.id, "would_have_done", None, reason)

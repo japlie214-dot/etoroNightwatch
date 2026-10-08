@@ -62,6 +62,11 @@ class MarketClient:
     def get_balance(self):
         return Balance(1000.0, None, 1000.0)
 
+    def get_pnl(self):
+        return {"clientPortfolio": {
+            "positions": [], "credit": 100001.1, "unrealizedPnL": 0.0, "accountCurrencyId": 1,
+        }}
+
     def probe_environment(self):
         return self.environment
 
