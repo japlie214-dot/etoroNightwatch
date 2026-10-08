@@ -13,6 +13,7 @@ from nightwatch.db.repo import PreflightCheck
 from nightwatch.engine import session
 from nightwatch.engine.preflight import GateResult, GateSpec
 from nightwatch.etoro.models import Eligibility
+from .test_session_market import FakeTiingo, market_client, assembled_signal
 
 
 TRADING_DATE = date(2026, 10, 2)
@@ -77,7 +78,7 @@ def test_armed_refused_without_session(repo, host, config_path, secrets_path, mo
     )
     called = []
     monkeypatch.setattr(session, "build_preflight_gates", lambda **kwargs: fake_gates(called))
-    result = session.run_session(host=host, config=config, repo=repo, client=FakeClient(), trading_date=TRADING_DATE)
+    result = session.run_session(host=host, config=config, repo=repo, client=FakeClient(), tiingo=FakeTiingo(), trading_date=TRADING_DATE)
     assert result == session.SessionResult(None, "refused_armed", None, "armed execution not built (S7); refusing")
     assert repo.latest_session() is None
     assert called == []
@@ -87,7 +88,7 @@ def test_existing_session_is_noop(repo, host, config, monkeypatch):
     existing = repo.create_session(TRADING_DATE.isoformat(), "dry_run", "demo", False)
     called = []
     monkeypatch.setattr(session, "build_preflight_gates", lambda **kwargs: fake_gates(called))
-    result = session.run_session(host=host, config=config, repo=repo, client=FakeClient(), trading_date=TRADING_DATE)
+    result = session.run_session(host=host, config=config, repo=repo, client=FakeClient(), tiingo=FakeTiingo(), trading_date=TRADING_DATE)
     assert result == session.SessionResult(
         existing.id, "already_ran", None,
         f"session {existing.id} already exists for 2026-10-02 (state started)",
@@ -101,7 +102,9 @@ def test_existing_session_is_noop(repo, host, config, monkeypatch):
 def test_session_verdict_persisted(repo, host, config, monkeypatch, failed_gate):
     called = []
     monkeypatch.setattr(session, "build_preflight_gates", lambda **kwargs: fake_gates(called, failed_gate))
-    result = session.run_session(host=host, config=config, repo=repo, client=FakeClient(), trading_date=TRADING_DATE)
+    monkeypatch.setattr(host, "now", lambda: datetime(2026, 10, 2, 12, tzinfo=timezone.utc))
+    monkeypatch.setattr(session, "assemble_spy_signal", lambda *args, **kwargs: assembled_signal())
+    result = session.run_session(host=host, config=config, repo=repo, client=market_client(), tiingo=FakeTiingo(), trading_date=TRADING_DATE, wait=False)
     row = repo.get_session(result.session_id)
     assert row.mode == "dry_run" and row.environment == "demo" and not row.armed
     assert row.preflight_failed_gate == result.failed_gate == failed_gate
@@ -111,10 +114,10 @@ def test_session_verdict_persisted(repo, host, config, monkeypatch, failed_gate)
     checks = repo.get_preflight_checks(row.id)
     assert [c.gate for c in checks] == expected_numbers
     if failed_gate is None:
-        assert result.status == "preflight_passed"
-        assert result.reason == "preflight passed"
-        assert row.state == "settled" and row.preflight_verdict == "pass"
-        assert row.finished_at is None
+        assert result.status == "signal_ready"
+        assert "cone_5_z=" in result.reason
+        assert row.state == "finished" and row.preflight_verdict == "pass"
+        assert row.finished_at is not None
         assert all(c.passed for c in checks)
     else:
         assert result.status == "preflight_failed"
@@ -126,7 +129,7 @@ def test_session_verdict_persisted(repo, host, config, monkeypatch, failed_gate)
 
 def test_build_gates_lazy_wiring_and_portfolio_cache(repo, host, config, monkeypatch):
     config = replace(config, risk=replace(config.risk, max_open_lots=10))
-    client = FakeClient()
+    client = market_client()
     s = repo.create_session(TRADING_DATE.isoformat(), "dry_run", "demo", False, state="preflight")
     calls = []
     fixed_now = datetime(2026, 10, 2, 12, tzinfo=timezone.utc)
@@ -137,12 +140,13 @@ def test_build_gates_lazy_wiring_and_portfolio_cache(repo, host, config, monkeyp
 
     monkeypatch.setattr(session.httpx, "get", get)
     gates = session.build_preflight_gates(
-        host=host, config=config, repo=repo, client=client,
+        host=host, config=config, repo=repo, client=client, tiingo=FakeTiingo(),
         session_id=s.id, trading_date=TRADING_DATE, now=lambda: fixed_now,
     )
     assert [g.number for g in gates] == list(range(1, 13))
     assert calls == [] and client.portfolio_calls == 0 and client.order_sizes == []
-    assert gates[9].check() == GateResult(10, "price_data", False, "not implemented")
+    assert client.market_calls == []
+    assert gates[9].check().passed
     assert all(g.check().passed for g in gates[:9])
     assert calls == [(config.etoro.base_url + "/", {"timeout": 10.0, "follow_redirects": False})] * 2
     assert client.order_sizes == [(2, config.strategy.min_order_size), (3, config.strategy.min_order_size)]
@@ -154,7 +158,7 @@ def test_build_gates_lazy_wiring_and_portfolio_cache(repo, host, config, monkeyp
 def test_gate_12_without_gate_11_fetches_portfolio(repo, host, config):
     client = FakeClient()
     gates = session.build_preflight_gates(
-        host=host, config=config, repo=repo, client=client, session_id=1, trading_date=TRADING_DATE,
+        host=host, config=config, repo=repo, client=client, tiingo=FakeTiingo(), session_id=1, trading_date=TRADING_DATE,
     )
     assert gates[11].check().gate == 12
     assert client.portfolio_calls == 1
@@ -164,7 +168,7 @@ def test_halt_stops_before_network(repo, host, config):
     host.halt_flag_path().parent.mkdir(parents=True, exist_ok=True)
     host.halt_flag_path().write_text("halt")
     client = FakeClient()
-    result = session.run_session(host=host, config=config, repo=repo, client=client, trading_date=TRADING_DATE)
+    result = session.run_session(host=host, config=config, repo=repo, client=client, tiingo=FakeTiingo(), trading_date=TRADING_DATE)
     assert result.status == "preflight_failed" and result.failed_gate == 1
     assert [r.gate for r in repo.get_preflight_checks(result.session_id)] == [1]
     assert client.portfolio_calls == 0
@@ -187,9 +191,12 @@ def test_fetch_server_date(monkeypatch, connect_error):
     assert calls == [("https://example.test/", {"timeout": 2.0, "follow_redirects": False})]
 
 
-@pytest.mark.parametrize("status", ["preflight_failed", "refused_armed", "preflight_passed", "already_ran"])
-def test_cli_run_summary(host, config, monkeypatch, capsys, status):
+@pytest.mark.parametrize("status", ["preflight_failed", "refused_armed", "signal_ready", "already_ran", "rerun_failed", "signal_failed"])
+@pytest.mark.parametrize("no_wait", [False, True])
+def test_cli_run_summary(host, config, monkeypatch, capsys, status, no_wait):
     client = FakeClient()
+    tiingo = FakeTiingo()
+    monkeypatch.setattr(cli, "TiingoClient", lambda c: tiingo if c is config.tiingo else None)
     monkeypatch.setattr(cli, "load_config", lambda **kwargs: config)
     monkeypatch.setattr(cli, "get_host", lambda: host)
 
@@ -201,6 +208,8 @@ def test_cli_run_summary(host, config, monkeypatch, capsys, status):
     def run_session(**kwargs):
         assert kwargs["trading_date"] == date(2026, 10, 3)
         assert kwargs["client"] is client
+        assert kwargs["tiingo"] is tiingo
+        assert kwargs["wait"] is not no_wait
         if status == "refused_armed":
             return session.SessionResult(None, status, None, "armed execution not built (S7); refusing")
         repo = kwargs["repo"]
@@ -211,7 +220,7 @@ def test_cli_run_summary(host, config, monkeypatch, capsys, status):
 
     monkeypatch.setattr(cli, "EtoroClient", make_client)
     monkeypatch.setattr(cli, "run_session", run_session)
-    assert cli.main(["run", "--date", "2026-10-03"]) == (1 if status in ("preflight_failed", "refused_armed") else 0)
+    assert cli.main(["run", "--date", "2026-10-03"] + (["--no-wait"] if no_wait else [])) == (0 if status in ("signal_ready", "already_ran") else 1)
     out = capsys.readouterr().out
     assert f"status: {status}" in out
     assert "session_id:" in out and "failed_gate:" in out and "reason:" in out
@@ -222,3 +231,4 @@ def test_cli_run_summary(host, config, monkeypatch, capsys, status):
     else:
         assert "gate 3 network PASS ok" in out
     assert client.closed
+    assert tiingo.closed

@@ -2,7 +2,7 @@
 
 Subcommands: ``run | seed | webapp | status | halt | resume | initdb``.
 
-``run`` performs dry-run preflight only. ``initdb``, ``halt``, ``resume``
+``run`` performs dry-run preflight and signal assembly. ``initdb``, ``halt``, ``resume``
 and ``status`` touch the database and the halt flag. The rest
 (``seed``, ``webapp``) need pieces
 that later build steps deliver (DESIGN §10) and print a clear
@@ -25,6 +25,7 @@ from .db.repo import Repo, default_db_path
 from .engine.session import run_session
 from .etoro.client import EtoroClient
 from .host import Host, get_host
+from .market.source import TiingoClient
 
 __all__ = ["main", "build_parser", "set_halt", "clear_halt"]
 
@@ -49,8 +50,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    run = sub.add_parser("run", help="run one trading session (dry-run preflight)")
+    run = sub.add_parser("run", help="run one trading session (dry-run signal)")
     run.add_argument("--date", type=date.fromisoformat, default=None, help="trading date YYYY-MM-DD")
+    run.add_argument("--no-wait", action="store_true", help="skip the wait until T-30")
     seed = sub.add_parser("seed", help="seed daily bar history (build step 3)")
     seed.add_argument("--count", type=int, default=400, help="bars to seed per symbol")
     sub.add_parser("webapp", help="serve the embedded dashboard (build step 8)")
@@ -77,9 +79,15 @@ def _cmd_run(args: argparse.Namespace) -> int:
     with Repo.open(default_db_path(host), host=host) as repo:
         client = EtoroClient(config.etoro, role="read", repo=repo)
         try:
-            result = run_session(
-                host=host, config=config, repo=repo, client=client, trading_date=trading_date,
-            )
+            tiingo = TiingoClient(config.tiingo)
+            try:
+                result = run_session(
+                    host=host, config=config, repo=repo, client=client, trading_date=trading_date,
+                    tiingo=tiingo, wait=not args.no_wait,
+                )
+            finally:
+                if hasattr(tiingo, "close"):
+                    tiingo.close()
             print(f"status: {result.status}")
             print(f"session_id: {result.session_id}")
             print(f"failed_gate: {result.failed_gate}")
@@ -90,7 +98,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     print(f"gate {row.gate} {row.name} {'PASS' if row.passed else 'FAIL'} {reason}")
         finally:
             client.close()
-    return 0 if result.status in ("preflight_passed", "already_ran") else 1
+    return 0 if result.status in ("signal_ready", "already_ran") else 1
 
 
 def _cmd_initdb(args: argparse.Namespace) -> int:
