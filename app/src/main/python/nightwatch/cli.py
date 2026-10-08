@@ -26,6 +26,7 @@ from .engine.session import run_session
 from .etoro.client import EtoroClient
 from .host import Host, get_host
 from .market.source import TiingoClient
+from .notify.telegram import TelegramNotifier
 
 __all__ = ["main", "build_parser", "set_halt", "clear_halt"]
 
@@ -78,12 +79,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
     trading_date = args.date or datetime.now(ZoneInfo("America/New_York")).date()
     with Repo.open(default_db_path(host), host=host) as repo:
         client = EtoroClient(config.etoro, role="read", repo=repo)
+        notifier = TelegramNotifier(config.telegram, repo, environment=config.environment.value)
         try:
             tiingo = TiingoClient(config.tiingo)
             try:
                 result = run_session(
                     host=host, config=config, repo=repo, client=client, trading_date=trading_date,
-                    tiingo=tiingo, wait=not args.no_wait,
+                    tiingo=tiingo, wait=not args.no_wait, notifier=notifier,
                 )
             finally:
                 if hasattr(tiingo, "close"):
@@ -98,6 +100,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     print(f"gate {row.gate} {row.name} {'PASS' if row.passed else 'FAIL'} {reason}")
         finally:
             client.close()
+            notifier.close()
     return 0 if result.status in ("would_have_done", "already_ran") else 1
 
 

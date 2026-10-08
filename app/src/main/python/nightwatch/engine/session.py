@@ -6,7 +6,7 @@ S6c-2: preflight, SPY signal, phase A dry-run decision and portfolio snapshot.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 import logging
 import time
 from typing import Callable, Mapping, Sequence
@@ -18,9 +18,10 @@ from ..db.repo import Decision, PortfolioSnapshot, PriceWindowFingerprint, Repo,
 from ..etoro.client import EtoroClient
 from ..etoro.models import Balance, Candle, Position, Rate
 from ..host import Host, get_host
-from ..market.calendar import session_close_datetime
+from ..market.calendar import next_close_minus, session_close_datetime
 from ..market.source import IexQuote, TiingoClient
 from ..market.window import AssembledSignal, WindowAssemblyError, assemble_spy_signal, resolve_provisional_close
+from ..notify.telegram import TelegramNotifier
 from ..strategy.ladder import decide, LadderConfig, LadderLot, ReentryBucket, LadderInputs, LadderIntent
 from ..strategy.state import load
 from .preflight import (
@@ -280,7 +281,7 @@ def intent_to_dict(i: LadderIntent) -> dict:
             "position_ref": i.position_ref, "reason": i.reason, "book": i.book}
 
 
-def run_session(
+def _run_session_core(
     *, host: Host, config: Config, repo: Repo, client: EtoroClient, trading_date: date,
     tiingo: TiingoClient, wait: bool = True,
     sleep_until: Callable[[datetime], None] = _sleep_until,
@@ -413,3 +414,51 @@ def run_session(
         reason += f"; snapshot failed: {type(e).__name__}: {e}"
     repo.finish_session(s.id, state="finished", outcome=reason)
     return SessionResult(s.id, "would_have_done", None, reason)
+
+
+def format_session_report(
+    result: SessionResult, *, trading_date: date, environment: str, next_run_at: str,
+) -> str:
+    session = f"session {result.session_id}" if result.session_id is not None else "no session"
+    gate = f" (gate {result.failed_gate})" if result.failed_gate is not None else ""
+    reason = result.reason if result.reason is not None else "(no reason)"
+    return (
+        f"[{environment.upper()}] NIGHTWATCH {trading_date.isoformat()} {session}: {result.status}{gate}\n"
+        f"{reason}\n"
+        f"next run: {next_run_at}"
+    )
+
+
+def run_session(
+    *, host: Host, config: Config, repo: Repo, client: EtoroClient, trading_date: date,
+    tiingo: TiingoClient, wait: bool = True,
+    sleep_until: Callable[[datetime], None] = _sleep_until,
+    notifier: "TelegramNotifier | None" = None,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> SessionResult:
+    result = _run_session_core(
+        host=host, config=config, repo=repo, client=client, trading_date=trading_date,
+        tiingo=tiingo, wait=wait, sleep_until=sleep_until,
+    )
+    if result.status == "already_ran":
+        return result
+    next_run = next_close_minus(45, after=now())
+    next_iso = next_run.astimezone(timezone.utc).isoformat(timespec="seconds")
+    if result.session_id is not None:
+        try:
+            repo.update_session(result.session_id, next_run_at=next_iso)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Session next_run_at update failed: %s", exc)
+    if notifier is not None:
+        try:
+            text = format_session_report(
+                result, trading_date=trading_date, environment=config.environment.value,
+                next_run_at=next_iso,
+            )
+            notifier.send(
+                text, event="session_report", session_id=result.session_id,
+                trading_date=trading_date.isoformat(),
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Session report failed: %s", exc)
+    return result
