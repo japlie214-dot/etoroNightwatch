@@ -43,6 +43,7 @@ class MarketClient:
     def __init__(self):
         self.rates = {i: Rate(i, 99.9, 100.1, 100.0, NOW.isoformat()) for i in IDS.values()}
         self.candles = {i: [Candle("2026-10-02", 100, 101, 99, 100, timestamp=NOW.isoformat(), interval="OneDay")] for i in IDS.values()}
+        self.minute_candles = {i: [replace(self.candles[i][0], interval="OneMinute")] for i in IDS.values()}
         self.market_calls = []
         self.portfolio_calls = 0
         self.order_sizes = []
@@ -54,10 +55,10 @@ class MarketClient:
         self.market_calls.append(("rates", ids))
         return self.rates
 
-    def get_candles(self, instrument_id, *, count):
+    def get_candles(self, instrument_id, *, count, interval="OneDay"):
         assert count == 1
-        self.market_calls.append(("candles", instrument_id, count))
-        return self.candles[instrument_id]
+        self.market_calls.append(("candles", instrument_id, count, interval))
+        return (self.minute_candles if interval == "OneMinute" else self.candles)[instrument_id]
 
     def get_balance(self):
         return Balance(1000.0, None, 1000.0)
@@ -109,18 +110,24 @@ def test_fetch_rekeys_and_falls_back(caplog):
     mi = session.fetch_market_inputs(tiingo=tiingo, client=client, symbols=list(IDS))
     assert mi.instrument_ids == IDS
     assert mi.rates == {s: client.rates[i] for s, i in IDS.items()}
+    assert mi.candles == {s: client.candles[i][-1] for s, i in IDS.items()}
+    assert mi.minute_candles == {s: client.minute_candles[i][-1] for s, i in IDS.items()}
     assert all(p.source == "etoro_candle" and p.value == 100 for p in mi.provisional_closes.values())
     assert mi.iex == dict.fromkeys(IDS) and mi.errors == {}
     assert tiingo.calls == [list(IDS)]
-    assert client.market_calls == [("rates", [1, 2, 3]), ("candles", 1, 1), ("candles", 2, 1), ("candles", 3, 1)]
+    assert client.market_calls == [("rates", [1, 2, 3])] + [("candles", i, 1, interval) for interval in ("OneDay", "OneMinute") for i in IDS.values()]
     assert "Tiingo IEX unavailable; using candle fallback: IEX offline" in caplog.text
 
 
-@pytest.mark.parametrize("case", ["fresh", "stale", "missing", "missing_rate"])
+@pytest.mark.parametrize("case", ["fresh", "delayed", "stale", "missing_minute", "missing", "missing_rate"])
 def test_price_gate(repo, host, config, case):
     client, tiingo = market_client(), FakeTiingo()
     if case == "stale":
-        client.candles[2] = [replace(client.candles[2][0], interval="OneMinute", timestamp=(NOW - timedelta(hours=1)).isoformat())]
+        client.minute_candles[2] = [replace(client.minute_candles[2][0], timestamp=(NOW - timedelta(hours=1)).isoformat())]
+    elif case == "delayed":
+        client.rates = {i: replace(r, timestamp=(NOW - timedelta(minutes=43)).isoformat()) for i, r in client.rates.items()}
+    elif case == "missing_minute":
+        client.minute_candles[2] = []
     elif case == "missing":
         client.candles[2] = []
         tiingo.offline = True
@@ -129,9 +136,15 @@ def test_price_gate(repo, host, config, case):
     gates = session.build_preflight_gates(host=host, config=config, repo=repo, client=client, tiingo=tiingo, session_id=1, trading_date=DAY, now=lambda: NOW)
     assert client.market_calls == [] and tiingo.calls == []
     result = gates[9].check()
-    assert result.passed is (case == "fresh")
+    assert result.passed is (case in ("fresh", "delayed"))
     if case == "stale":
         assert "SCHG: eToro candle is 60.0 minutes old" in result.reason
+    elif case == "delayed":
+        assert "SPY: eToro rate delayed 43 min (advisory, T021)" in result.reason
+    elif case == "missing_minute":
+        assert "SCHG: no eToro 1-minute candle available to establish freshness" in result.reason
+        mi = session.fetch_market_inputs(tiingo=tiingo, client=client, symbols=list(IDS))
+        assert mi.minute_candles["SCHG"] is None and mi.candles["SCHG"] is not None
     elif case == "missing":
         assert result.reason.startswith("no provisional close: SCHG:")
         assert list(result.details["errors"]) == ["SCHG"]
@@ -150,6 +163,21 @@ def test_etoro_errors_propagate():
         session.fetch_market_inputs(tiingo=FakeTiingo(), client=client, symbols=list(IDS))
 
 
+@pytest.mark.parametrize("interval", ["OneDay", "OneMinute"])
+def test_etoro_candle_errors_propagate(interval):
+    client, tiingo = market_client(), FakeTiingo()
+    get_candles = client.get_candles
+    def fail(instrument_id, *, count, interval="OneDay"):
+        if interval == failing_interval:
+            raise RuntimeError(f"eToro {interval} candles offline")
+        return get_candles(instrument_id, count=count, interval=interval)
+    failing_interval = interval
+    client.get_candles = fail
+    with pytest.raises(RuntimeError, match=f"eToro {interval} candles offline"):
+        session.fetch_market_inputs(tiingo=tiingo, client=client, symbols=list(IDS))
+    assert tiingo.calls == []
+
+
 @pytest.mark.parametrize("wait", [True, False])
 @pytest.mark.parametrize("path", ["success", "rerun_failed", "rerun_missing", "signal_failed"])
 def test_session_market(repo, host, config, monkeypatch, wait, path):
@@ -162,13 +190,14 @@ def test_session_market(repo, host, config, monkeypatch, wait, path):
         sleeps.append(target)
         clock[0] = target
         client.rates = {i: replace(r, timestamp=target.isoformat()) for i, r in client.rates.items()}
+        client.minute_candles = {i: [replace(c, timestamp=target.isoformat()) for c in candles] for i, candles in client.minute_candles.items()}
 
     build_gates = session.build_preflight_gates
     def gates(**kwargs):
         real = build_gates(**kwargs)[9]
         def after_preflight():
             if path == "rerun_failed":
-                client.candles[2] = [replace(client.candles[2][0], close=50)]
+                client.minute_candles[2] = [replace(client.minute_candles[2][0], close=50)]
             elif path == "rerun_missing":
                 client.candles[2] = []
                 tiingo.offline = True
@@ -192,7 +221,7 @@ def test_session_market(repo, host, config, monkeypatch, wait, path):
     client.get_portfolio = lambda: [Position("1", IDS["UPRO"], 1, 100, 100, 1, True)]
     result = session.run_session(host=host, config=config, repo=repo, client=client, tiingo=tiingo, trading_date=DAY, wait=wait, sleep_until=sleep_until)
     assert sleeps == ([session.session_close_datetime(DAY) - timedelta(minutes=30)] if wait else [])
-    assert len(tiingo.calls) == 2 and len(client.market_calls) == 8
+    assert len(tiingo.calls) == 2 and len(client.market_calls) == 14
     row = repo.get_session(result.session_id)
     assert row.finished_at is not None
     checks = repo.get_preflight_checks(row.id)

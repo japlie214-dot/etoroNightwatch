@@ -978,6 +978,15 @@ window assembly (build steps 3–4, §12) that has not been built yet.
 
 ### Gate 10 — Price data
 
+**T021 (2026-10-09):** freshness now comes from eToro `OneMinute` candles,
+bounded by `max_candle_age_minutes_intraday` (20 minutes). The market-open
+probe found SPY/UPRO `/rates` delayed by about 22/43 minutes while all three
+managed symbols' minute candles were about 61 seconds old. Rate delay is
+advisory only and skips the rate value comparison; fresh rates, or rates with
+unusable timestamps, are still compared against the minute close. Tiingo
+provisional closes are also compared against the minute close. Daily candles
+and provisional-close selection used by the decision and signal are unchanged.
+
 1. **Freshness of the provisional close.** This must validate whichever source supplies the
    provisional close — Tiingo IEX `tngoLast` (primary, §3.1) or eToro's candles (fallback,
    §3.1) — not the rates endpoint, which §2.9 and §3.1 establish is never used for this value.

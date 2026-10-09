@@ -38,6 +38,7 @@ class MarketInputs:
     iex: dict[str, IexQuote | None]
     rates: dict[str, Rate]
     candles: dict[str, Candle | None]
+    minute_candles: dict[str, Candle | None]
     provisional_closes: dict[str, ProvisionalClose]
     instrument_ids: dict[str, int]
     errors: dict[str, str]
@@ -50,6 +51,7 @@ def fetch_market_inputs(
     rates_by_id = client.get_rates(list(ids.values()))
     rates = {s: rates_by_id[i] for s, i in ids.items() if i in rates_by_id}
     candles = {s: (client.get_candles(ids[s], count=1) or [None])[-1] for s in symbols}
+    minute_candles = {s: (client.get_candles(ids[s], count=1, interval="OneMinute") or [None])[-1] for s in symbols}
     try:
         quotes = tiingo.get_iex_quotes(list(symbols))
     except Exception as exc:
@@ -64,7 +66,7 @@ def fetch_market_inputs(
             )
         except WindowAssemblyError as exc:
             errors[s] = f"{s}: {exc}"
-    return MarketInputs({s: quotes.get(s) for s in symbols}, rates, candles, provisional_closes, ids, errors)
+    return MarketInputs({s: quotes.get(s) for s in symbols}, rates, candles, minute_candles, provisional_closes, ids, errors)
 
 
 def _sleep_until(target: datetime, *, host: Host | None = None) -> None:
@@ -104,6 +106,7 @@ def build_preflight_gates(
             now=now(), managed_symbols=config.symbols.all,
             provisional_closes=mi.provisional_closes, rates=mi.rates,
             candles={k: v for k, v in mi.candles.items() if v is not None},
+            minute_candles=mi.minute_candles,
             config=config.market_data,
         )
 
@@ -332,6 +335,7 @@ def _run_session_core(
             now=host.now(), managed_symbols=config.symbols.all,
             provisional_closes=mi.provisional_closes, rates=mi.rates,
             candles={k: v for k, v in mi.candles.items() if v is not None},
+            minute_candles=mi.minute_candles,
             config=config.market_data,
         )
     if not g.passed:

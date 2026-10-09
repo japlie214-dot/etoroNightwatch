@@ -11,7 +11,7 @@ pass: a gate that fails everything is not a working gate.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -80,6 +80,10 @@ def _candle(
 # ---------------------------------------------------------------------------
 
 
+def _minute_candle(close: float, ts: datetime) -> Candle:
+    return _candle(ts.date().isoformat(), close, when=ts, interval="OneMinute")
+
+
 def _upro_stale_fixture() -> tuple[dict[str, Rate], dict[str, Candle], dict[str, ProvisionalClose]]:
     rates = {
         # SPY and SCHG ticked forward to the second in the same batch request
@@ -115,27 +119,26 @@ def _upro_stale_fixture() -> tuple[dict[str, Rate], dict[str, Candle], dict[str,
 
 def test_gate_10_fails_and_names_upro_on_the_2026_09_04_evidence() -> None:
     rates, candles, provisional = _upro_stale_fixture()
+    candles["UPRO"] = _minute_candle(151.19, PROBE_NOW - timedelta(hours=19))
     result = gate_10_price_data(
         now=PROBE_NOW,
         managed_symbols=SYMBOLS,
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert isinstance(result, GateResult)
     assert result.passed is False
     assert result.gate == 10
     assert "UPRO" in result.reason
-    assert "UPRO" in result.details["stale_symbols"]
-    # SPY and SCHG must NOT be implicated -- only the genuinely stale symbol.
-    assert "SPY" not in result.details["stale_symbols"]
-    assert "SCHG" not in result.details["stale_symbols"]
-    # The age is named, not just the fact of staleness.
-    assert any("h old" in msg for msg in result.details["rate_vs_candle_failures"])
+    assert result.details["rate_vs_candle_failures"] == []
+    assert len(result.details["provisional_close_failures"]) == 1
+    assert "UPRO: eToro candle is 1140.0 minutes old" in result.reason
 
 
-def test_gate_10_failure_reason_reports_roughly_19_hours() -> None:
+def test_gate_10_reports_19_hour_rate_delay_as_advisory() -> None:
     rates, candles, provisional = _upro_stale_fixture()
     result = gate_10_price_data(
         now=PROBE_NOW,
@@ -143,12 +146,12 @@ def test_gate_10_failure_reason_reports_roughly_19_hours() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
-    upro_failure = next(
-        msg for msg in result.details["rate_vs_candle_failures"] if "UPRO" in msg
-    )
-    assert "19." in upro_failure  # ~19.0h -- do not overfit to one decimal digit
+    assert result.passed is True
+    assert "UPRO: eToro rate delayed 1155 min" in result.reason
+    assert result.details["rate_advisories"] == ["UPRO: eToro rate delayed 1155 min (advisory, T021)"]
 
 
 def test_gate_10_would_also_fail_on_deviation_alone_if_timestamp_were_missing() -> None:
@@ -171,6 +174,7 @@ def test_gate_10_would_also_fail_on_deviation_alone_if_timestamp_were_missing() 
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
@@ -209,6 +213,7 @@ def test_gate_10_passes_when_everything_is_fresh_and_consistent() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is True
@@ -217,6 +222,76 @@ def test_gate_10_passes_when_everything_is_fresh_and_consistent() -> None:
     assert result.details["sanity_failures"] == []
     assert result.details["rate_vs_candle_failures"] == []
     assert result.details["provisional_close_failures"] == []
+
+
+def test_gate_10_delayed_rates_with_fresh_minute_candles_pass() -> None:
+    now = datetime(2026, 10, 9, 15, 25, tzinfo=timezone.utc)
+    rates, candles, provisional = _all_fresh_fixture()
+    for symbol, delay in (("SPY", 22), ("UPRO", 43), ("SCHG", 0)):
+        close = candles[symbol].close
+        candles[symbol] = _minute_candle(close, now - timedelta(seconds=60))
+        # Delayed values disagree: they must not be cross-checked.
+        rates[symbol] = _fresh_rate(rates[symbol].instrument_id, close * (1.02 if delay else 1), when=now - timedelta(minutes=delay))
+        provisional[symbol] = ProvisionalClose(symbol, "tiingo_iex", close * 1.002)
+    result = gate_10_price_data(
+        now=now, managed_symbols=SYMBOLS, provisional_closes=provisional,
+        rates=rates, candles={}, minute_candles=candles, config=_config(),
+    )
+    assert result.passed is True
+    assert result.reason.startswith("provisional close and eToro 1-minute candles fresh and mutually consistent for all managed symbols (SPY, SCHG, UPRO)")
+    assert "delayed 22 min (advisory" in result.reason
+    assert "delayed 43 min (advisory" in result.reason
+    assert result.details["rate_advisories"] == [
+        "SPY: eToro rate delayed 22 min (advisory, T021)",
+        "UPRO: eToro rate delayed 43 min (advisory, T021)",
+    ]
+    assert result.details["rate_vs_candle_failures"] == []
+
+
+@pytest.mark.parametrize("case, message", [
+    ("rate_deviation", "eToro's 1-minute candle close"),
+    ("old_minute", "25.0 minutes old"),
+    ("missing_minute", "no eToro 1-minute candle available to establish freshness"),
+    ("tiingo_deviation", "1.50%"),
+])
+def test_gate_10_minute_candle_failures(case, message) -> None:
+    rates, candles, provisional = _all_fresh_fixture()
+    if case == "rate_deviation":
+        rates["UPRO"] = _fresh_rate(3244, candles["UPRO"].close * 1.01, when=PROBE_NOW)
+    elif case == "old_minute":
+        candles["UPRO"] = _minute_candle(151.6, PROBE_NOW - timedelta(minutes=25))
+    elif case == "missing_minute":
+        candles["UPRO"] = None
+    else:
+        provisional["UPRO"] = ProvisionalClose("UPRO", "tiingo_iex", candles["UPRO"].close * 1.015)
+    rates["SPY"] = _fresh_rate(3000, 769.62, when=PROBE_NOW - timedelta(minutes=22))
+    result = gate_10_price_data(
+        now=PROBE_NOW, managed_symbols=SYMBOLS, provisional_closes=provisional,
+        rates=rates, candles={}, minute_candles=candles, config=_config(),
+    )
+    assert result.passed is False
+    assert "UPRO" in result.reason and message in result.reason
+    assert result.reason.endswith("; advisory: SPY: eToro rate delayed 22 min (advisory, T021)")
+
+
+@pytest.mark.parametrize("timestamp", [None, "not-a-timestamp"])
+def test_gate_10_unusable_rate_timestamp_is_advisory_but_still_cross_checked(timestamp) -> None:
+    rates, candles, provisional = _all_fresh_fixture()
+    rate = rates["UPRO"]
+    rates["UPRO"] = Rate(rate.instrument_id, rate.bid, rate.ask, rate.last_execution, timestamp)
+    result = gate_10_price_data(
+        now=PROBE_NOW, managed_symbols=SYMBOLS, provisional_closes=provisional,
+        rates=rates, candles={}, minute_candles=candles, config=_config(),
+    )
+    assert result.passed is True
+    assert result.details["rate_advisories"] == ["UPRO: eToro rate timestamp unusable (advisory, T021)"]
+    rates["UPRO"] = Rate(rate.instrument_id, rate.bid, rate.ask, candles["UPRO"].close * 1.01, timestamp)
+    result = gate_10_price_data(
+        now=PROBE_NOW, managed_symbols=SYMBOLS, provisional_closes=provisional,
+        rates=rates, candles={}, minute_candles=candles, config=_config(),
+    )
+    assert result.passed is False
+    assert "eToro's 1-minute candle close" in result.reason
 
 
 def test_gate_10_fallback_provisional_close_from_etoro_candle_is_not_cross_checked_against_itself() -> None:
@@ -237,6 +312,7 @@ def test_gate_10_fallback_provisional_close_from_etoro_candle_is_not_cross_check
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is True
@@ -269,6 +345,7 @@ def test_gate_10_fails_when_tiingo_close_agrees_with_a_stale_candle() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
@@ -296,6 +373,7 @@ def test_gate_10_fails_when_etoro_candle_sourced_close_is_backed_by_a_stale_cand
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
@@ -326,6 +404,7 @@ def test_gate_10_fails_closed_when_candle_timestamp_is_missing() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
@@ -356,6 +435,7 @@ def test_gate_10_oneday_candle_hours_old_does_not_spuriously_fail() -> None:
     rates, candles, provisional = _all_fresh_fixture()
     hours_old = PROBE_NOW.replace(hour=0, minute=0, second=0, microsecond=0)
     candles["UPRO"] = _candle("2026-09-04", 151.6, when=hours_old, interval="OneDay")
+    minute_candles = {s: _minute_candle(c.close, PROBE_NOW) for s, c in candles.items()}
     # Tiingo IEX value agrees closely with the (functionally current) daily
     # candle close -- well within provisional_close_deviation_pct.
     provisional["UPRO"] = ProvisionalClose(symbol="UPRO", source="tiingo_iex", value=151.62)
@@ -365,6 +445,7 @@ def test_gate_10_oneday_candle_hours_old_does_not_spuriously_fail() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=minute_candles,
         config=_config(),
     )
     assert result.passed is True
@@ -385,6 +466,7 @@ def test_gate_10_still_fails_for_a_genuinely_stale_oneminute_candle() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
@@ -408,6 +490,7 @@ def test_gate_10_fails_closed_for_an_unrecognised_candle_interval() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
@@ -438,6 +521,7 @@ def test_gate_10_fails_closed_for_a_missing_candle_interval() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
@@ -461,6 +545,7 @@ def test_gate_10_fails_when_a_managed_symbol_has_no_live_rate() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
@@ -476,6 +561,7 @@ def test_gate_10_fails_when_a_live_rate_is_zero() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
@@ -487,23 +573,18 @@ def test_gate_10_includes_spy_in_every_check_even_though_it_is_never_bought() ->
     would leave cone_5_z itself unguarded -- confirm a SPY-only staleness
     still fails the gate."""
     rates, candles, provisional = _all_fresh_fixture()
-    rates["SPY"] = Rate(
-        instrument_id=3000,
-        bid=769.62,
-        ask=769.66,
-        last_execution=769.62,
-        timestamp="2026-09-03T14:00:00.000000Z",  # >24h before PROBE_NOW
-    )
+    candles["SPY"] = _minute_candle(769.6, PROBE_NOW - timedelta(minutes=25))
     result = gate_10_price_data(
         now=PROBE_NOW,
         managed_symbols=SYMBOLS,
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     assert result.passed is False
-    assert "SPY" in result.details["stale_symbols"]
+    assert "SPY: eToro candle is 25.0 minutes old" in result.reason
 
 
 # ---------------------------------------------------------------------------
@@ -534,12 +615,14 @@ class _RecordingNotifier:
 
 def test_notify_gate_10_failure_calls_preflight_result_naming_the_gate() -> None:
     rates, candles, provisional = _upro_stale_fixture()
+    candles["UPRO"] = _minute_candle(151.19, PROBE_NOW - timedelta(minutes=25))
     result = gate_10_price_data(
         now=PROBE_NOW,
         managed_symbols=SYMBOLS,
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     notifier = _RecordingNotifier()
@@ -560,6 +643,7 @@ def test_notify_gate_10_failure_refuses_a_passing_result() -> None:
         provisional_closes=provisional,
         rates=rates,
         candles=candles,
+        minute_candles=candles,
         config=_config(),
     )
     notifier = _RecordingNotifier()

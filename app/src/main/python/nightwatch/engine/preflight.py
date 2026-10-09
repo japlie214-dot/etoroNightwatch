@@ -621,12 +621,12 @@ def _check_rate_sanity(
 def _check_rates_vs_candles(
     symbols: Sequence[str],
     rates: Mapping[str, Rate],
-    candles: Mapping[str, Candle],
+    candles: Mapping[str, Candle | None],
     *,
     now: datetime,
     max_age_minutes: float,
     max_deviation_pct: float,
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[str]]:
     """The free internal cross-check (DESIGN_market_data.md §5, §6 gate 10
     item 1): eToro's own rates path against eToro's own candles path, for
     every managed symbol independently -- including SPY, since the stale
@@ -634,29 +634,19 @@ def _check_rates_vs_candles(
     probe, UPRO stale with the market **open** on 2026-09-04) and SPY drives
     ``cone_5_z`` even though it is never bought.
 
-    Two independent tells, either one sufficient to fail a symbol:
+    Since T021, rate age is advisory only. Delayed rates skip the value
+    comparison against the minute candle; fresh rates and rates with an
+    unusable timestamp still fail on disagreement.
 
-    * **Age.** ``Rate.timestamp`` (already parsed by
-      :meth:`EtoroClient.get_rates`, currently dropped downstream) older
-      than ``max_age_minutes``. This is exactly what would have caught
-      §2.9's UPRO evidence directly: ``date=2026-09-03T19:59:54.8409896Z``
-      against a probe taken with the market open the next day is ~19.0
-      hours old.
-    * **Value.** The rate's price deviates from the candle's close by more
-      than ``max_deviation_pct``. This is the fallback for the case a
-      timestamp is missing or unparseable, and it independently confirms
-      the age-based finding on the UPRO fixture (153.67 vs a concurrent,
-      current candle close of ~151, a +1.3%-scale gap -- DESIGN_market_data
-      .md §2.9's quantified error).
-
-    Returns ``(failures, stale_symbols)``.
+    Returns ``(failures, stale_symbols, advisories)``.
     """
     failures: list[str] = []
     stale_symbols: list[str] = []
+    advisories: list[str] = []
     for symbol in symbols:
         rate = rates.get(symbol)
         candle = candles.get(symbol)
-        if rate is None or candle is None:
+        if rate is None:
             # Absence is handled by _check_rate_sanity / the provisional-close
             # check; this cross-check needs both sides present to compare.
             continue
@@ -667,13 +657,12 @@ def _check_rates_vs_candles(
             age_minutes = (now - parsed).total_seconds() / 60.0
 
         if age_minutes is not None and age_minutes > max_age_minutes:
-            failures.append(
-                f"{symbol}: eToro rate is {age_minutes / 60.0:.1f}h old "
-                f"(timestamp={rate.timestamp}), exceeding the "
-                f"{max_age_minutes:.0f}-minute freshness bound -- eToro "
-                f"candles show a current price"
-            )
-            stale_symbols.append(symbol)
+            advisories.append(f"{symbol}: eToro rate delayed {age_minutes:.0f} min (advisory, T021)")
+            continue
+
+        if parsed is None:
+            advisories.append(f"{symbol}: eToro rate timestamp unusable (advisory, T021)")
+        if candle is None:
             continue
 
         rate_price = _rate_price(rate)
@@ -682,13 +671,13 @@ def _check_rates_vs_candles(
             if deviation > max_deviation_pct:
                 failures.append(
                     f"{symbol}: eToro rate ({rate_price}) disagrees with "
-                    f"eToro's own candle close ({candle.close}) by "
+                    f"eToro's 1-minute candle close ({candle.close}) by "
                     f"{deviation * 100:.2f}%, exceeding the "
                     f"{max_deviation_pct * 100:.2f}% tolerance"
                 )
                 stale_symbols.append(symbol)
 
-    return failures, stale_symbols
+    return failures, stale_symbols, advisories
 
 
 def _check_candle_freshness(
@@ -749,7 +738,7 @@ def _check_candle_freshness(
     freshness signal is not a fresh one).
     """
     if candle is None:
-        return f"{symbol}: no eToro candle available to establish freshness"
+        return f"{symbol}: no eToro 1-minute candle available to establish freshness"
     interval = candle.interval
     if interval == "OneDay":
         # No honest minutes-based bound exists for a daily bar (see
@@ -779,7 +768,7 @@ def _check_candle_freshness(
 
 def _check_provisional_close(
     provisional_closes: Mapping[str, ProvisionalClose],
-    candles: Mapping[str, Candle],
+    candles: Mapping[str, Candle | None],
     *,
     now: datetime,
     max_deviation_pct: float,
@@ -801,13 +790,9 @@ def _check_provisional_close(
 
     Both branches now gate on :func:`_check_candle_freshness`:
 
-    * ``source == "etoro_candle"`` (fallback): the candle IS the provisional
-      close, so there is nothing independent left to check its *value*
-      against -- only its freshness, which is checked here. This is a real,
-      known residual limitation, not silently passed over: a fresh-but-wrong
-      candle would still clear this gate, because single-sourced means
-      single-sourced (§5.1's "no second opinion" case is not fully closed by
-      this change, just no longer ungated on the freshness axis).
+    * ``source == "etoro_candle"`` (fallback): the daily candle supplied the
+      provisional close. T021 checks the minute candle's freshness but keeps
+      the existing policy of no value comparison on this fallback path.
     * ``source == "tiingo_iex"`` (primary): the candle is the *only*
       freshness signal available anywhere in this check, because Tiingo IEX
       carries none of its own (§10.2). A stale candle now fails this symbol
@@ -829,8 +814,7 @@ def _check_provisional_close(
         assert candle is not None  # freshness check above already excluded None
 
         if provisional.source == "etoro_candle":
-            # Single-sourced: freshness is the only guard available (see
-            # docstring above) -- no independent value to cross-check.
+            # T021 preserves the fallback's freshness-only policy.
             continue
         if not candle.close:
             continue
@@ -852,10 +836,14 @@ def gate_10_price_data(
     provisional_closes: Mapping[str, ProvisionalClose],
     rates: Mapping[str, Rate],
     candles: Mapping[str, Candle],
+    minute_candles: Mapping[str, Candle | None],
     config: MarketDataConfig,
 ) -> GateResult:
     """Gate 10, items 1 and 3 only (DESIGN_market_data.md §6) -- items 2, 4
     and 5 are out of scope; see the module docstring.
+
+    ``candles``: daily candles; not used for freshness since T021.
+    Checks use ``minute_candles``; rate delay is advisory only.
 
     This is a pure function over already-fetched data, not a fetcher: the
     session orchestration that decides *how* to obtain ``rates``/``candles``/
@@ -878,6 +866,7 @@ def gate_10_price_data(
         "rate_vs_candle_failures": [],
         "provisional_close_failures": [],
         "stale_symbols": [],
+        "rate_advisories": [],
     }
 
     sanity_failures = _check_rate_sanity(managed_symbols, rates)
@@ -885,14 +874,15 @@ def gate_10_price_data(
         failures.extend(sanity_failures)
         details["sanity_failures"] = sanity_failures
 
-    rate_candle_failures, stale_symbols = _check_rates_vs_candles(
+    rate_candle_failures, stale_symbols, advisories = _check_rates_vs_candles(
         managed_symbols,
         rates,
-        candles,
+        minute_candles,
         now=now,
         max_age_minutes=config.max_rate_age_minutes,
         max_deviation_pct=config.rate_vs_candle_deviation_pct,
     )
+    details["rate_advisories"] = advisories
     if rate_candle_failures:
         failures.extend(rate_candle_failures)
         details["rate_vs_candle_failures"] = rate_candle_failures
@@ -900,7 +890,7 @@ def gate_10_price_data(
 
     provisional_failures = _check_provisional_close(
         provisional_closes,
-        candles,
+        minute_candles,
         now=now,
         max_deviation_pct=config.provisional_close_deviation_pct,
         max_candle_age_minutes_intraday=config.max_candle_age_minutes_intraday,
@@ -911,11 +901,13 @@ def gate_10_price_data(
 
     passed = not failures
     reason = (
-        "provisional close and live rates fresh and mutually consistent "
+        "provisional close and eToro 1-minute candles fresh and mutually consistent "
         f"for all managed symbols ({', '.join(managed_symbols)})"
         if passed
         else "; ".join(failures)
     )
+    if advisories:
+        reason += "; advisory: " + "; ".join(advisories)
     return GateResult(gate=10, name="Price data", passed=passed, reason=reason, details=details)
 
 
