@@ -625,6 +625,24 @@ def test_budget_history_round_trip(repo: Repo) -> None:
 # -- portfolio snapshots ------------------------------------------------------
 
 
+def test_insert_snapshot_mid_failure_leaves_no_rows(repo: Repo) -> None:
+    session = repo.create_session("2026-01-02", mode="dry_run", environment="demo", armed=False)
+    snapshot = PortfolioSnapshot(
+        session_id=session.id, taken_at="2026-01-02T15:50:00+00:00",
+        positions=[SnapshotPosition(position_id=pid) for pid in ("1", "2", "1")],
+    )
+    with pytest.raises(sqlite3.IntegrityError, match="UNIQUE constraint failed"):
+        repo.insert_snapshot(snapshot)
+
+    repo.finish_session(session.id, state="finished", outcome="snapshot failed")
+    finished = repo.get_session(session.id)
+    assert finished is not None
+    assert finished.state == "finished"
+    assert finished.finished_at is not None
+    assert repo.conn.execute("SELECT COUNT(*) FROM portfolio_snapshots").fetchone()[0] == 0
+    assert repo.conn.execute("SELECT COUNT(*) FROM portfolio_snapshot_positions").fetchone()[0] == 0
+
+
 def test_portfolio_snapshot_round_trip_with_positions(repo: Repo) -> None:
     # symbol/current_price/unrealized_pnl are caller-supplied here (resolved
     # via Repo.get_instrument / computed via etoro.models.mark_position),

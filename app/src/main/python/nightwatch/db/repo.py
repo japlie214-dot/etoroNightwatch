@@ -1842,36 +1842,40 @@ class Repo:
 
     def insert_snapshot(self, snapshot: PortfolioSnapshot) -> int:
         """Persist a portfolio snapshot and its position rows. Returns the id."""
-        cur = self.conn.execute(
-            """
-            INSERT INTO portfolio_snapshots (session_id, taken_at, equity, cash,
-                                             available_cash, unrealized_pnl,
-                                             realized_pnl, raw_json)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                snapshot.session_id, snapshot.taken_at, snapshot.equity,
-                snapshot.cash, snapshot.available_cash, snapshot.unrealized_pnl,
-                snapshot.realized_pnl, json.dumps(snapshot.raw),
-            ),
-        )
-        snapshot_id = int(cur.lastrowid)
-        for position in snapshot.positions:
-            self.conn.execute(
+        try:
+            cur = self.conn.execute(
                 """
-                INSERT INTO portfolio_snapshot_positions
-                    (snapshot_id, position_id, symbol, instrument_id, units,
-                     entry_price, current_price, amount, leverage,
-                     unrealized_pnl, open_date)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO portfolio_snapshots (session_id, taken_at, equity, cash,
+                                                 available_cash, unrealized_pnl,
+                                                 realized_pnl, raw_json)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    snapshot_id, position.position_id, position.symbol,
-                    position.instrument_id, position.units, position.entry_price,
-                    position.current_price, position.amount, position.leverage,
-                    position.unrealized_pnl, position.open_date,
+                    snapshot.session_id, snapshot.taken_at, snapshot.equity,
+                    snapshot.cash, snapshot.available_cash, snapshot.unrealized_pnl,
+                    snapshot.realized_pnl, json.dumps(snapshot.raw),
                 ),
             )
+            snapshot_id = int(cur.lastrowid)
+            for position in snapshot.positions:
+                self.conn.execute(
+                    """
+                    INSERT INTO portfolio_snapshot_positions
+                        (snapshot_id, position_id, symbol, instrument_id, units,
+                         entry_price, current_price, amount, leverage,
+                         unrealized_pnl, open_date)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        snapshot_id, position.position_id, position.symbol,
+                        position.instrument_id, position.units, position.entry_price,
+                        position.current_price, position.amount, position.leverage,
+                        position.unrealized_pnl, position.open_date,
+                    ),
+                )
+        except BaseException:
+            self.conn.rollback()
+            raise
         self.conn.commit()
         return snapshot_id
 
