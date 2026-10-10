@@ -24,7 +24,8 @@ from __future__ import annotations
 import pytest
 
 from nightwatch.db.repo import Instrument, Repo
-from nightwatch.etoro.models import Position
+from nightwatch.engine.session import build_ladder_inputs
+from nightwatch.etoro.models import Balance, Position
 from nightwatch.market.adopt import (
     AdoptionError,
     DEFAULT_BOOK,
@@ -34,6 +35,7 @@ from nightwatch.market.adopt import (
     run_adoption_backfill,
 )
 from nightwatch.market.source import EodBar
+from .test_session_market import assembled_signal
 
 SCHG_ID = 100001
 UPRO_ID = 100002
@@ -199,6 +201,49 @@ def test_spy_context_index_uses_raw_close_not_adj_close() -> None:
 # -- build_adoption_plan / run_adoption_backfill: the happy path -------------
 
 
+def test_adopted_upro_reference_is_open_date_close_and_feeds_decision(repo: Repo) -> None:
+    _seed_instruments(repo)
+    position = _position(
+        "UPRO-COVERED", UPRO_ID, units=1.0, entry_price=50.0,
+        amount=50.0, open_date="2024-06-03T10:00:00+00:00",
+    )
+    plan = run_adoption_backfill(repo, [position], SPY_BARS, dry_run=False)
+    annotation, = plan.to_adopt
+    assert annotation.entry_reference_spy == annotation.entry_spy_close == 90.0
+    row = repo.get_lot_annotation(position.position_id)
+    assert row is not None
+    assert row.entry_reference_spy == row.entry_spy_close == 90.0
+    assert row.entry_context_source == "derived"
+
+    inputs, _ = build_ladder_inputs(
+        iso="2026-10-01", year=2026, signal=assembled_signal(),
+        prices={"SPY": 100.0, "UPRO": 55.0, "SCHG": 25.0},
+        positions=[position], symbol_by_instrument={UPRO_ID: "UPRO"},
+        balance=Balance(1000.0, None, 100.0), repo=repo, cash_reserve_usd=0.0,
+    )
+    lot, = inputs.open_lots
+    assert lot.entry_reference_spy == lot.entry_spy_close == 90.0
+    assert lot.entry_tier == 2
+    assert lot.cost_basis == 50.0
+    assert inputs.equity == 155.0
+
+
+@pytest.mark.parametrize("open_date", ["2023-01-01", "2024-06-04", "2025-02-11"])
+def test_uncovered_upro_date_stays_unresolved_not_adopted(open_date: str) -> None:
+    position = _position(
+        "UPRO-UNCOVERED", UPRO_ID, units=1.0, entry_price=50.0,
+        amount=50.0, open_date=f"{open_date}T10:00:00+00:00",
+    )
+    plan = build_adoption_plan(
+        [position], instruments_by_id={UPRO_ID: Instrument(symbol="UPRO", instrument_id=UPRO_ID)},
+        spy_context=build_spy_context_index(SPY_BARS), managed_symbols=("SCHG", "UPRO"),
+    )
+    assert plan.to_adopt == []
+    unresolved, = plan.unresolved
+    assert unresolved.position_id == position.position_id
+    assert f"SPY series does not cover {open_date!r}" in unresolved.reason
+
+
 def test_dry_run_plans_every_managed_position_and_excludes_unmanaged(repo: Repo) -> None:
     _seed_instruments(repo)
     positions = _populated_positions()
@@ -258,6 +303,7 @@ def test_apply_writes_exactly_the_planned_rows_with_correct_fields(repo: Repo) -
     # tier 0 (see SPY_BARS docstring above).
     assert row.entry_spy_ath == 110.0
     assert row.entry_spy_close == 104.5
+    assert row.entry_reference_spy == row.entry_spy_close
     assert row.entry_spy_drawdown == pytest.approx(-0.05)
     assert row.entry_tier == 0
     # migration 005, board nightwatch/handoff-2026-09-05-evening.md §3a: every position this

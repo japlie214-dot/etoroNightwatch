@@ -452,7 +452,10 @@ def build_adoption_plan(
                 # future override of the halt above, which this function
                 # does not implement).
                 entry_context_source=DEFAULT_ENTRY_CONTEXT_SOURCE,
-                entry_reference_spy=None,
+                # Boss decision C 2026-10-10: reconstructed reference = SPY close
+                # on the open date (same history as entry_spy_close). Uncovered
+                # dates stay unresolved above, never guessed.
+                entry_reference_spy=context.close,
                 entry_spy_ath=context.ath,
                 entry_spy_close=context.close,
                 entry_spy_drawdown=context.drawdown,
