@@ -1359,6 +1359,8 @@ class EtoroClient:
             eToro's ``orderId`` string. HTTP 200 here means *accepted*, not
             filled -- callers MUST follow up with :meth:`poll_order_to_terminal`.
         """
+        if not request_id or not request_id.strip():
+            raise ValueError("place_buy_order: request_id must be non-empty (caller persists it first)")
         self.last_write_request_body = None
         self.last_write_response_body = None
         body = OrderRequest(instrument_id=instrument_id, amount=amount_usd).to_json()
@@ -1390,11 +1392,11 @@ class EtoroClient:
 
         So: the guessed keys are still tried first, then the whole response
         body is logged at WARNING (it is the only way to learn the real
-        shape), then the order is recovered through the ``referenceId`` path
+        shape), then a buy order is recovered through the ``referenceId`` path
         DESIGN §6.H already defines -- the ``x-request-id`` we sent is ours
         and eToro echoes it back as ``referenceId``. Only if that also fails
-        does this raise. What it never does is hand back ``""`` as if it were
-        an order id.
+        does this raise. Close recovery by reference is unverified and fails
+        closed (T024). This never hands back ``""`` as if it were an order id.
         """
         try:
             data = response.json()
@@ -1423,6 +1425,11 @@ class EtoroClient:
             what,
             str(data)[:1000],
         )
+        if what == "close_position":
+            raise EtoroValidationError(
+                "close_position: response had no order id; close recovery by reference is "
+                "unverified (T024) -- reconcile from portfolio, do not resubmit"
+            )
         try:
             recovered = self.lookup_order(reference_id=request_id)
         except EtoroError as exc:
@@ -1482,6 +1489,8 @@ class EtoroClient:
         before calling this with a partial ``units_to_deduct`` -- the
         executor itself is not built yet (board nightwatch/handoff-2026-09-06.md §7).
         """
+        if not request_id or not request_id.strip():
+            raise ValueError("close_position: request_id must be non-empty (caller persists it first)")
         self.last_write_request_body = None
         self.last_write_response_body = None
         body = CloseRequest(
@@ -1996,8 +2005,9 @@ class EtoroClient:
         reference_id: str | None = None,
         interval_seconds: float | None = None,
         timeout_seconds: float | None = None,
+        kind: str = "open",
     ) -> PollResult:
-        """Poll ``orders:lookup`` until a terminal status or a timeout.
+        """Poll open or close orders until a terminal status or a timeout.
 
         DESIGN §1.1/§6.H: HTTP 200 on submission means *accepted*, not
         *filled*. Status 11 (WaitingForMarket) is explicitly "queued, not
@@ -2008,18 +2018,28 @@ class EtoroClient:
         own `is_filled` already encodes this, since WAITING_FOR_MARKET and
         every non-terminal status are excluded from `FILLED_ORDER_STATUSES`).
         """
+        if kind not in ("open", "close"):
+            raise ValueError("poll_order_to_terminal: kind must be 'open' or 'close'")
+        if kind == "close" and not order_id:
+            raise ValueError("poll_order_to_terminal: kind='close' requires order_id")
         interval = interval_seconds if interval_seconds is not None else self._poll_interval
         timeout = timeout_seconds if timeout_seconds is not None else self._poll_timeout
         deadline = self._clock() + timeout
         attempts = 0
-        result = self.lookup_order(order_id=order_id, reference_id=reference_id)
+        result = (
+            self.lookup_close_order(order_id) if kind == "close"
+            else self.lookup_order(order_id=order_id, reference_id=reference_id)
+        )
         attempts += 1
         while not result.is_terminal:
             if self._clock() >= deadline:
                 return PollResult(order=result, attempts=attempts, timed_out=True)
             self._sleep(interval)
-            result = self.lookup_order(
-                order_id=order_id or result.order_id, reference_id=reference_id
+            result = (
+                self.lookup_close_order(order_id) if kind == "close"
+                else self.lookup_order(
+                    order_id=order_id or result.order_id, reference_id=reference_id
+                )
             )
             attempts += 1
         if result.status in (OrderStatus.REJECTED, OrderStatus.REJECTED_PARTIALLY_FILLED):

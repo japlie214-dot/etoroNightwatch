@@ -205,6 +205,22 @@ def test_place_buy_order_always_sends_the_hardcoded_safety_fields() -> None:
     assert body["action"] == "open"
 
 
+@pytest.mark.parametrize("request_id", ["", " \t\n"])
+@pytest.mark.parametrize("method", ["place_buy_order", "close_position"])
+def test_write_invalid_request_id_never_sends(request_id: str, method: str) -> None:
+    scripted = ScriptedTransport([])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(ValueError) as caught:
+        if method == "place_buy_order":
+            client.place_buy_order(request_id, instrument_id=42, amount_usd=100.0)
+        else:
+            client.close_position(request_id, position_id="p-1", instrument_id=42)
+    assert str(caught.value) == (
+        f"{method}: request_id must be non-empty (caller persists it first)"
+    )
+    assert len(scripted.requests) == 0
+
+
 def test_order_request_cannot_be_built_with_leverage_above_one() -> None:
     """The second, independent line of defense (DESIGN §6.A): even
     constructing the request body object directly and trying to override
@@ -502,6 +518,47 @@ def test_poll_to_terminal_stops_at_a_real_fill_not_at_waiting_for_market() -> No
     assert result.order.position_id == "3598679249"
     assert result.order.fill_units == 1.5
     assert result.order.fill_price == 66.0
+
+
+def test_poll_close_to_terminal_uses_close_route_for_every_poll() -> None:
+    scripted = ScriptedTransport([
+        httpx.Response(200, json={
+            "orderID": 387742157, "statusID": 1, "positions": [],
+        }),
+        httpx.Response(200, json={
+            "orderID": 387742157, "statusID": 3,
+            "positions": [{"positionID": 3601194005, "units": 1.25, "amount": 50.0}],
+        }),
+    ])
+    sleeps: list[float] = []
+    client = EtoroClient(
+        _config(), transport=httpx.MockTransport(scripted.handler),
+        sleep=sleeps.append, clock=Counter(),
+    )
+    result = client.poll_order_to_terminal(
+        order_id="387742157", kind="close", interval_seconds=2.0, timeout_seconds=30.0
+    )
+    assert result.timed_out is False
+    assert result.order.status is OrderStatus.FILLED
+    assert result.order.order_id == "387742157"
+    assert result.attempts == 2
+    assert sleeps == [2.0]
+    assert [request.url.path for request in scripted.requests] == [
+        "/api/v1/trading/info/demo/close-orders/387742157",
+        "/api/v1/trading/info/demo/close-orders/387742157",
+    ]
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"kind": "close"}, {"kind": "close", "reference_id": "r1"},
+    {"kind": "bogus", "order_id": "387742157"},
+])
+def test_poll_invalid_kind_or_missing_close_id_never_sends(kwargs: dict[str, Any]) -> None:
+    scripted = ScriptedTransport([])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(ValueError):
+        client.poll_order_to_terminal(**kwargs)
+    assert len(scripted.requests) == 0
 
 
 def test_poll_timeout_on_a_still_queued_order_never_reports_a_fill() -> None:
@@ -2270,19 +2327,38 @@ def test_close_write_http_rejection_preserves_body_without_retrying() -> None:
 
 
 def test_write_response_with_no_order_id_anywhere_never_returns_empty_string() -> None:
-    """The silent `else ""` is the bug; an unusable id must be loud. The
-    referenceId recovery path is tried first (404 here = eToro has no record
-    of it), and only then does this raise."""
+    """An untrackable close fails closed without guessing a recovery route."""
     scripted = ScriptedTransport(
         [
             httpx.Response(200, json={"somethingElse": {"nope": 1}}),
-            httpx.Response(404, json={"message": "No external operation was found"}),
         ]
     )
     client = EtoroClient(
         _config(), transport=httpx.MockTransport(scripted.handler), sleep=_no_sleep
     )
-    with pytest.raises(EtoroValidationError):
+    with pytest.raises(EtoroValidationError, match="unverified") as caught:
         client.close_position(
             request_id=str(uuid.uuid4()), position_id="p1", instrument_id=1084
         )
+    assert str(caught.value) == (
+        "close_position: response had no order id; close recovery by reference is "
+        "unverified (T024) -- reconcile from portfolio, do not resubmit"
+    )
+    assert len(scripted.requests) == 1
+    assert scripted.requests[0].method == "POST"
+    assert client.last_write_response_body == {"somethingElse": {"nope": 1}}
+
+
+def test_buy_write_response_without_order_id_recovers_by_reference() -> None:
+    request_id = str(uuid.uuid4())
+    scripted = ScriptedTransport([
+        httpx.Response(200, json={}),
+        httpx.Response(200, json={
+            "orderId": "o-99", "referenceId": request_id, "status": 1,
+        }),
+    ])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    assert client.place_buy_order(request_id, instrument_id=42, amount_usd=100.0) == "o-99"
+    assert [request.method for request in scripted.requests] == ["POST", "GET"]
+    assert scripted.requests[1].url.path == "/api/v2/trading/info/demo/orders:lookup"
+    assert scripted.requests[1].url.params["referenceId"] == request_id
