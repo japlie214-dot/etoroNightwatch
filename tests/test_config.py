@@ -27,6 +27,7 @@ def test_load_config_defaults(config_path: Path, secrets_path: Path, host: Deskt
     assert config.etoro.environment is EtoroEnvironment.DEMO
     assert config.symbols.all == ("SPY", "SCHG", "UPRO")
     assert config.risk.max_open_lots is None
+    assert config.strategy.cash_reserve_usd == 0.0
     # ReconciliationConfig's defaults load even with no [reconciliation]
     # section in config.toml at all (MINIMAL_CONFIG_TOML has none) -- the
     # PROPOSED-but-unconfirmed N=3 default, and the auto-adopt size
@@ -44,6 +45,60 @@ def test_load_config_operator_risk_limits(tmp_path: Path) -> None:
     assert config.risk.max_daily_loss_usd == 500.0
     assert config.risk.max_open_lots == 100
     assert config.risk.max_notional_per_session_usd == 5000.0
+    assert config.etoro.environment is EtoroEnvironment.DEMO
+    assert config.strategy.cash_reserve_usd == 5000.0
+
+
+@pytest.mark.parametrize(
+    "environment, value, expected",
+    [
+        ("demo", "{ demo = 5000.0, real = 10.0 }", 5000.0),
+        ("real", "{ demo = 5000.0, real = 10.0 }", 10.0),
+        ("demo", "7.5", 7.5),
+        ("real", "7.5", 7.5),
+        ("demo", None, 0.0),
+        ("real", None, 0.0),
+        ("demo", '\"\"', 0.0),
+        ("real", '\"\"', 0.0),
+    ],
+)
+def test_load_config_cash_reserve(
+    config_path: Path, tmp_path: Path, environment: str, value: str | None, expected: float
+) -> None:
+    text = config_path.read_text(encoding="utf-8").replace(
+        'environment = "demo"', f'environment = "{environment}"'
+    )
+    if value is not None:
+        text = text.replace("[strategy]", f"[strategy]\ncash_reserve_usd = {value}")
+    config_path.write_text(text, encoding="utf-8")
+    config = load_config(
+        config_path=config_path, secrets_path=tmp_path / "absent.env", env={},
+    )
+    assert config.strategy.cash_reserve_usd == expected
+    assert isinstance(config.strategy.cash_reserve_usd, float)
+
+
+@pytest.mark.parametrize(
+    "environment, value, message",
+    [
+        ("real", "{ demo = 5000.0 }",
+         "strategy.cash_reserve_usd has no value for environment 'real'"),
+        ("demo", "{ demo = 5000.0, real = 10.0, paper = 20.0 }",
+         "strategy.cash_reserve_usd has unknown keys: 'paper'"),
+        ("demo", "{ demo = -1.0, real = 10.0 }",
+         "strategy.cash_reserve_usd must not be negative"),
+    ],
+)
+def test_load_config_rejects_invalid_cash_reserve_table(
+    config_path: Path, tmp_path: Path, environment: str, value: str, message: str
+) -> None:
+    text = config_path.read_text(encoding="utf-8").replace(
+        'environment = "demo"', f'environment = "{environment}"'
+    ).replace("[strategy]", f"[strategy]\ncash_reserve_usd = {value}")
+    config_path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path=config_path, secrets_path=tmp_path / "absent.env", env={})
+    assert str(exc.value) == message
 
 
 @pytest.mark.parametrize("value, expected", [('""', None), ("2", 2)])

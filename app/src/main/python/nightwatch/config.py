@@ -791,6 +791,20 @@ def load_config(
     )
 
     st = _table(data, "strategy")
+    cash_reserve = st.get("cash_reserve_usd")
+    if isinstance(cash_reserve, dict):
+        unknown = set(cash_reserve) - {e.value for e in EtoroEnvironment}
+        if unknown:
+            raise ConfigError(
+                "strategy.cash_reserve_usd has unknown keys: "
+                + ", ".join(repr(key) for key in sorted(unknown))
+            )
+        if environment.value not in cash_reserve:
+            raise ConfigError(
+                "strategy.cash_reserve_usd has no value for environment "
+                f"'{environment.value}'"
+            )
+        cash_reserve = cash_reserve[environment.value]
     strategy = StrategyConfig(
         core_fraction=float(st.get("core_fraction", 0.4)),
         core_floor_pct=float(st.get("core_floor_pct", 0.5)),
@@ -817,8 +831,8 @@ def load_config(
         required_history_bars=int(st.get("required_history_bars", 265)),
         cash_reserve_usd=(
             0.0
-            if st.get("cash_reserve_usd") in (None, "")
-            else float(st["cash_reserve_usd"])
+            if cash_reserve in (None, "")
+            else float(cash_reserve)
         ),
     )
 

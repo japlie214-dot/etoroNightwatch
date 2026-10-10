@@ -652,6 +652,8 @@ required.
 | `broker_available_cash` | Unchanged. Computed with eToro's documented formula (§1.1, §9), **not** `totalBalance` (which is portfolio value, not cash): `available = credit − (Σ ordersForOpen[i].amount where mirrorID = 0 + Σ orders[i].amount)`. |
 | `sleeve_equity` | Unchanged in shape: `sleeve_cash + market value of our UPRO lots + market value of our SCHG lots`. Explicitly **not** account equity — non-managed holdings never enter this number, under either model. |
 
+Superseded 2026-10-10 (T023): per-environment reserve, demo 5000, real 10.
+
 **Implementation line drawn here, deliberately.** This document specifies the runtime clamp
 (`sleeve_cash = max(0.0, broker_available_cash − cash_reserve_usd)`); the config field
 (`cash_reserve_usd`, with `>= 0` validation and `None → 0.0`) is implemented now in `config.py`

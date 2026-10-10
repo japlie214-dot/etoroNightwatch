@@ -889,6 +889,8 @@ exposure by raising the reserve **before** a deposit lands, per §4.4 above, not
 `cash_reserve_usd` above zero as a standing posture. board nightwatch/handoff-2026-09-05.md §6, §7 item 6, and §8
 previously listed this as a go-live blocker; it is removed from that list as of this decision.
 
+Superseded 2026-10-10 (T023): per-environment reserve, demo 5000, real 10.
+
 ---
 
 ## 5. The guard, radically simplified

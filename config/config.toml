@@ -106,19 +106,17 @@ required_history_bars  = 265
 # operator withholds from the app for their own use, outside etoroNightwatch.
 # sleeve_cash = max(0, broker_available_cash - cash_reserve_usd), computed at
 # runtime once the broker's available cash is known. 0 (also what null/absent
-# collapses to) means "use all available cash". Shipped default is 0.
+# collapses to) means "use all available cash".
 #
-# CLOSED, 2026-09-05: staying at 0.0 is a deliberate, explicit operator
-# decision -- the entire account cash balance is intended to be tradable by
-# the strategy -- not an unfinished go-live blocker. Exposure is managed by
-# raising this value BEFORE moving money (e.g. before an unrelated deposit),
-# not by holding it above zero as a standing posture. Measured live figure,
+# 2026-10-10 boss decision: demo withholds $5000 (to make the exclusion visible
+# in demo runs), real withholds $10. Per-environment table; a missing key for
+# the active environment is a config error. Measured live figure,
 # 2026-09-05: broker_available_cash = $1,264.59 (doc/DESIGN_market_data.md
 # §10.11). If the resulting sleeve is too small to trade, the app WARNS on
 # the UI (status/snapshot payload, two tiers -- see
 # nightwatch.strategy.min_allocation) and keeps running -- it is a product
 # decision, never a backend block.
-cash_reserve_usd       = 0.0
+cash_reserve_usd       = { demo = 5000.0, real = 10.0 }
 
 # Budget override (DESIGN §4.5).  Leave commented out for the automatic annual
 # rule: budget = floor(0.4 x prior_year_mean_SCHG_value / 20) x 20.  Set a
