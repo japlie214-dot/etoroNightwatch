@@ -351,10 +351,8 @@ CREATE INDEX IF NOT EXISTS idx_notifications_date   ON notifications (trading_da
 -- --------------------------------------------------------------------------
 -- Commands: every inbound control message received over either channel
 -- (DESIGN §6.1 NightwatchMessagingService / §7.2 TelegramPollReceiver).
--- ``counter`` is the HMAC replay-protection counter carried by the message;
--- a command whose counter is not strictly greater than the last accepted
--- counter for that (channel, sender) pair must be rejected as a replay. This
--- table is the full audit of what was received and why it was accepted or
+-- FCM commands carry an HMAC counter; Telegram commands are authorized by
+-- chat id only (T019). This table is the full audit of what was received and why it was accepted or
 -- rejected, independent of whether it was ultimately actioned.
 -- --------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS commands (
@@ -365,7 +363,7 @@ CREATE TABLE IF NOT EXISTS commands (
     command      TEXT    NOT NULL,   -- raw command text, e.g. '/halt'
     counter      INTEGER,            -- HMAC replay counter carried by the message
     verdict      TEXT    NOT NULL CHECK (verdict IN ('accepted', 'rejected')),
-    reason       TEXT,               -- why rejected: 'replay' | 'unauthorized' | 'bad_hmac' | ...
+    reason       TEXT,               -- rejection reason, or the operator reason for /halt and /resume
     received_at  TEXT    NOT NULL
 );
 

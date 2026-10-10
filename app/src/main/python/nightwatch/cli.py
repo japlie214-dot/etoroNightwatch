@@ -62,6 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("halt", help="set the HALT flag (preflight gate 1 will abort every session)")
     sub.add_parser("resume", help="clear the HALT flag")
     sub.add_parser("initdb", help="create/migrate the SQLite database")
+    sub.add_parser("poll", help="process pending Telegram commands")
     sub.add_parser(
         "telegram-test",
         help="smoke-test Telegram: report config, send one message, check inbound",
@@ -103,6 +104,25 @@ def _cmd_run(args: argparse.Namespace) -> int:
             client.close()
             notifier.close()
     return 0 if result.status in ("would_have_done", "already_ran") else 1
+
+
+def _cmd_poll(args: argparse.Namespace) -> int:
+    from .notify.poll import process_pending
+
+    host = get_host()
+    try:
+        config = load_config(config_path=args.config, secrets_path=args.secrets, host=host)
+    except ConfigError as exc:
+        print(f"config: ERROR - {exc}", file=sys.stderr)
+        return 1
+    with Repo.open(default_db_path(host), host=host) as repo:
+        notifier = TelegramNotifier(config.telegram, repo, environment=config.environment.value)
+        try:
+            results = process_pending(notifier, repo, host, config)
+            print(f"{len(results)} command(s) processed")
+        finally:
+            notifier.close()
+    return 0
 
 
 def _cmd_initdb(args: argparse.Namespace) -> int:
@@ -295,6 +315,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "run":
         return _cmd_run(args)
+    if args.command == "poll":
+        return _cmd_poll(args)
     if args.command == "initdb":
         return _cmd_initdb(args)
     if args.command == "status":

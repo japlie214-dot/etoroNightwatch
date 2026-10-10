@@ -7,7 +7,11 @@ import pytest
 
 from nightwatch import cli
 from nightwatch.engine import session
+from nightwatch.engine.halt import write_halt
+from nightwatch.engine.preflight import GateSpec, gate_1_halt
 from nightwatch.notify.commands import _next_reply
+from .test_notify_commands import _config
+from .test_notify_poll import FakeNotifier, update
 from .test_session_skeleton import config, no_network, FakeClient, fake_gates
 from .test_session_market import FakeTiingo
 
@@ -168,3 +172,38 @@ def test_cli_notifier_lifecycle(repo, host, config, monkeypatch, capsys):
     notifier.close.assert_called_once()
     assert client.closed and tiingo.closed
     assert capsys.readouterr().out == "status: refused_armed\nsession_id: None\nfailed_gate: None\nreason: refused\n"
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_pending_resume_applied_before_gate_1(repo, host, monkeypatch, resume):
+    write_halt(host, reason="original", source="session", now=NOW)
+    assert not gate_1_halt(host).passed
+    pending = [update(1, "/resume ok", ts=int(NOW.timestamp()) + 1)] if resume else []
+    notifier = FakeNotifier(pending, []) if resume else FakeNotifier([])
+    called = []
+
+    def gates(**kwargs):
+        return [GateSpec(1, "halt", lambda: gate_1_halt(host)), *fake_gates(called, 2)[1:]]
+
+    monkeypatch.setattr(session, "build_preflight_gates", gates)
+    result = run(host, _config(), repo, notifier=notifier)
+    assert result.failed_gate == (2 if resume else 1)
+    assert called == ([2] if resume else [])
+    checks = repo.get_preflight_checks(result.session_id)
+    assert checks[0].passed is resume
+    assert host.halt_flag_path().exists() is not resume
+    assert notifier.calls[0] == ("get_updates", None)
+    if resume:
+        assert notifier.calls[2] == ("get_updates", 2)
+        assert notifier.sent[0][1] == {"event": "command_reply"}
+    assert notifier.sent[-1][1]["event"] == "session_report"
+
+
+def test_poll_failure_does_not_block_session(repo, host, config, core_result, caplog):
+    result, core, _ = core_result()
+    notifier = Mock()
+    notifier.get_updates.side_effect = RuntimeError("fake poll failure")
+    assert run(host, config, repo, notifier=notifier) is result
+    core.assert_called_once()
+    notifier.send.assert_called_once()
+    assert "Session command poll failed: fake poll failure" in caplog.text

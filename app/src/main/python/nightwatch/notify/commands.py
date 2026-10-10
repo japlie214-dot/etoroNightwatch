@@ -19,10 +19,12 @@ import hashlib
 import hmac
 import logging
 from dataclasses import dataclass
+from datetime import datetime
 
-from ..cli import clear_halt, set_halt
+from ..cli import clear_halt
 from ..config import Config, MissingCredentialError
 from ..db.repo import Command, Repo
+from ..engine.halt import read_halt, write_halt
 from ..host import Host
 from ..logging_setup import log_path_for_today
 
@@ -65,9 +67,7 @@ def normalize_command(raw: str) -> str:
     """Reduce a raw inbound string to its bare command word.
 
     Strips a leading ``/``, lowercases, and drops everything after the first
-    whitespace — arguments are not supported, which keeps the surface a
-    fixed set of literal words rather than anything resembling a grammar to
-    parse.
+    whitespace, keeping the command surface a fixed set of literal words.
     """
     text = raw.strip()
     if text.startswith("/"):
@@ -75,6 +75,11 @@ def normalize_command(raw: str) -> str:
     if not text:
         return ""
     return text.split(maxsplit=1)[0].lower()
+
+
+def _args(raw_command: str) -> str:
+    words = raw_command.split(maxsplit=1)
+    return words[1].strip() if len(words) == 2 else ""
 
 
 def compute_hmac(command: str, counter: int, secret: str) -> str:
@@ -100,6 +105,7 @@ def handle(
     chat_id: str | None = None,
     counter: int | None = None,
     provided_hmac: str | None = None,
+    message_ts: datetime | None = None,
 ) -> CommandResult:
     """Authorise, authenticate and (if accepted) dispatch one inbound command.
 
@@ -153,43 +159,46 @@ def handle(
             allowed_chat_id = config.telegram.allowed_chat_id
         except MissingCredentialError:
             return _reject("telegram_not_configured")
-        if chat_id != allowed_chat_id:
+        if str(chat_id) != str(allowed_chat_id):
             return _reject("unauthorized")
 
-    # -- 2. HMAC authentication ------------------------------------------------
-    if counter is None or not provided_hmac:
-        return _reject("missing_hmac")
-    try:
-        secret = config.telegram.command_secret
-    except MissingCredentialError:
-        return _reject("command_secret_not_configured")
-    if not verify_hmac(command_word, counter, provided_hmac, secret):
-        return _reject("bad_hmac")
-
-    # -- 3. replay rejection by counter ----------------------------------------
-    # A counter at or below the last accepted value for this (channel,
-    # sender) pair is a replay (DESIGN §7.2, §8.2).
-    if repo.is_replay(channel, sender_id, counter):
-        return _reject("replay")
+    # Telegram guarantees chat identity; a typed message cannot carry an HMAC
+    # (boss decision 2026-10-10). FCM keeps HMAC and counter replay protection.
+    if channel != "telegram":
+        if counter is None or not provided_hmac:
+            return _reject("missing_hmac")
+        try:
+            secret = config.telegram.command_secret
+        except MissingCredentialError:
+            return _reject("command_secret_not_configured")
+        if not verify_hmac(command_word, counter, provided_hmac, secret):
+            return _reject("bad_hmac")
+        if repo.is_replay(channel, sender_id, counter):
+            return _reject("replay")
 
     # -- 4. the command must be in the fixed table -----------------------------
     if command_word not in SUPPORTED_COMMANDS:
         return _reject("unknown_command")
 
     # -- accepted ----------------------------------------------------------------
+    args = _args(raw_command)
     row_id = repo.insert_command(
         Command(
             channel=channel, sender_id=sender_id, chat_id=chat_id,
             command=raw_command, counter=counter, verdict="accepted",
+            reason=(args or None) if command_word in {"halt", "resume"} else None,
         )
     )
     command_row = repo.get_command(row_id)
     assert command_row is not None  # pragma: no cover - just inserted it
-    reply = _dispatch(command_word, repo, host, config)
+    reply = _dispatch(command_word, repo, host, config, args=args, message_ts=message_ts)
     return CommandResult(command=command_row, reply=reply)
 
 
-def _dispatch(command_word: str, repo: Repo, host: Host, config: Config) -> str:
+def _dispatch(
+    command_word: str, repo: Repo, host: Host, config: Config,
+    *, args: str = "", message_ts: datetime | None = None,
+) -> str:
     """Turn an accepted command word into its reply text.
 
     ``command_word`` has already been validated against
@@ -198,11 +207,20 @@ def _dispatch(command_word: str, repo: Repo, host: Host, config: Config) -> str:
     command, a file path, or passed to ``eval``.
     """
     if command_word == "halt":
-        set_halt(host)
+        write_halt(host, reason=args or "halted via Telegram", source="telegram")
         return "HALT set. Preflight gate 1 will abort every future session until /resume."
     if command_word == "resume":
-        cleared = clear_halt(host)
-        return "HALT cleared." if cleared else "HALT was not set."
+        if not args:
+            return "Usage: /resume <reason>. HALT unchanged."
+        h = read_halt(host)
+        if h is None:
+            return "HALT was not set."
+        if (h["set_at"] is not None and message_ts is not None
+                and message_ts <= datetime.fromisoformat(h["set_at"])):
+            return (f"Ignored: this /resume was sent before the current HALT was set ({h['set_at']}). "
+                    "Send /resume again.")
+        clear_halt(host)
+        return f"HALT cleared (reason: {args}). Previous HALT: {h['reason']} (source {h['source']})."
     if command_word == "status":
         return _status_reply(repo, host, config)
     if command_word == "positions":

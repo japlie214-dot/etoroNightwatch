@@ -515,6 +515,13 @@ def run_session(
     notifier: "TelegramNotifier | None" = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
 ) -> SessionResult:
+    if notifier is not None:
+        try:
+            from ..notify.poll import process_pending
+
+            process_pending(notifier, repo, host, config)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Session command poll failed: %s", exc)
     result = _run_session_core(
         host=host, config=config, repo=repo, client=client, trading_date=trading_date,
         tiingo=tiingo, wait=wait, sleep_until=sleep_until,

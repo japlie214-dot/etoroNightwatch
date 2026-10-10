@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import pytest
+from datetime import datetime, timedelta, timezone
 
 from nightwatch.config import Config, EtoroConfig, EtoroEnvironment, RiskConfig
 from nightwatch.config import StrategyConfig, SymbolConfig, TelegramConfig, TradingMode
 from nightwatch.config import WebappConfig
 from nightwatch.db.repo import Repo
 from nightwatch.host import DesktopHost
+from nightwatch.engine.halt import read_halt, write_halt
 from nightwatch.notify.commands import (
     SUPPORTED_COMMANDS,
     compute_hmac,
@@ -145,13 +147,13 @@ def test_fcm_channel_is_not_subject_to_the_telegram_chat_id_check(
 
 def test_valid_hmac_is_accepted(repo: Repo, host: DesktopHost) -> None:
     config = _config()
-    result = _send(repo, host, config, "/status", counter=1)
+    result = _send(repo, host, config, "/status", counter=1, channel="fcm")
     assert result.accepted
 
 
 def test_tampered_hmac_is_rejected(repo: Repo, host: DesktopHost) -> None:
     config = _config()
-    result = _send(repo, host, config, "/status", counter=1, bad_hmac=True)
+    result = _send(repo, host, config, "/status", counter=1, bad_hmac=True, channel="fcm")
     assert not result.accepted
     assert result.command.reason == "bad_hmac"
 
@@ -159,7 +161,7 @@ def test_tampered_hmac_is_rejected(repo: Repo, host: DesktopHost) -> None:
 def test_missing_hmac_is_rejected(repo: Repo, host: DesktopHost) -> None:
     config = _config()
     result = handle(
-        repo, host, config, channel="telegram", sender_id=CHAT_ID,
+        repo, host, config, channel="fcm", sender_id=CHAT_ID,
         raw_command="/status", chat_id=CHAT_ID, counter=1, provided_hmac=None,
     )
     assert not result.accepted
@@ -177,7 +179,7 @@ def test_missing_command_secret_is_rejected(repo: Repo, host: DesktopHost) -> No
         webapp=WebappConfig(), risk=RiskConfig(),
     )
     result = handle(
-        repo, host, config, channel="telegram", sender_id=CHAT_ID,
+        repo, host, config, channel="fcm", sender_id=CHAT_ID,
         raw_command="/status", chat_id=CHAT_ID, counter=1, provided_hmac="whatever",
     )
     assert not result.accepted
@@ -189,18 +191,18 @@ def test_missing_command_secret_is_rejected(repo: Repo, host: DesktopHost) -> No
 
 def test_replayed_counter_is_rejected(repo: Repo, host: DesktopHost) -> None:
     config = _config()
-    first = _send(repo, host, config, "/status", counter=5)
+    first = _send(repo, host, config, "/status", counter=5, channel="fcm")
     assert first.accepted
 
-    replay = _send(repo, host, config, "/status", counter=5)
+    replay = _send(repo, host, config, "/status", counter=5, channel="fcm")
     assert not replay.accepted
     assert replay.command.reason == "replay"
 
-    older = _send(repo, host, config, "/status", counter=3)
+    older = _send(repo, host, config, "/status", counter=3, channel="fcm")
     assert not older.accepted
     assert older.command.reason == "replay"
 
-    newer = _send(repo, host, config, "/status", counter=6)
+    newer = _send(repo, host, config, "/status", counter=6, channel="fcm")
     assert newer.accepted
 
 
@@ -208,7 +210,7 @@ def test_replay_counter_namespace_is_per_channel_and_sender(
     repo: Repo, host: DesktopHost
 ) -> None:
     config = _config()
-    a = _send(repo, host, config, "/status", counter=5, sender_id="sender-a")
+    a = _send(repo, host, config, "/status", counter=5, sender_id="sender-a", channel="fcm")
     assert a.accepted
     b = _send(
         repo, host, config, "/status", counter=1, channel="fcm",
@@ -232,9 +234,61 @@ def test_resume_command_clears_the_halt_flag(repo: Repo, host: DesktopHost) -> N
     config = _config()
     host.halt_flag_path().parent.mkdir(parents=True, exist_ok=True)
     host.halt_flag_path().write_text("halted\n", encoding="utf-8")
-    result = _send(repo, host, config, "/resume", counter=1)
+    result = _send(repo, host, config, "/resume operator checked", counter=1)
     assert result.accepted
     assert not host.halt_flag_path().exists()
+    assert result.reply == "HALT cleared (reason: operator checked). Previous HALT: halted (source unknown)."
+    assert result.command.command == "/resume operator checked"
+    assert repo.get_commands()[0].reason == "operator checked"
+
+
+def test_telegram_needs_no_hmac_secret_or_counter(repo, host):
+    config = _config(NIGHTWATCH_COMMAND_SECRET="")
+    for _ in range(2):
+        result = handle(repo, host, config, channel="telegram", sender_id=CHAT_ID,
+                        chat_id=CHAT_ID, raw_command="/status")
+        assert result.accepted
+
+
+def test_bare_resume_keeps_halt(repo, host):
+    write_halt(host, reason="original", source="session")
+    before = read_halt(host)
+    result = _send(repo, host, _config(), "/resume  ", counter=1)
+    assert result.accepted
+    assert result.reply == "Usage: /resume <reason>. HALT unchanged."
+    assert read_halt(host) == before
+
+
+@pytest.mark.parametrize("seconds", [-1, 0, 1])
+def test_resume_message_time_guard(repo, host, seconds):
+    now = datetime(2026, 10, 10, tzinfo=timezone.utc)
+    write_halt(host, reason="original", source="session", now=now)
+    before = read_halt(host)
+    result = handle(repo, host, _config(), channel="telegram", sender_id=CHAT_ID,
+                    chat_id=CHAT_ID, raw_command="/resume checked",
+                    message_ts=now + timedelta(seconds=seconds))
+    assert result.accepted
+    if seconds <= 0:
+        assert result.reply == (f"Ignored: this /resume was sent before the current HALT was set ({before['set_at']}). "
+                                "Send /resume again.")
+        assert read_halt(host) == before
+    else:
+        assert read_halt(host) is None
+        assert "HALT cleared (reason: checked)" in result.reply
+
+
+def test_resume_without_halt(repo, host):
+    result = _send(repo, host, _config(), "/resume checked", counter=1)
+    assert result.reply == "HALT was not set."
+
+
+def test_halt_reason_is_saved_and_existing_flag_kept(repo, host):
+    result = _send(repo, host, _config(), "/halt why", counter=1)
+    flag = read_halt(host)
+    assert flag["reason"] == "why" and flag["source"] == "telegram"
+    assert result.command.reason == "why"
+    _send(repo, host, _config(), "/halt another reason", counter=1)
+    assert read_halt(host) == flag
 
 
 # -- commands table gets a row for both accepted and rejected --------------------
@@ -244,8 +298,8 @@ def test_commands_table_records_both_accepted_and_rejected(
     repo: Repo, host: DesktopHost
 ) -> None:
     config = _config()
-    _send(repo, host, config, "/status", counter=1)
-    _send(repo, host, config, "/status", counter=1)  # replay -> rejected
+    _send(repo, host, config, "/status", counter=1, channel="fcm")
+    _send(repo, host, config, "/status", counter=1, channel="fcm")  # replay -> rejected
     rows = repo.get_commands()
     assert len(rows) == 2
     verdicts = {r.verdict for r in rows}

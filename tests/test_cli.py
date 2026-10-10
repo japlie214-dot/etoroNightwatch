@@ -10,6 +10,9 @@ import nightwatch.host as host_module
 from nightwatch import cli
 from nightwatch.engine.halt import read_halt
 from nightwatch.host import DesktopHost
+from nightwatch.db.repo import Repo, default_db_path
+from .test_notify_commands import _config
+from .test_notify_poll import FakeNotifier, update
 
 
 @pytest.fixture(autouse=True)
@@ -73,3 +76,26 @@ def test_status_after_initdb_shows_session_count(host: DesktopHost, capsys: pyte
 def test_not_yet_implemented_commands_exit_non_zero(command: str) -> None:
     rc = cli.main([command])
     assert rc != 0
+
+
+def test_poll_processes_commands_and_closes_notifier(host, monkeypatch, capsys):
+    config = _config()
+    notifier = FakeNotifier([update(1, "/halt why"), update(2, "/resume")], [])
+    made = []
+
+    def make_notifier(telegram, repo, **kwargs):
+        made.append((telegram, repo, kwargs))
+        return notifier
+
+    monkeypatch.setattr(cli, "load_config", lambda **kwargs: config)
+    monkeypatch.setattr(cli, "TelegramNotifier", make_notifier)
+    assert cli.main(["poll"]) == 0
+    assert capsys.readouterr().out == "2 command(s) processed\n"
+    assert notifier.closed
+    assert made[0][0] is config.telegram
+    assert made[0][2] == {"environment": config.environment.value}
+    assert notifier.calls[-1] == ("get_updates", 3)
+    assert notifier.sent[1][0] == "Usage: /resume <reason>. HALT unchanged."
+    assert read_halt(host)["reason"] == "why"
+    with Repo.open(default_db_path(host), host=host) as repo:
+        assert [row.command for row in repo.get_commands()] == ["/resume", "/halt why"]

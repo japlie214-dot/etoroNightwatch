@@ -1180,7 +1180,8 @@ a trading failure.
 
 ### 8.2 Inbound — read-only plus halt
 
-Inbound is **push-driven, not polled**, in three tiers:
+Inbound uses three tiers. Telegram commands are polled once at each session start,
+and via `nightwatch poll`:
 
 1. **Primary — FCM high-priority push.** Doze's own documentation names it as a wake path:
    *"FCM high priority messages let you wake your app to engage the user. In Doze or App
@@ -1221,8 +1222,8 @@ connectivity will abort safely at **preflight gate 3** rather than trade blind.
 | `/today` | today's decision: `cone_z`, tier, intents or hold reason |
 | `/logs` | tail of the current day's log |
 | `/next` | next scheduled run, in ET and WIB |
-| `/halt` | set the halt flag — preflight gate 1 will abort every future session |
-| `/resume` | clear the halt flag |
+| `/halt [reason]` | set the halt flag with an optional reason — preflight gate 1 will abort every future session |
+| `/resume <reason>` | clear the halt flag; reason required, messages sent at or before the current HALT are ignored |
 | `/help` | list the supported commands above |
 
 **Explicitly not available: config changes, arming live mode, manual trades, budget changes.**
@@ -1235,7 +1236,7 @@ which still requires both arming keys (§6.E) that Telegram cannot touch.
 Security:
 
 - **Allowlist on Telegram chat id.** Any message from any other chat id is ignored and logged, never answered. FCM messages are addressed to our own registration token, which is the equivalent binding for that channel.
-- **HMAC-of-(command, counter), with replay rejection by counter.** Every inbound command, on either channel, carries an HMAC over the command and a monotonic counter; a counter at or below the last-accepted value is rejected as a replay. Every attempt — accepted or rejected, and why — is written to the `commands` audit table (§3): command, channel (`fcm`\|`telegram`), sender/chat id, counter, verdict, timestamp. An inbound control channel must be auditable.
+- **Telegram: chat-id allowlist only (boss decision 2026-10-10); FCM: HMAC + counter.** FCM commands carry an HMAC over the command and a monotonic counter; a counter at or below the last-accepted value is rejected as a replay. Every attempt — accepted or rejected, and why — is written to the `commands` audit table (§3): full command text, channel (`fcm`\|`telegram`), sender/chat id, counter, verdict, rejection or operator reason, timestamp. An inbound control channel must be auditable.
 - Commands are parsed as **data against a fixed table**. Nothing from a message is ever passed to a shell, a file path, or an eval.
 - **No inbound listener, no open port to the internet, on either channel.** FCM delivery is a push from Google's infrastructure to Google Play Services, not a socket we open; Telegram is `getUpdates` long-polling, never a webhook.
 
