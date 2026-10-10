@@ -368,6 +368,37 @@ def test_dwell_bars_requires_consecutive_qualifying_bars():
 # ---------------------------------------------------------------------------
 
 
+def test_first_run_seeds_ath_without_buying_schg():
+    config = _base_config(warmup_bars=0)
+    state = ladder.LadderState(ath=None)
+    inputs = _base_inputs(spy=_spy(510.0, 510.0), cash=100_000.0)
+    decision = ladder.decide(inputs, state, config)
+    assert inputs.cash > decision.new_state.cash_target
+    assert decision.diagnostics.get("warmup") is not True
+    assert decision.diagnostics["new_ath_bar"] is False
+    assert decision.new_state.ath == inputs.spy.ath
+    assert not any(i.symbol == "SCHG" and i.side == "open" for i in decision.intents)
+
+
+def test_schg_bought_when_saved_ath_rises_from_500_to_510():
+    config = _base_config(warmup_bars=0)
+    state = ladder.LadderState(ath=500.0)
+    inputs = _base_inputs(spy=_spy(510.0, 510.0), cash=100_000.0)
+    decision = ladder.decide(inputs, state, config)
+    assert decision.diagnostics["new_ath_bar"] is True
+    assert any(i.symbol == "SCHG" and i.side == "open" and i.reason == "cash to core"
+               for i in decision.intents)
+
+
+def test_unchanged_saved_ath_does_not_buy_schg():
+    config = _base_config(warmup_bars=0)
+    state = ladder.LadderState(ath=510.0)
+    inputs = _base_inputs(spy=_spy(510.0, 510.0), cash=100_000.0)
+    decision = ladder.decide(inputs, state, config)
+    assert decision.diagnostics["new_ath_bar"] is False
+    assert not any(i.symbol == "SCHG" and i.side == "open" for i in decision.intents)
+
+
 def test_schg_bought_on_new_ath_from_surplus_cash():
     config = _base_config()
     state = ladder.LadderState(ath=90.0)  # yesterday's ath was lower

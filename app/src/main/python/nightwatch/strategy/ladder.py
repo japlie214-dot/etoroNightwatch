@@ -797,7 +797,9 @@ def decide(inputs: LadderInputs, state: LadderState, config: LadderConfig) -> La
         warnings.append(budget_warning)
 
     ath = inputs.spy.ath
-    new_ath_bar = ath > (state.ath or 0.0) + _EPS
+    # First run (no saved ATH): seed only. Comparing against 0 would count every
+    # first bar as a new ATH and sweep spare cash into SCHG (T025, 2026-10-09 demo).
+    new_ath_bar = state.ath is not None and ath > state.ath + _EPS
 
     base_state = LadderState(
         bars=bars, ath=ath, below_streak=state.below_streak,

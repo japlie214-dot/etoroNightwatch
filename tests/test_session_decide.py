@@ -123,7 +123,7 @@ def prepare_session(host, monkeypatch):
 def test_session_decision_persisted_without_advancing_state(repo, host, config, monkeypatch, override):
     client = prepare_session(host, monkeypatch)
     config = replace(config, strategy=replace(config.strategy, budget_override_usd=override))
-    repo.get_strategy_state()  # Initialize the singleton before capturing its persisted timestamp.
+    repo.save_strategy_state(replace(repo.get_strategy_state(), ath=100.0))
     before = repo.get_strategy_state()
     result = session.run_session(host=host, config=config, repo=repo, client=client,
                                  tiingo=FakeTiingo(), trading_date=DAY, wait=False)
