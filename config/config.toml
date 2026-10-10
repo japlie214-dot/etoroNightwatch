@@ -156,6 +156,8 @@ port = 8080         # must be above 1024: binding lower requires root on Android
 max_notional_per_session_usd = 5000.0
 # daily loss ALERT threshold; never halts (T010)
 max_daily_loss_usd           = 500.0
+# alert C: market-unexplained loss since last session; sets HALT (boss 2026-10-07/09)
+max_unexplained_loss_usd = 50.0
 max_open_lots                = 100
 # Gate 2 aborts the session if the host is on battery below this level.
 min_battery_percent          = 40

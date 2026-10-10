@@ -813,7 +813,7 @@ kinds are listed together below, grouped by what they protect against.
 | ~~`max_orders_per_session`~~ **REPLACED, operator decision 2026-09-06** — see below. | ~~Independent backstop on how much can happen in one run.~~ |
 | `max_notional_per_session_usd` | Independent backstop in dollar terms. **Untouched by the 2026-09-06 decision below.** |
 | `max_open_lots` | Independent backstop; the strategy's own `MAX_LOTS = 60` (§1.4) is a strategy-level bound — this is a second, separate one. **Untouched by the 2026-09-06 decision below.** |
-| daily loss guard | If sleeve P&L for the day is worse than a configured threshold, halt and notify (feeds preflight gate 12 and auto-halt, §6.I). **Untouched by the 2026-09-06 decision below.** |
+| Daily loss | Daily loss: alert A (P&L ≤ −max_daily_loss_usd) is alert-only; alert C (market-unexplained residual ≤ −max_unexplained_loss_usd) and a units-integrity mismatch set HALT. See NIGHTWATCH T010/T022. |
 
 **OPERATOR-ENDORSED, 2026-09-06: an arbitrary integer order-count cap is the wrong mechanism, and
 `max_orders_per_session` is replaced by a latency-derived time gate.** Reasoning, recorded so it
@@ -988,7 +988,7 @@ against a real, multi-asset account.
 - Manual: the `HALT` file, the Telegram `/halt` command (§8.2), and `mode = "dry_run"` in
   config.
 - **Auto-halt**, triggered by: any reconciliation mismatch in a managed symbol (§6.D), N
-  consecutive session failures, or the daily loss guard (§6.C) tripping. Auto-halt always
+  consecutive session failures, or alert C or a units-integrity mismatch (§6.C). Auto-halt always
   notifies with the reason.
 - **One session per trading date**, enforced by a unique constraint on `sessions.trading_date`
   and backed by the "already ran today" flag the safety-net alarm consults (§7.2) — the safety

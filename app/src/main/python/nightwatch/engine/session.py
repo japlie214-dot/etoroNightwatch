@@ -24,6 +24,8 @@ from ..market.window import AssembledSignal, WindowAssemblyError, assemble_spy_s
 from ..notify.telegram import TelegramNotifier
 from ..strategy.ladder import decide, LadderConfig, LadderLot, ReentryBucket, LadderInputs, LadderIntent
 from ..strategy.state import load
+from .halt import write_halt
+from .interval_pnl import ClosedLot, IntervalResult, _utc, compute_interval
 from .preflight import (
     GateResult, GateSpec, etoro_reachability_probe, gate_1_halt,
     gate_2_power, gate_3_network, gate_4_clock, gate_5_database,
@@ -81,6 +83,7 @@ class SessionResult:
     status: str
     failed_gate: int | None
     reason: str
+    interval: "IntervalResult | None" = None
 
 
 def fetch_server_date(base_url: str, *, timeout: float = 10.0) -> str | None:
@@ -284,6 +287,49 @@ def intent_to_dict(i: LadderIntent) -> dict:
             "position_ref": i.position_ref, "reason": i.reason, "book": i.book}
 
 
+def _interval_for(prev, snap, *, client, managed_ids, config, today) -> IntervalResult:
+    closed = []
+    if prev is not None:
+        try:
+            rows = client.get_trade_history(start_date=prev.taken_at[:10], end_date=today.isoformat())
+        except Exception:
+            closed = None
+        else:
+            seen = set()
+            for r in rows:
+                if r.instrument_id not in managed_ids:
+                    continue
+                if r.close_date is not None and _utc(r.close_date) <= _utc(prev.taken_at):
+                    continue
+                if r.position_id in seen:
+                    continue
+                seen.add(r.position_id)
+                if r.close_date is None:
+                    closed = None
+                    break
+                closed.append(ClosedLot(str(r.position_id), r.instrument_id, r.units,
+                                        r.profit, r.fees, r.open_date, r.close_date))
+    return compute_interval(
+        prev, snap, managed_ids=managed_ids, closed=closed, entry_marks={}, exit_marks={},
+        loss_alert_usd=config.risk.max_daily_loss_usd if config.risk.max_daily_loss_usd is not None else float("inf"),
+        residual_halt_usd=config.risk.max_unexplained_loss_usd if config.risk.max_unexplained_loss_usd is not None else float("inf"),
+    )
+
+
+def format_interval(r: IntervalResult) -> str:
+    if r.state == "no_baseline":
+        return "interval: no baseline (first snapshot)"
+    pnl = "n/a" if r.pnl_usd is None else f"${r.pnl_usd:,.2f}"
+    pct = "n/a" if r.pnl_pct is None else f"{r.pnl_pct:.2f}%"
+    res = "n/a" if r.residual_usd is None else f"${r.residual_usd:,.2f}"
+    text = f"interval: {r.state}, P&L {pnl}, {pct}, residual {res}"
+    if r.reasons:
+        text += "; reasons: " + " | ".join(r.reasons[:5])
+        if len(r.reasons) > 5:
+            text += f" (+{len(r.reasons) - 5} more)"
+    return text
+
+
 def _run_session_core(
     *, host: Host, config: Config, repo: Repo, client: EtoroClient, trading_date: date,
     tiingo: TiingoClient, wait: bool = True,
@@ -395,14 +441,29 @@ def _run_session_core(
         reason="phase A, pre-settlement, buy intents provisional; dry run: " + d.reason,
     ))
     refusals = arming_refusals(config)
-    summary = "; ".join(f"{i.side} {i.symbol} ${i.amount:.2f}" if i.amount is not None
-                        else f"{i.side} {i.symbol} lot {i.position_ref}" for i in d.intents) or "none"
+    groups = {}
+    for i in d.intents:
+        groups.setdefault((i.side, i.symbol), []).append(i.amount)
+    summaries = []
+    for (side, symbol), amounts in groups.items():
+        n = len(amounts)
+        if amounts[0] is None:
+            summaries.append(f"{side} {symbol} {n} lot(s)")
+        else:
+            total = sum(amounts)
+            orders = f"{n}x ${amounts[0]:.2f}" if all(a == amounts[0] for a in amounts) else f"{n} orders"
+            summaries.append(f"{side} {symbol} {orders} = ${total:.2f}")
+    summary = "; ".join(summaries) or "none"
     reason = f"would have done {len(d.intents)} intent(s): {summary}; ladder: {d.reason}; arming refused: {'; '.join(refusals)}"
     if notes:
         reason += f"; inputs: {'; '.join(notes)}"
     if d.warnings:
         reason += f"; warnings: {'; '.join(d.warnings)}"
+    interval = None
+    halt_error = None
+    # No snapshot means no comparison and no interval-driven HALT.
     try:
+        prev = repo.latest_snapshot()
         pnl = client.get_pnl()
         snap = build_snapshot(
             session_id=s.id, taken_at=utcnow(), pnl=pnl, available_cash=balance.available_cash,
@@ -414,10 +475,24 @@ def _run_session_core(
         )
         sid = repo.insert_snapshot(snap)
         reason += f"; snapshot {sid}: {len(snap.positions)} position(s), equity={snap.equity}, complete={snap.raw['complete']}"
+        interval = _interval_for(
+            prev, snap, client=client,
+            managed_ids=frozenset(mi.instrument_ids[s] for s in config.symbols.traded),
+            config=config, today=trading_date,
+        )
+        reason += "; " + format_interval(interval)
+        if interval.state == "integrity" or interval.alert_c:
+            try:
+                write_halt(host, reason=interval.reasons[0] if interval.reasons
+                           else f"alert C residual ${interval.residual_usd:,.2f}", source="session")
+                reason += "; HALT set"
+            except Exception as e:
+                reason += f"; HALT persistence failed: {type(e).__name__}: {e}"
+                halt_error = str(e)
     except Exception as e:
         reason += f"; snapshot failed: {type(e).__name__}: {e}"
-    repo.finish_session(s.id, state="finished", outcome=reason)
-    return SessionResult(s.id, "would_have_done", None, reason)
+    repo.finish_session(s.id, state="finished", outcome=reason, error=halt_error)
+    return SessionResult(s.id, "would_have_done", None, reason, interval=interval)
 
 
 def format_session_report(
@@ -465,4 +540,29 @@ def run_session(
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Session report failed: %s", exc)
+    if notifier is not None and result.interval is not None:
+        r = result.interval
+        env = config.environment.value.upper()
+        pnl = "n/a" if r.pnl_usd is None else f"${r.pnl_usd:,.2f}"
+        res = "n/a" if r.residual_usd is None else f"${r.residual_usd:,.2f}"
+        messages = []
+        if r.alert_a:
+            messages.append(("alert_a", f"[{env}] ALERT A — UPRO+SCHG P&L {pnl} since last session (threshold -${config.risk.max_daily_loss_usd:,.0f}). Alert only, trading continues."))
+        failure = "HALT persistence failed: "
+        halt = ("HALT persistence FAILED: " + result.reason.split(failure, 1)[1]
+                + ". Next session is NOT protected." if failure in result.reason
+                else "HALT set.")
+        next_session = " Next session stops at gate 1 until you /resume." if failure not in result.reason else ""
+        if r.alert_c:
+            messages.append(("alert_c", f"[{env}] ALERT C — {halt} Loss not explained by market: residual {res} (threshold -${config.risk.max_unexplained_loss_usd:,.0f})." + next_session))
+        if r.state == "integrity":
+            messages.append(("integrity", f"[{env}] INTEGRITY — {halt} " + " | ".join(r.reasons[:5]) + next_session))
+        if r.state == "incomplete":
+            messages.append(("interval_incomplete", f"[{env}] INCOMPLETE P&L check — no HALT. " + " | ".join(r.reasons[:5])))
+        for event, text in messages:
+            try:
+                notifier.send(text, event=event, session_id=result.session_id,
+                              trading_date=trading_date.isoformat())
+            except Exception as exc:
+                logging.getLogger(__name__).warning("Session %s alert failed: %s", event, exc)
     return result

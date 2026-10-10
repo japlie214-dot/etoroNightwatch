@@ -22,6 +22,7 @@ from zoneinfo import ZoneInfo
 
 from .config import ConfigError, load_config
 from .db.repo import Repo, default_db_path
+from .engine.halt import write_halt
 from .engine.session import run_session
 from .etoro.client import EtoroClient
 from .host import Host, get_host
@@ -160,10 +161,7 @@ def set_halt(host: Host) -> Path:
     Shared by the ``halt`` CLI subcommand and the Telegram ``/halt`` command
     (:mod:`nightwatch.notify.commands`) so the two never drift apart.
     """
-    path = host.halt_flag_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("halted by nightwatch.cli halt\n", encoding="utf-8")
-    return path
+    return write_halt(host, reason="halted by nightwatch.cli halt", source="cli")
 
 
 def clear_halt(host: Host) -> bool:

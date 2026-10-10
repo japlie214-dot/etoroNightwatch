@@ -158,6 +158,6 @@ def test_session_snapshot_report_not_gate(repo, host, config, monkeypatch, pnl, 
                                      "schg_position_value": 0.0}
         assert repo.conn.execute("SELECT COUNT(*) FROM portfolio_snapshot_positions").fetchone()[0] == len(pnl["clientPortfolio"]["positions"])
         assert snap.positions == build(pnl).positions
-        assert result.reason.endswith("; snapshot 1: 1 position(s), equity=3.75, complete=True")
+        assert result.reason.endswith("; snapshot 1: 1 position(s), equity=3.75, complete=True; interval: no baseline (first snapshot)")
         assert _pnl_reply(repo) == (f"equity=3.75 cash=1.25 unrealized_pnl=1.25 realized_pnl=None "
                                    f"(as of {snap.taken_at})")

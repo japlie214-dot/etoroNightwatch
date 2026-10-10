@@ -138,7 +138,13 @@ def test_session_decision_persisted_without_advancing_state(repo, host, config, 
     assert "arming refused: " + "; ".join(session.arming_refusals(config)) in result.reason
     assert ("budget_override_usd set but not honoured (ladder has no field)" in result.reason) is (override is not None)
     intents = json.loads(d.intents) if isinstance(d.intents, str) else d.intents
-    summary = "; ".join(f"{i['side']} {i['symbol']} ${i['amount']:.2f}" for i in intents) or "none"
+    groups = {}
+    for i in intents:
+        groups.setdefault((i['side'], i['symbol']), []).append(i['amount'])
+    assert list(groups) == [("open", "SCHG")]
+    assert len(set(groups[("open", "SCHG")])) > 1
+    summary = "; ".join(f"{side} {symbol} {len(amounts)} orders = ${sum(amounts):.2f}"
+                        for (side, symbol), amounts in groups.items()) or "none"
     assert result.reason.startswith(f"would have done {len(intents)} intent(s): {summary}; ladder: ")
     assert repo.list_lot_annotations() == [] and repo.active_buckets() == []
 

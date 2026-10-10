@@ -27,6 +27,7 @@ def test_load_config_defaults(config_path: Path, secrets_path: Path, host: Deskt
     assert config.etoro.environment is EtoroEnvironment.DEMO
     assert config.symbols.all == ("SPY", "SCHG", "UPRO")
     assert config.risk.max_open_lots is None
+    assert config.risk.max_unexplained_loss_usd == 50.0
     assert config.strategy.cash_reserve_usd == 0.0
     # ReconciliationConfig's defaults load even with no [reconciliation]
     # section in config.toml at all (MINIMAL_CONFIG_TOML has none) -- the
@@ -43,6 +44,7 @@ def test_load_config_operator_risk_limits(tmp_path: Path) -> None:
         env={},
     )
     assert config.risk.max_daily_loss_usd == 500.0
+    assert config.risk.max_unexplained_loss_usd == 50.0
     assert config.risk.max_open_lots == 100
     assert config.risk.max_notional_per_session_usd == 5000.0
     assert config.etoro.environment is EtoroEnvironment.DEMO
@@ -125,6 +127,21 @@ def test_risk_config_rejects_non_positive_open_lot_cap(value: int) -> None:
 def test_risk_config_rejects_non_positive_daily_loss_threshold(value: float) -> None:
     with pytest.raises(ConfigError, match="risk.max_daily_loss_usd must be positive"):
         RiskConfig(max_daily_loss_usd=value)
+
+
+@pytest.mark.parametrize("value, expected", [('""', None), ("75.0", 75.0)])
+def test_load_config_unexplained_loss(config_path, tmp_path, value, expected):
+    config_path.write_text(config_path.read_text(encoding="utf-8")
+                           + f"max_unexplained_loss_usd = {value}\n", encoding="utf-8")
+    config = load_config(config_path=config_path, secrets_path=tmp_path / "absent.env", env={})
+    assert config.risk.max_unexplained_loss_usd == expected
+
+
+@pytest.mark.parametrize("value", [0.0, -1.0])
+def test_risk_config_rejects_non_positive_unexplained_loss(value):
+    with pytest.raises(ConfigError, match="risk.max_unexplained_loss_usd must be positive"):
+        RiskConfig(max_unexplained_loss_usd=value)
+    assert RiskConfig(max_unexplained_loss_usd=None).max_unexplained_loss_usd is None
 
 
 def test_load_config_reconciliation_section_overrides_defaults(

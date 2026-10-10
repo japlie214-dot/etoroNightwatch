@@ -8,6 +8,7 @@ import pytest
 
 import nightwatch.host as host_module
 from nightwatch import cli
+from nightwatch.engine.halt import read_halt
 from nightwatch.host import DesktopHost
 
 
@@ -33,6 +34,9 @@ def test_initdb_creates_database(host: DesktopHost, capsys: pytest.CaptureFixtur
 def test_halt_then_resume(host: DesktopHost) -> None:
     assert cli.main(["halt"]) == 0
     assert host.halt_flag_path().exists()
+    flag = read_halt(host)
+    assert flag["reason"] == "halted by nightwatch.cli halt" and flag["source"] == "cli"
+    assert flag["set_at"]
     assert cli.main(["resume"]) == 0
     assert not host.halt_flag_path().exists()
 

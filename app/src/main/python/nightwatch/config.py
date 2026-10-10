@@ -598,10 +598,13 @@ class RiskConfig:
     """Risk caps; daily loss is an alert threshold; never halts (T010).
 
     Gate 12 checks the open-lot cap; session notional is evaluated elsewhere.
+    max_daily_loss_usd = alert A threshold, alert only;
+    max_unexplained_loss_usd = alert C threshold, sets HALT.
     """
 
     max_notional_per_session_usd: float = 5000.0
     max_daily_loss_usd: float | None = None
+    max_unexplained_loss_usd: float | None = 50.0
     #: Gate 2 aborts below this when the host is on battery.
     min_battery_percent: int = 40
     max_open_lots: int | None = None
@@ -611,6 +614,8 @@ class RiskConfig:
             raise ConfigError("risk.max_notional_per_session_usd must be positive")
         if self.max_daily_loss_usd is not None and self.max_daily_loss_usd <= 0:
             raise ConfigError("risk.max_daily_loss_usd must be positive")
+        if self.max_unexplained_loss_usd is not None and self.max_unexplained_loss_usd <= 0:
+            raise ConfigError("risk.max_unexplained_loss_usd must be positive")
         if self.max_open_lots is not None and self.max_open_lots < 1:
             raise ConfigError("risk.max_open_lots must be at least 1")
         if not 0 <= self.min_battery_percent <= 100:
@@ -868,6 +873,11 @@ def load_config(
             else float(rk["max_daily_loss_usd"])
         ),
         min_battery_percent=int(rk.get("min_battery_percent", 40)),
+        max_unexplained_loss_usd=(
+            None
+            if rk.get("max_unexplained_loss_usd", 50.0) in (None, "")
+            else float(rk.get("max_unexplained_loss_usd", 50.0))
+        ),
         max_open_lots=(
             None
             if rk.get("max_open_lots") in (None, "")
