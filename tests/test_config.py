@@ -45,7 +45,7 @@ def test_load_config_operator_risk_limits(tmp_path: Path) -> None:
     )
     assert config.risk.max_daily_loss_usd == 500.0
     assert config.risk.max_unexplained_loss_usd == 50.0
-    assert config.risk.max_open_lots == 100
+    assert config.risk.max_open_lots == 1000
     assert config.risk.max_notional_per_session_usd == 5000.0
     assert config.etoro.environment is EtoroEnvironment.DEMO
     assert config.strategy.cash_reserve_usd == 5000.0

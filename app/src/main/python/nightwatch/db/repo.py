@@ -1003,6 +1003,19 @@ class Repo:
         ).fetchall()
         return [self._intent(r) for r in rows]
 
+    def reserved_buy_usd(self, trading_date: str) -> float:
+        """Buy notional reserved for a date; only rejection frees the cap."""
+        row = self.conn.execute(
+            """
+            SELECT SUM(intents.amount_usd)
+              FROM intents JOIN sessions ON intents.session_id = sessions.id
+             WHERE sessions.trading_date = ? AND intents.side = 'buy'
+               AND intents.status IN ('pending', 'sent', 'filled', 'recovered', 'abandoned')
+            """,
+            (trading_date,),
+        ).fetchone()
+        return float(row[0] or 0.0)
+
     def pending_intents(self) -> list[Intent]:
         """Return intents that were written but never resolved (crash recovery)."""
         rows = self.conn.execute(

@@ -202,6 +202,30 @@ def test_intent_status_lifecycle_and_pending_listing(repo: Repo) -> None:
     assert repo.pending_intents() == []
 
 
+def test_reserved_buy_usd_counts_date_and_non_rejected_buys(repo: Repo) -> None:
+    assert repo.reserved_buy_usd("2026-01-02") == 0.0
+    for date, multiplier in [("2026-01-02", 1), ("2026-01-03", 10)]:
+        session = repo.create_session(date, mode="live", environment="demo", armed=True)
+        for sequence, status in enumerate(
+            ("pending", "sent", "filled", "recovered", "abandoned", "rejected"), 1,
+        ):
+            repo.insert_intent(Intent(
+                session_id=session.id, request_id=f"{date}-{status}", sequence=sequence,
+                symbol="SCHG", side="buy", amount_usd=sequence * 100.0 * multiplier,
+                status=status,
+            ))
+        repo.insert_intent(Intent(
+            session_id=session.id, request_id=f"{date}-close", sequence=7,
+            symbol="UPRO", side="close", amount_usd=9999.0, status="filled",
+        ))
+    changes = repo.conn.total_changes
+    assert repo.reserved_buy_usd("2026-01-02") == 1500.0
+    assert repo.reserved_buy_usd("2026-01-03") == 15000.0
+    assert Repo(repo.conn).reserved_buy_usd("2026-01-02") == 1500.0
+    assert repo.reserved_buy_usd("2026-01-04") == 0.0
+    assert repo.conn.total_changes == changes
+
+
 def test_abandoned_intents_listing(repo: Repo) -> None:
     """The state-based resolution path's candidate set
     (engine.reconcile.resolve_abandoned_intent_adoptions, DESIGN_session.md
