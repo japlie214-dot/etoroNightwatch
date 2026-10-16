@@ -1183,6 +1183,57 @@ class Repo:
 
     # -- lots --------------------------------------------------------------
 
+    def next_intent_sequence(self, session_id: int) -> int:
+        """Return the next free ``sequence`` for a session's intents."""
+        row = self.conn.execute(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM intents WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row[0])
+
+    def insert_tp_clear(
+        self, order_row_id: int, position_id: str, request_id: str, attempt: int
+    ) -> int:
+        """Persist one take-profit clear attempt (status ``pending``) before its PATCH."""
+        cur = self.conn.execute(
+            """
+            INSERT INTO tp_clears (order_id, position_id, request_id, attempt,
+                                   status, created_at)
+            VALUES (?, ?, ?, ?, 'pending', ?)
+            """,
+            (order_row_id, position_id, request_id, attempt, utcnow()),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def set_tp_clear_status(
+        self, tp_clear_id: int, status: str, detail: str | None = None
+    ) -> None:
+        """Advance a take-profit clear attempt; ``cleared``/``failed`` stamp ``resolved_at``."""
+        resolved = utcnow() if status in ("cleared", "failed") else None
+        self.conn.execute(
+            """
+            UPDATE tp_clears
+               SET status = ?,
+                   detail = COALESCE(?, detail),
+                   resolved_at = COALESCE(?, resolved_at)
+             WHERE id = ?
+            """,
+            (status, detail, resolved, tp_clear_id),
+        )
+        self.conn.commit()
+
+    def list_tp_clears(self, position_id: str | None = None) -> list[dict]:
+        """Return take-profit clear attempts (all, or one position's), in id order."""
+        if position_id is None:
+            rows = self.conn.execute("SELECT * FROM tp_clears ORDER BY id").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM tp_clears WHERE position_id = ? ORDER BY id",
+                (position_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def insert_lot(self, lot: Lot) -> int:
         """Persist a new ladder lot. Returns its row id."""
         now = utcnow()

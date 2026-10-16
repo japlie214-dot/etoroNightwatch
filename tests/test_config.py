@@ -306,3 +306,41 @@ def test_two_key_arming(
     config_path.write_text(text, encoding="utf-8")
     config = load_config(config_path=config_path, secrets_path=secrets_path, env=env, host=host)
     assert config.is_armed is expected
+
+
+@pytest.mark.parametrize("line, expected", [('max_orders_per_session = ""', None), ("max_orders_per_session = 1", 1)])
+def test_load_config_max_orders_per_session(
+    config_path: Path, tmp_path: Path, line: str, expected: int | None
+) -> None:
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8") + line + "\n",
+        encoding="utf-8",
+    )
+    config = load_config(
+        config_path=config_path, secrets_path=tmp_path / "absent.env", env={},
+    )
+    assert config.risk.max_orders_per_session == expected
+
+
+def test_load_config_max_orders_per_session_absent_is_none(
+    config_path: Path, tmp_path: Path
+) -> None:
+    config = load_config(
+        config_path=config_path, secrets_path=tmp_path / "absent.env", env={},
+    )
+    assert config.risk.max_orders_per_session is None
+
+
+@pytest.mark.parametrize("value", [0, -1])
+def test_risk_config_rejects_non_positive_order_ceiling(value: int) -> None:
+    with pytest.raises(ConfigError, match="risk.max_orders_per_session must be at least 1"):
+        RiskConfig(max_orders_per_session=value)
+
+
+def test_shipped_config_sets_order_ceiling_to_one(tmp_path: Path) -> None:
+    config = load_config(
+        config_path=Path(__file__).resolve().parents[1] / "config" / "config.toml",
+        secrets_path=tmp_path / "absent.env",
+        env={},
+    )
+    assert config.risk.max_orders_per_session == 1

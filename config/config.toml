@@ -160,6 +160,8 @@ max_daily_loss_usd           = 500.0
 max_unexplained_loss_usd = 50.0
 # boss 2026-10-10: 1000 (221 held at adoption)
 max_open_lots                = 1000
+# S7-3a safety ceiling: orders submitted per session (boss plan 2026-10-10); raise in S7-3b
+max_orders_per_session       = 1
 # Gate 2 aborts the session if the host is on battery below this level.
 min_battery_percent          = 40
 

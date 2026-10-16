@@ -785,3 +785,72 @@ def test_price_window_fingerprint_distinct_symbols_and_dates_do_not_collide(repo
     # Most recent session first.
     dates = [r.trading_date for r in repo.list_price_window_fingerprints("SPY")]
     assert dates == ["2026-09-05", "2026-09-04"]
+
+
+# -- tp_clears / next_intent_sequence (T028, S7-3a) ----------------------------
+
+
+def _order_row(repo: Repo) -> tuple[int, int]:
+    session = repo.create_session("2026-10-16", "live", "demo", True)
+    intent_id = repo.insert_intent(
+        Intent(session_id=session.id, request_id="rid-tp-1", sequence=1,
+               symbol="SCHG", side="buy", amount_usd=100.0)
+    )
+    order_row_id = repo.insert_order(
+        Order(intent_id=intent_id, session_id=session.id, request_id="rid-tp-1",
+              symbol="SCHG", side="buy")
+    )
+    return session.id, order_row_id
+
+
+def test_next_intent_sequence_counts_per_session(repo: Repo) -> None:
+    session = repo.create_session("2026-10-16", "live", "demo", True)
+    assert repo.next_intent_sequence(session.id) == 1
+    repo.insert_intent(
+        Intent(session_id=session.id, request_id="rid-seq-1", sequence=1,
+               symbol="SCHG", side="buy", amount_usd=10.0)
+    )
+    assert repo.next_intent_sequence(session.id) == 2
+
+
+def test_tp_clear_status_transitions_and_resolved_at(repo: Repo) -> None:
+    _, order_row_id = _order_row(repo)
+    cleared = repo.insert_tp_clear(order_row_id, "P1", "tp-rid-1", 1)
+    failed = repo.insert_tp_clear(order_row_id, "P1", "tp-rid-2", 2)
+    rows = {r["request_id"]: r for r in repo.list_tp_clears("P1")}
+    assert rows["tp-rid-1"]["status"] == "pending"
+    assert rows["tp-rid-1"]["resolved_at"] is None
+
+    repo.set_tp_clear_status(cleared, "sent", "ack status 202 op o1")
+    repo.set_tp_clear_status(cleared, "cleared", "read-back clean")
+    repo.set_tp_clear_status(failed, "failed", "refused: EtoroValidationError: x")
+
+    rows = {r["request_id"]: r for r in repo.list_tp_clears("P1")}
+    assert rows["tp-rid-1"]["status"] == "cleared"
+    assert rows["tp-rid-1"]["detail"] == "read-back clean"
+    assert rows["tp-rid-1"]["resolved_at"] is not None
+    assert rows["tp-rid-2"]["status"] == "failed"
+    assert rows["tp-rid-2"]["resolved_at"] is not None
+
+
+def test_tp_clear_sent_does_not_stamp_resolved_at(repo: Repo) -> None:
+    _, order_row_id = _order_row(repo)
+    tp_id = repo.insert_tp_clear(order_row_id, "P2", "tp-rid-3", 1)
+    repo.set_tp_clear_status(tp_id, "sent")
+    row = repo.list_tp_clears("P2")[0]
+    assert row["status"] == "sent"
+    assert row["resolved_at"] is None
+
+
+def test_tp_clear_request_id_is_unique(repo: Repo) -> None:
+    _, order_row_id = _order_row(repo)
+    repo.insert_tp_clear(order_row_id, "P3", "tp-dup", 1)
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_tp_clear(order_row_id, "P3", "tp-dup", 2)
+
+
+def test_tp_clear_status_rejects_unknown_value(repo: Repo) -> None:
+    _, order_row_id = _order_row(repo)
+    tp_id = repo.insert_tp_clear(order_row_id, "P4", "tp-bad", 1)
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.set_tp_clear_status(tp_id, "done")

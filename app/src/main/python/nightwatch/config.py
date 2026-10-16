@@ -608,6 +608,9 @@ class RiskConfig:
     #: Gate 2 aborts below this when the host is on battery.
     min_battery_percent: int = 40
     max_open_lots: int | None = None
+    #: S7-3a safety ceiling: buy orders the executor submits per session
+    #: (boss plan 2026-10-10). None = no ceiling configured; when set, >= 1.
+    max_orders_per_session: int | None = None
 
     def __post_init__(self) -> None:
         if self.max_notional_per_session_usd <= 0:
@@ -618,6 +621,8 @@ class RiskConfig:
             raise ConfigError("risk.max_unexplained_loss_usd must be positive")
         if self.max_open_lots is not None and self.max_open_lots < 1:
             raise ConfigError("risk.max_open_lots must be at least 1")
+        if self.max_orders_per_session is not None and self.max_orders_per_session < 1:
+            raise ConfigError("risk.max_orders_per_session must be at least 1")
         if not 0 <= self.min_battery_percent <= 100:
             raise ConfigError("risk.min_battery_percent must be between 0 and 100")
 
@@ -882,6 +887,11 @@ def load_config(
             None
             if rk.get("max_open_lots") in (None, "")
             else int(rk["max_open_lots"])
+        ),
+        max_orders_per_session=(
+            None
+            if rk.get("max_orders_per_session") in (None, "")
+            else int(rk["max_orders_per_session"])
         ),
     )
 

@@ -119,3 +119,41 @@ def test_repo_open_reports_schema_version(tmp_path: Path) -> None:
     with Repo.open(tmp_path / "nightwatch.db") as repo:
         assert repo.schema_version() == migrations.discover()[-1].version
         assert set(repo.table_names()) >= EXPECTED_TABLES
+
+
+def test_migration_008_adds_tp_clears_to_a_version_7_database(tmp_path: Path, monkeypatch) -> None:
+    all_migrations = migrations.discover()
+    upto_7 = [m for m in all_migrations if m.version <= 7]
+    assert upto_7[-1].version == 7
+    conn = connect(tmp_path / "nightwatch.db")
+    try:
+        monkeypatch.setattr(migrations, "discover", lambda: upto_7)
+        assert migrations.migrate(conn) == 7
+        has_table = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tp_clears'"
+        ).fetchone()[0]
+        assert has_table == 0
+        monkeypatch.undo()
+        assert migrations.migrate(conn) == 8
+        columns = {r[1] for r in conn.execute("PRAGMA table_info(tp_clears)").fetchall()}
+        assert columns == {
+            "id", "order_id", "position_id", "request_id", "attempt",
+            "status", "detail", "created_at", "resolved_at",
+        }
+    finally:
+        conn.close()
+
+
+def test_fresh_database_has_tp_clears(tmp_path: Path) -> None:
+    conn = connect(tmp_path / "nightwatch.db")
+    try:
+        migrations.migrate(conn)
+        names = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type IN ('table', 'index')"
+            ).fetchall()
+        }
+        assert "tp_clears" in names
+        assert "idx_tp_clears_position" in names
+    finally:
+        conn.close()
