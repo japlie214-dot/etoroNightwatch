@@ -1024,6 +1024,32 @@ class Repo:
         ).fetchall()
         return [self._intent(r) for r in rows]
 
+    def unresolved_buy_intents(self) -> list[tuple[Intent, str]]:
+        """Buy intents still pending or sent, each with its session's trading date."""
+        rows = self.conn.execute(
+            """
+            SELECT i.*, s.trading_date AS trading_date
+              FROM intents i JOIN sessions s ON i.session_id = s.id
+             WHERE i.side = 'buy' AND i.status IN ('pending', 'sent')
+             ORDER BY i.id
+            """
+        ).fetchall()
+        return [(self._intent(r), str(r["trading_date"])) for r in rows]
+
+    def sessions_since(self, trading_date: str) -> int:
+        """Count sessions whose trading date is strictly later than ``trading_date``."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) FROM sessions WHERE trading_date > ?", (trading_date,)
+        ).fetchone()
+        return int(row[0])
+
+    def pending_tp_clears(self) -> list[dict]:
+        """Take-profit clear attempts still pending or sent, in id order."""
+        rows = self.conn.execute(
+            "SELECT * FROM tp_clears WHERE status IN ('pending', 'sent') ORDER BY id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def abandoned_intents(self) -> list[Intent]:
         """Return every intent marked ``'abandoned'`` -- the candidate set
         for :func:`nightwatch.engine.reconcile.resolve_abandoned_intent_adoptions`

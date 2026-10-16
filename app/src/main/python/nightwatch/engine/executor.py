@@ -28,10 +28,16 @@ from ..etoro.errors import (
     EtoroRateLimitError,
     EtoroValidationError,
 )
-from ..etoro.models import OrderStatus, Position
-from ..strategy.ladder import LadderIntent
+from ..etoro.models import OrderResult, OrderStatus, Position
+from ..strategy.ladder import LadderIntent, SpyContext
 
-__all__ = ["ExecutedBuy", "ExecutionReport", "execute_buys"]
+__all__ = [
+    "ExecutedBuy",
+    "ExecutionReport",
+    "RecoveryReport",
+    "execute_buys",
+    "recover_unfinished",
+]
 
 TP_ATTEMPTS = 3
 TP_READBACK_TRIES = 7
@@ -159,6 +165,82 @@ def _clear_take_profit(
             return True
         repo.set_tp_clear_status(tp_id, "failed", "TP still present after read-back")
     return False
+
+
+def finish_filled_buy(
+    *,
+    repo: Repo,
+    client: EtoroClient,
+    intent: LadderIntent,
+    intent_id: int,
+    request_id: str,
+    res: OrderResult,
+    order_id: str | None,
+    order_row_id: int,
+    trading_date: date,
+    spy: Any,
+    sleep: Callable[[float], None],
+    followups: list[str],
+    tp_failed: list[str],
+) -> ExecutedBuy:
+    """Steps after a confirmed fill: position read, annotation, TP clear.
+
+    ``order_id`` is the effective id (``res.order_id or order_id``). The caller
+    has already written the order row and set the intent to ``filled``. Appends
+    to ``followups`` and ``tp_failed`` in place.
+    """
+    partial = res.status in _PARTIAL_STATUSES
+    detail = f"filled: status {res.status.name}" + ("; partial fill" if partial else "")
+    filled = ExecutedBuy(
+        intent=intent, intent_id=intent_id, request_id=request_id,
+        order_row_id=order_row_id, order_id=order_id, outcome="filled",
+        position_id=res.position_id, fill_amount_usd=res.fill_amount_usd,
+        detail=detail,
+    )
+
+    position_id = res.position_id
+    if position_id is None:
+        followups.append(f"order {order_id} filled but no position id")
+        return filled
+
+    position = _read_position(client, position_id, sleep)
+    if position is None:
+        followups.append(
+            f"position {position_id} not visible in portfolio after 30 s: "
+            "annotation and TP clear skipped"
+        )
+        tp_failed.append(position_id)
+        return filled
+
+    try:
+        repo.insert_lot_annotation(
+            LotAnnotation(
+                position_id=position_id,
+                symbol="SCHG",
+                book="catapult",
+                entry_date=position.open_date or trading_date.isoformat(),
+                entry_amount=position.amount,
+                origin="app",
+                entry_context_source="derived",
+                entry_reference_spy=spy.close,
+                entry_spy_ath=spy.ath,
+                entry_spy_close=spy.close,
+                entry_spy_drawdown=spy.drawdown,
+                entry_tier=spy.tier,
+                bucket_id=None,
+                entry_order_id=order_row_id,
+                is_open=True,
+            )
+        )
+    except Exception as exc:
+        followups.append(f"annotation for position {position_id} failed: {exc}")
+
+    if not _clear_take_profit(
+        repo=repo, client=client, order_row_id=order_row_id,
+        position=position, sleep=sleep,
+    ):
+        tp_failed.append(position_id)
+    return filled
 
 
 def _buy_one(
@@ -292,58 +374,12 @@ def _buy_one(
         )
 
     repo.set_intent_status(intent_id, "filled", resolved=True)
-    partial = res.status in _PARTIAL_STATUSES
-    detail = f"filled: status {res.status.name}" + ("; partial fill" if partial else "")
-    filled = ExecutedBuy(
-        intent=intent, intent_id=intent_id, request_id=request_id,
-        order_row_id=order_row_id, order_id=effective_order_id, outcome="filled",
-        position_id=res.position_id, fill_amount_usd=res.fill_amount_usd,
-        detail=detail,
+    return finish_filled_buy(
+        repo=repo, client=client, intent=intent, intent_id=intent_id,
+        request_id=request_id, res=res, order_id=effective_order_id,
+        order_row_id=order_row_id, trading_date=trading_date, spy=spy,
+        sleep=sleep, followups=followups, tp_failed=tp_failed,
     )
-
-    position_id = res.position_id
-    if position_id is None:
-        followups.append(f"order {effective_order_id} filled but no position id")
-        return filled
-
-    position = _read_position(client, position_id, sleep)
-    if position is None:
-        followups.append(
-            f"position {position_id} not visible in portfolio after 30 s: "
-            "annotation and TP clear skipped"
-        )
-        tp_failed.append(position_id)
-        return filled
-
-    try:
-        repo.insert_lot_annotation(
-            LotAnnotation(
-                position_id=position_id,
-                symbol="SCHG",
-                book="catapult",
-                entry_date=position.open_date or trading_date.isoformat(),
-                entry_amount=position.amount,
-                origin="app",
-                entry_context_source="derived",
-                entry_reference_spy=spy.close,
-                entry_spy_ath=spy.ath,
-                entry_spy_close=spy.close,
-                entry_spy_drawdown=spy.drawdown,
-                entry_tier=spy.tier,
-                bucket_id=None,
-                entry_order_id=order_row_id,
-                is_open=True,
-            )
-        )
-    except Exception as exc:
-        followups.append(f"annotation for position {position_id} failed: {exc}")
-
-    if not _clear_take_profit(
-        repo=repo, client=client, order_row_id=order_row_id,
-        position=position, sleep=sleep,
-    ):
-        tp_failed.append(position_id)
-    return filled
 
 
 def execute_buys(
@@ -403,6 +439,256 @@ def execute_buys(
         results=tuple(results),
         stopped=stopped,
         deferred=deferred,
+        tp_failed=tuple(tp_failed),
+        followups=tuple(followups),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryReport:
+    """What :func:`recover_unfinished` did at session start."""
+
+    #: Intents or take-profit clears completed this call.
+    resolved: tuple[str, ...]
+    #: Intents still ``pending``/``sent`` after this call.
+    still_unresolved: tuple[str, ...]
+    #: Intents marked ``abandoned`` this call.
+    abandoned: tuple[str, ...]
+    #: Position ids whose take-profit is not confirmed cleared.
+    tp_failed: tuple[str, ...]
+    #: Human-readable follow-up lines.
+    followups: tuple[str, ...]
+
+
+def _decision_spy(repo: Repo, session_id: int) -> SpyContext | None:
+    """The SPY context of the intent's own session, or None if it has none."""
+    decision = repo.get_decision(session_id)
+    if (
+        decision is None
+        or decision.spy_close is None
+        or decision.spy_ath is None
+        or decision.drawdown is None
+        or decision.tier is None
+    ):
+        return None
+    return SpyContext(
+        ath=decision.spy_ath,
+        close=decision.spy_close,
+        drawdown=decision.drawdown,
+        tier=decision.tier,
+    )
+
+
+def _age_or_abandon(
+    *,
+    repo: Repo,
+    intent: Intent,
+    trading_date: str,
+    abandon_after_sessions: int,
+    label: str,
+    still_unresolved: list[str],
+    abandoned: list[str],
+) -> None:
+    """Escalate visibility by session age. Never frees cap, never resubmits."""
+    age = repo.sessions_since(trading_date)
+    if age >= abandon_after_sessions:
+        repo.set_intent_status(intent.id, "abandoned", resolved=True)
+        abandoned.append(f"{label}: abandoned after {age} later sessions")
+    else:
+        still_unresolved.append(f"{label}: unresolved; {age} later sessions")
+
+
+def _recover_intent(
+    *,
+    repo: Repo,
+    client: EtoroClient,
+    intent: Intent,
+    trading_date: str,
+    abandon_after_sessions: int,
+    sleep: Callable[[float], None],
+    resolved: list[str],
+    still_unresolved: list[str],
+    abandoned: list[str],
+    followups: list[str],
+    tp_failed: list[str],
+) -> None:
+    intent_id = intent.id
+    request_id = intent.request_id
+    label = f"intent {intent_id} ({request_id})"
+
+    def age_rule() -> None:
+        _age_or_abandon(
+            repo=repo, intent=intent, trading_date=trading_date,
+            abandon_after_sessions=abandon_after_sessions, label=label,
+            still_unresolved=still_unresolved, abandoned=abandoned,
+        )
+
+    try:
+        res = client.recover_by_reference_id(request_id)
+    except Exception as exc:
+        followups.append(f"{label}: broker lookup failed ({type(exc).__name__}); cannot tell")
+        res = None
+    if res is None:
+        age_rule()
+        return
+
+    order_row = repo.get_order_by_reference_id(request_id)
+    if order_row is None:
+        order_row_id = repo.insert_order(
+            Order(
+                intent_id=intent_id,
+                session_id=intent.session_id,
+                request_id=request_id,
+                symbol=intent.symbol,
+                side="buy",
+                instrument_id=intent.instrument_id,
+                order_id=res.order_id,
+                reference_id=request_id,
+            )
+        )
+    else:
+        order_row_id = order_row.id
+
+    if res.is_terminal:
+        final = res
+    else:
+        try:
+            poll = client.poll_order_to_terminal(
+                order_id=res.order_id, reference_id=request_id
+            )
+        except Exception:
+            poll = None
+        if poll is None or not poll.order.is_terminal:
+            last = res if poll is None else poll.order
+            repo.update_order_status(
+                order_row_id, last_status=last.status.value, order_id=res.order_id
+            )
+            if last.status == OrderStatus.PARTIALLY_FILLED:
+                followups.append(
+                    f"{label}: last status 5 (partially filled); a live partial "
+                    "position may exist without an annotation"
+                )
+            age_rule()
+            return
+        final = poll.order
+
+    effective_order_id = final.order_id or res.order_id
+    repo.update_order_status(
+        order_row_id,
+        last_status=final.status.value,
+        status_history=[final.status.value],
+        terminal_status=final.status.value,
+        fill_price=final.fill_price,
+        fill_units=final.fill_units,
+        fill_amount_usd=final.fill_amount_usd,
+        position_id=final.position_id,
+        order_id=effective_order_id,
+        error=final.reject_reason,
+    )
+
+    if not final.is_filled:
+        repo.set_intent_status(intent_id, "rejected", resolved=True)
+        resolved.append(f"{label}: recovered rejection ({final.status.name})")
+        return
+
+    spy = _decision_spy(repo, intent.session_id)
+    if spy is None:
+        followups.append(f"no SPY context for intent {intent_id}; annotation skipped")
+        still_unresolved.append(f"{label}: filled, no SPY context")
+        return
+
+    ladder_intent = LadderIntent(
+        "SCHG", "open", amount=intent.amount_usd,
+        reason=intent.reason or "", book=intent.book,
+    )
+    before = len(followups)
+    finish_filled_buy(
+        repo=repo, client=client, intent=ladder_intent, intent_id=intent_id,
+        request_id=request_id, res=final, order_id=effective_order_id,
+        order_row_id=order_row_id, trading_date=date.fromisoformat(trading_date),
+        spy=spy, sleep=sleep, followups=followups, tp_failed=tp_failed,
+    )
+    if any("not visible in portfolio" in line for line in followups[before:]):
+        still_unresolved.append(f"{label}: filled, position not visible yet")
+        return
+    repo.set_intent_status(intent_id, "recovered", resolved=True)
+    resolved.append(f"{label}: recovered fill")
+
+
+def _recover_tp_clear(
+    *,
+    repo: Repo,
+    client: EtoroClient,
+    row: dict,
+    sleep: Callable[[float], None],
+    resolved: list[str],
+    followups: list[str],
+    tp_failed: list[str],
+) -> None:
+    tp_id = row["id"]
+    position_id = row["position_id"]
+    label = f"tp clear {tp_id} (position {position_id})"
+    try:
+        portfolio = client.get_portfolio()
+    except Exception as exc:
+        followups.append(f"{label}: portfolio read failed ({type(exc).__name__}); row left {row['status']}")
+        return
+    position = next((p for p in portfolio if p.position_id == position_id), None)
+    if position is None:
+        repo.set_tp_clear_status(tp_id, "failed", "position not in portfolio")
+        followups.append(f"{label}: position not in portfolio")
+        return
+    if _tp_absent(position):
+        repo.set_tp_clear_status(tp_id, "cleared", "confirmed at recovery")
+        resolved.append(f"{label}: TP already absent")
+        return
+    repo.set_tp_clear_status(tp_id, "failed", "superseded by fresh attempt")
+    if _clear_take_profit(
+        repo=repo, client=client, order_row_id=row["order_id"],
+        position=position, sleep=sleep,
+    ):
+        resolved.append(f"{label}: TP cleared by fresh attempt")
+    else:
+        tp_failed.append(position_id)
+
+
+def recover_unfinished(
+    *,
+    repo: Repo,
+    client: EtoroClient,
+    abandon_after_sessions: int,
+    sleep: Callable[[float], None] = time.sleep,
+) -> RecoveryReport:
+    """Resolve buys and TP clears a crash left unfinished. Never buys.
+
+    Each unresolved buy is looked up by its ``referenceId`` only; a missing
+    record or a failed lookup never permits a resend and never marks the intent
+    rejected. Old fills are annotated with their own session's SPY context.
+    """
+    resolved: list[str] = []
+    still_unresolved: list[str] = []
+    abandoned: list[str] = []
+    tp_failed: list[str] = []
+    followups: list[str] = []
+
+    for intent, trading_date in repo.unresolved_buy_intents():
+        _recover_intent(
+            repo=repo, client=client, intent=intent, trading_date=trading_date,
+            abandon_after_sessions=abandon_after_sessions, sleep=sleep,
+            resolved=resolved, still_unresolved=still_unresolved,
+            abandoned=abandoned, followups=followups, tp_failed=tp_failed,
+        )
+
+    for row in repo.pending_tp_clears():
+        _recover_tp_clear(
+            repo=repo, client=client, row=row, sleep=sleep,
+            resolved=resolved, followups=followups, tp_failed=tp_failed,
+        )
+
+    return RecoveryReport(
+        resolved=tuple(resolved),
+        still_unresolved=tuple(still_unresolved),
+        abandoned=tuple(abandoned),
         tp_failed=tuple(tp_failed),
         followups=tuple(followups),
     )

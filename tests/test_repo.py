@@ -854,3 +854,59 @@ def test_tp_clear_status_rejects_unknown_value(repo: Repo) -> None:
     tp_id = repo.insert_tp_clear(order_row_id, "P4", "tp-bad", 1)
     with pytest.raises(sqlite3.IntegrityError):
         repo.set_tp_clear_status(tp_id, "done")
+
+
+def test_unresolved_buy_intents_filters_side_and_status_with_date(repo: Repo) -> None:
+    older = repo.create_session("2026-10-15", "live", "demo", True)
+    newer = repo.create_session("2026-10-16", "live", "demo", True)
+    pending = repo.insert_intent(
+        Intent(session_id=older.id, request_id="u-pending", sequence=1,
+               symbol="SCHG", side="buy", amount_usd=10.0))
+    sent = repo.insert_intent(
+        Intent(session_id=older.id, request_id="u-sent", sequence=2,
+               symbol="SCHG", side="buy", amount_usd=20.0))
+    repo.set_intent_status(sent, "sent")
+    filled = repo.insert_intent(
+        Intent(session_id=older.id, request_id="u-filled", sequence=3,
+               symbol="SCHG", side="buy", amount_usd=30.0))
+    repo.set_intent_status(filled, "filled", resolved=True)
+    close_sent = repo.insert_intent(
+        Intent(session_id=older.id, request_id="u-close", sequence=4,
+               symbol="SCHG", side="close", amount_usd=40.0))
+    repo.set_intent_status(close_sent, "sent")
+    later = repo.insert_intent(
+        Intent(session_id=newer.id, request_id="u-later", sequence=1,
+               symbol="SCHG", side="buy", amount_usd=50.0))
+    repo.set_intent_status(later, "sent")
+
+    rows = repo.unresolved_buy_intents()
+    assert [(i.request_id, d) for i, d in rows] == [
+        ("u-pending", "2026-10-15"),
+        ("u-sent", "2026-10-15"),
+        ("u-later", "2026-10-16"),
+    ]
+    assert [i.id for i, _ in rows] == sorted(i.id for i, _ in rows)
+
+
+def test_sessions_since_counts_strictly_later_dates(repo: Repo) -> None:
+    for day in ("2026-10-14", "2026-10-15", "2026-10-16"):
+        repo.create_session(day, "live", "demo", True)
+    assert repo.sessions_since("2026-10-14") == 2
+    assert repo.sessions_since("2026-10-15") == 1
+    assert repo.sessions_since("2026-10-16") == 0
+
+
+def test_pending_tp_clears_returns_only_pending_and_sent(repo: Repo) -> None:
+    _, order_row_id = _order_row(repo)
+    pending_id = repo.insert_tp_clear(order_row_id, "PA", "tp-pa", 1)
+    sent_id = repo.insert_tp_clear(order_row_id, "PB", "tp-pb", 1)
+    repo.set_tp_clear_status(sent_id, "sent")
+    cleared_id = repo.insert_tp_clear(order_row_id, "PC", "tp-pc", 1)
+    repo.set_tp_clear_status(cleared_id, "cleared", "done")
+    failed_id = repo.insert_tp_clear(order_row_id, "PD", "tp-pd", 1)
+    repo.set_tp_clear_status(failed_id, "failed", "no")
+
+    rows = repo.pending_tp_clears()
+    assert [r["id"] for r in rows] == [pending_id, sent_id]
+    assert [r["status"] for r in rows] == ["pending", "sent"]
+    assert all(isinstance(r, dict) for r in rows)
