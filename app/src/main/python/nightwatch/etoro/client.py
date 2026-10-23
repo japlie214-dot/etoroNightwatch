@@ -705,6 +705,13 @@ class EtoroClient:
         positions_raw = data.get("positions", [])
         return [self._parse_position(p) for p in positions_raw]
 
+    def get_portfolio_strict(self) -> list[Position]:
+        """Read positions without treating an invalid envelope as an empty account."""
+        data = self._fetch_portfolio_envelope()
+        if not isinstance(data, dict) or not isinstance(data.get("positions"), list):
+            raise EtoroValidationError("portfolio response must contain a positions list")
+        return [self._parse_position(p) for p in data["positions"]]
+
     def get_pnl(self) -> dict[str, Any]:
         """``GET /trading/info/real/pnl`` (or the `/demo/` variant)."""
         segment = "demo" if self.is_demo else "real"

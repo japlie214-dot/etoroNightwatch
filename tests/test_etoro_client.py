@@ -2068,6 +2068,46 @@ def test_get_portfolio_parses_non_empty_clientPortfolio_with_real_rows() -> None
         assert position.entry_price == pytest.approx(raw["openRate"])
 
 
+@pytest.mark.parametrize("payload", [
+    [], "invalid", None, {}, {"positions": None}, {"positions": {}},
+    {"clientPortfolio": []}, {"clientPortfolio": {}},
+    {"clientPortfolio": {"positions": "invalid"}},
+])
+def test_get_portfolio_strict_rejects_invalid_envelope(payload: Any) -> None:
+    scripted = ScriptedTransport([httpx.Response(200, text=json.dumps(payload))])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(EtoroValidationError, match="positions list"):
+        client.get_portfolio_strict()
+    assert len(scripted.requests) == 1
+    assert scripted.requests[0].method == "GET"
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("rows", [[], _REAL_SCHG_ROWS])
+def test_get_portfolio_strict_accepts_only_explicit_positions_list(nested, rows) -> None:
+    payload = {"positions": rows}
+    if nested:
+        payload = {"clientPortfolio": payload}
+    scripted = ScriptedTransport([httpx.Response(200, json=payload)] * 2)
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    assert client.get_portfolio_strict() == client.get_portfolio()
+    assert len(scripted.requests) == 2
+    assert scripted.requests[0].url.path == scripted.requests[1].url.path
+    assert scripted.requests[0].url.path == "/api/v1/trading/info/demo/portfolio"
+
+
+def test_get_portfolio_strict_propagates_row_validation_and_transport_errors() -> None:
+    for response in (
+        httpx.Response(200, json={"positions": [{"positionID": "broken"}]}),
+        httpx.Response(400, json={"error": "bad request"}),
+    ):
+        scripted = ScriptedTransport([response])
+        client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+        with pytest.raises(EtoroValidationError):
+            client.get_portfolio_strict()
+        assert len(scripted.requests) == 1
+
+
 @pytest.mark.parametrize("missing_field", ["units", "openRate", "amount"])
 def test_parse_position_raises_rather_than_defaults_on_missing_field(missing_field: str) -> None:
     """A missing `units`/`openRate`/`amount` is a broker-contract change, not

@@ -215,6 +215,7 @@ PARSER_CONTRACTS: dict[str, str] = {
     "EtoroClient._detect_environment_in": "balance",
     "EtoroClient._fetch_portfolio_envelope": "portfolio-envelope",
     "EtoroClient.get_portfolio": "portfolio-envelope",
+    "EtoroClient.get_portfolio_strict": "portfolio-envelope",
     "EtoroClient.get_pnl": "pnl",
     "EtoroClient._parse_position": "portfolio-envelope",
     "EtoroClient.get_trade_history": "trade-history",
