@@ -166,6 +166,32 @@ def test_decision_round_trip(repo: Repo) -> None:
     assert decision.intents == intents
 
 
+@pytest.mark.parametrize("phases", [
+    [("A", "A"), ("B", "B")],
+    [("A", "A"), ("single", "single"), ("B", "B")],
+])
+def test_decision_phase_precedence_and_explicit_lookup(repo: Repo, phases) -> None:
+    session = repo.create_session("2026-10-23", "dry_run", "demo", False)
+    assert repo.get_decision(session.id) is None
+    for phase, preferred in phases:
+        row_id = repo.insert_decision(Decision(
+            session_id=session.id, trading_date=session.trading_date, phase=phase,
+        ))
+        assert repo.get_decision(session.id).phase == preferred
+        assert repo.get_decision(session.id, phase).id == row_id
+    assert repo.get_decision(session.id, "A").phase == "A"
+    assert repo.get_decision(session.id, "missing") is None
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_decision(Decision(session_id=session.id, trading_date=session.trading_date, phase="A"))
+
+
+def test_decision_default_phase_is_single(repo: Repo) -> None:
+    session = repo.create_session("2026-10-23", "dry_run", "demo", False)
+    row_id = repo.insert_decision(Decision(session_id=session.id, trading_date=session.trading_date))
+    assert repo.get_decision(session.id).phase == "single"
+    assert repo.get_decision(session.id, "single").id == row_id
+
+
 # -- intents / orders (crash-recovery path) -----------------------------------
 
 
@@ -587,6 +613,143 @@ def test_insert_lot_annotations_bulk_round_trips_exit_context_source(repo: Repo)
     rows = [_annotation("pos-1"), _annotation("pos-2", symbol="UPRO")]
     repo.insert_lot_annotations(rows)
     assert repo.get_lot_annotation("pos-1").exit_context_source is None  # type: ignore[union-attr]
+
+
+# -- close observations ---------------------------------------------------
+
+
+def _close_observation(repo: Repo, position_id="pos-close", status="confirmed_full_close") -> int:
+    session = repo.get_session_by_date("2026-10-23")
+    if session is None:
+        session = repo.create_session("2026-10-23", "live", "demo", True)
+    sequence = repo.next_intent_sequence(session.id)
+    request_id = f"close-{sequence}"
+    intent_id = repo.insert_intent(Intent(
+        session_id=session.id, request_id=request_id, sequence=sequence,
+        symbol="SCHG", side="close", position_id=position_id, units=2.0,
+    ))
+    order_row_id = repo.insert_order(Order(
+        intent_id=intent_id, session_id=session.id, request_id=request_id,
+        symbol="SCHG", side="close", order_id=f"order-{sequence}",
+    ))
+    return repo.record_close_observation(
+        intent_id=intent_id, order_row_id=order_row_id, order_id=f"order-{sequence}",
+        position_id=position_id, observed_status=status, units_closed=2.0,
+        close_price=50.0, closed_at="2026-10-23T20:00:00+00:00",
+        raw={"status": status},
+    )
+
+
+def test_confirmed_close_applies_once_and_preserves_entry_evidence(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-close", entry_reference_spy=99.0))
+    before = dict(repo.conn.execute("SELECT * FROM lot_annotations").fetchone())
+    observation_id = _close_observation(repo)
+    evidence = repo.list_close_observations("pos-close")[0]
+    assert evidence["id"] == observation_id
+    assert evidence["order_id"] == "order-1"
+    assert evidence["units_closed"] == 2.0
+    assert evidence["close_price"] == 50.0
+    assert evidence["closed_at"] == "2026-10-23T20:00:00+00:00"
+    assert evidence["raw_json"] == '{"status": "confirmed_full_close"}'
+    assert evidence["observed_at"]
+    assert evidence["applied_at"] is None
+    assert not repo.conn.in_transaction
+    assert repo.apply_confirmed_close(observation_id) is True
+    after = dict(repo.conn.execute("SELECT * FROM lot_annotations").fetchone())
+    assert after == {**before, "is_open": 0, "exit_order_id": evidence["order_row_id"], "updated_at": after["updated_at"]}
+    assert "pos-close" not in repo.open_lot_annotation_position_ids()
+    assert repo.list_lot_annotations(is_open=True) == []
+    applied = repo.list_close_observations()
+    assert applied[0]["applied_at"] == after["updated_at"]
+    changes = repo.conn.total_changes
+    assert repo.apply_confirmed_close(observation_id) is False
+    assert repo.conn.total_changes == changes
+    assert repo.list_close_observations() == applied
+    assert dict(repo.conn.execute("SELECT * FROM lot_annotations").fetchone()) == after
+
+
+@pytest.mark.parametrize("status", ["still_open", "unresolved", "confirmed_closed"])
+def test_non_full_close_evidence_is_stored_but_never_applied(repo: Repo, status) -> None:
+    repo.insert_lot_annotation(_annotation("pos-close"))
+    before = repo.get_lot_annotation("pos-close")
+    observation_id = _close_observation(repo, status=status)
+    with pytest.raises(ValueError, match="confirmed_full_close"):
+        repo.apply_confirmed_close(observation_id)
+    assert repo.get_lot_annotation("pos-close") == before
+    assert repo.list_close_observations()[0]["applied_at"] is None
+    assert repo.unapplied_confirmed_closes() == []
+
+
+@pytest.mark.parametrize("closed_sidecar", [False, True])
+def test_confirmed_close_requires_open_sidecar(repo: Repo, closed_sidecar) -> None:
+    if closed_sidecar:
+        repo.insert_lot_annotation(_annotation("pos-close", is_open=False))
+    observation_id = _close_observation(repo)
+    with pytest.raises(LookupError, match="no open lot annotation"):
+        repo.apply_confirmed_close(observation_id)
+    assert repo.list_close_observations()[0]["applied_at"] is None
+    assert not repo.conn.in_transaction
+
+
+def test_two_confirmed_closes_only_apply_first_and_index_enforces_it(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-close"))
+    first = _close_observation(repo)
+    second = _close_observation(repo)
+    assert repo.apply_confirmed_close(first) is True
+    before = repo.get_lot_annotation("pos-close")
+    assert repo.apply_confirmed_close(second) is False
+    assert repo.get_lot_annotation("pos-close") == before
+    with pytest.raises(sqlite3.IntegrityError):
+        with repo.conn:
+            repo.conn.execute("UPDATE close_observations SET applied_at = 'duplicate' WHERE id = ?", (second,))
+    assert repo.list_close_observations()[1]["applied_at"] is None
+
+
+def test_close_application_rolls_back_sidecar_on_ledger_failure(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-close"))
+    observation_id = _close_observation(repo)
+    before = repo.get_lot_annotation("pos-close")
+    repo.conn.execute(
+        "CREATE TRIGGER reject_apply BEFORE UPDATE OF applied_at ON close_observations "
+        "BEGIN SELECT RAISE(ABORT, 'ledger failure'); END"
+    )
+    repo.conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="ledger failure"):
+        repo.apply_confirmed_close(observation_id)
+    assert repo.get_lot_annotation("pos-close") == before
+    assert repo.list_close_observations()[0]["applied_at"] is None
+
+
+def test_unapplied_full_closes_survive_reopen_and_filter_in_id_order(repo: Repo) -> None:
+    repo.insert_lot_annotation(_annotation("pos-close"))
+    first = _close_observation(repo)
+    repo.apply_confirmed_close(first)
+    _close_observation(repo, "other", "still_open")
+    second = _close_observation(repo, "other")
+    third = _close_observation(repo, "third")
+    db_path = repo.conn.execute("PRAGMA database_list").fetchone()[2]
+    with Repo.open(db_path) as reopened:
+        assert [r["id"] for r in reopened.unapplied_confirmed_closes()] == [second, third]
+        assert [r["id"] for r in reopened.list_close_observations("other")] == [second - 1, second]
+        assert len(reopened.list_close_observations()) == 4
+        reopened.insert_lot_annotation(_annotation("other"))
+        assert reopened.apply_confirmed_close(second) is True
+    assert [r["id"] for r in repo.unapplied_confirmed_closes()] == [third]
+
+
+def test_close_observations_require_intent_and_valid_status(repo: Repo) -> None:
+    for intent_id, status in [(None, "still_open"), (9999, "still_open")]:
+        with pytest.raises(sqlite3.IntegrityError):
+            with repo.conn:
+                repo.record_close_observation(
+                    intent_id=intent_id, order_row_id=None, order_id=None,
+                    position_id="missing", observed_status=status,
+                )
+    with pytest.raises(LookupError, match="no close observation"):
+        repo.apply_confirmed_close(9999)
+    with pytest.raises(sqlite3.IntegrityError):
+        _close_observation(repo, status="invalid")
+    repo.conn.rollback()
 
 
 # -- buckets ---------------------------------------------------------------

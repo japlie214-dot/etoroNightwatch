@@ -155,7 +155,7 @@ class PreflightCheck:
 
 @dataclass(frozen=True, slots=True)
 class Decision:
-    """What the strategy saw and what it decided."""
+    """What the strategy saw and decided; phases share one derived SPY signal."""
 
     session_id: int
     trading_date: str
@@ -173,6 +173,7 @@ class Decision:
     reason: str | None = None
     id: int | None = None
     created_at: str | None = None
+    phase: str = "single"
 
 
 @dataclass(frozen=True, slots=True)
@@ -925,8 +926,8 @@ class Repo:
             INSERT INTO decisions (session_id, trading_date, cone_z, spy_close,
                                    spy_ath, drawdown, tier, budget, order_size,
                                    cash_target, equity, cash, intents_json, reason,
-                                   created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                   created_at, phase)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 decision.session_id, decision.trading_date, decision.cone_z,
@@ -934,17 +935,25 @@ class Repo:
                 decision.tier, decision.budget, decision.order_size,
                 decision.cash_target, decision.equity, decision.cash,
                 json.dumps(decision.intents), decision.reason,
-                decision.created_at or utcnow(),
+                decision.created_at or utcnow(), decision.phase,
             ),
         )
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def get_decision(self, session_id: int) -> Decision | None:
-        """Return a session's decision, or ``None``."""
-        row = self.conn.execute(
-            "SELECT * FROM decisions WHERE session_id = ?", (session_id,)
-        ).fetchone()
+    def get_decision(self, session_id: int, phase: str | None = None) -> Decision | None:
+        """Return a phase, or the authoritative decision (B, then single, then A)."""
+        if phase is None:
+            row = self.conn.execute(
+                "SELECT * FROM decisions WHERE session_id = ? "
+                "ORDER BY CASE phase WHEN 'B' THEN 0 WHEN 'single' THEN 1 ELSE 2 END "
+                "LIMIT 1", (session_id,),
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM decisions WHERE session_id = ? AND phase = ?",
+                (session_id, phase),
+            ).fetchone()
         if row is None:
             return None
         return Decision(
@@ -955,7 +964,7 @@ class Repo:
             order_size=row["order_size"], cash_target=row["cash_target"],
             equity=row["equity"], cash=row["cash"],
             intents=_j(row["intents_json"], []), reason=row["reason"],
-            created_at=row["created_at"],
+            created_at=row["created_at"], phase=row["phase"],
         )
 
     # -- intents -----------------------------------------------------------
@@ -1206,6 +1215,89 @@ class Repo:
             submitted_at=row["submitted_at"], terminal_at=row["terminal_at"],
             error=row["error"],
         )
+
+    # -- close observations ------------------------------------------------
+
+    def record_close_observation(
+        self, *, intent_id: int, order_row_id: int | None, order_id: str | None,
+        position_id: str, observed_status: str, units_closed: float | None = None,
+        close_price: float | None = None, closed_at: str | None = None,
+        raw: dict[str, Any] | None = None,
+    ) -> int:
+        """Commit app-owned close evidence; only confirmed_full_close is applicable.
+
+        T036 supplies that status only after FILLED plus a strict portfolio read
+        showing the position absent. Other evidence, including partial closes,
+        may be recorded but cannot close an annotation.
+        """
+        cur = self.conn.execute(
+            """
+            INSERT INTO close_observations (
+                intent_id, order_row_id, order_id, position_id, observed_status,
+                units_closed, close_price, closed_at, raw_json, observed_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (intent_id, order_row_id, order_id, position_id, observed_status,
+             units_closed, close_price, closed_at, json.dumps(raw or {}), utcnow()),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def apply_confirmed_close(self, observation_id: int) -> bool:
+        """Atomically close a sidecar once, assuming a single session writer.
+
+        Only is_open, exit_order_id and updated_at change on the annotation;
+        entry fields and book are untouched. The partial unique index enforces
+        one applied observation per position.
+        """
+        with self.conn:
+            self.conn.execute("BEGIN")
+            observation = self.conn.execute(
+                "SELECT * FROM close_observations WHERE id = ?", (observation_id,),
+            ).fetchone()
+            if observation is None:
+                raise LookupError(f"no close observation id={observation_id}")
+            if observation["observed_status"] != "confirmed_full_close":
+                raise ValueError("apply_confirmed_close requires confirmed_full_close evidence")
+            position_id = observation["position_id"]
+            applied = self.conn.execute(
+                "SELECT 1 FROM close_observations "
+                "WHERE position_id = ? AND applied_at IS NOT NULL", (position_id,),
+            ).fetchone()
+            if applied:
+                return False
+            now = utcnow()
+            cur = self.conn.execute(
+                "UPDATE lot_annotations SET is_open = 0, exit_order_id = ?, updated_at = ? "
+                "WHERE position_id = ? AND is_open = 1",
+                (observation["order_row_id"], now, position_id),
+            )
+            if cur.rowcount == 0:
+                raise LookupError(f"no open lot annotation for position_id={position_id!r}")
+            self.conn.execute(
+                "UPDATE close_observations SET applied_at = ? WHERE id = ?",
+                (now, observation_id),
+            )
+        return True
+
+    def list_close_observations(self, position_id: str | None = None) -> list[dict]:
+        """Return all close evidence, or one position's evidence, in id order."""
+        if position_id is None:
+            rows = self.conn.execute("SELECT * FROM close_observations ORDER BY id").fetchall()
+        else:
+            rows = self.conn.execute(
+                "SELECT * FROM close_observations WHERE position_id = ? ORDER BY id",
+                (position_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def unapplied_confirmed_closes(self) -> list[dict]:
+        """Return full-close evidence awaiting application, in recovery order."""
+        rows = self.conn.execute(
+            "SELECT * FROM close_observations "
+            "WHERE observed_status = 'confirmed_full_close' AND applied_at IS NULL ORDER BY id"
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # -- lots --------------------------------------------------------------
 

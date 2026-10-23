@@ -18,6 +18,7 @@ EXPECTED_TABLES = {
     "sessions",
     "preflight_checks",
     "decisions",
+    "close_observations",
     "intents",
     "orders",
     "lots",
@@ -133,7 +134,7 @@ def test_migration_008_adds_tp_clears_to_a_version_7_database(tmp_path: Path, mo
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tp_clears'"
         ).fetchone()[0]
         assert has_table == 0
-        monkeypatch.undo()
+        monkeypatch.setattr(migrations, "discover", lambda: [m for m in all_migrations if m.version <= 8])
         assert migrations.migrate(conn) == 8
         columns = {r[1] for r in conn.execute("PRAGMA table_info(tp_clears)").fetchall()}
         assert columns == {
@@ -155,5 +156,90 @@ def test_fresh_database_has_tp_clears(tmp_path: Path) -> None:
         }
         assert "tp_clears" in names
         assert "idx_tp_clears_position" in names
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("keep_row", [True, False])
+def test_migration_009_preserves_decisions_and_sequence(tmp_path: Path, monkeypatch, keep_row) -> None:
+    all_migrations = migrations.discover()
+    with connect(tmp_path / "upgraded.db") as conn:
+        with monkeypatch.context() as patch:
+            patch.setattr(migrations, "discover", lambda: [m for m in all_migrations if m.version <= 8])
+            assert migrations.migrate(conn) == 8
+        repo = Repo(conn)
+        session = repo.create_session("2026-10-23", "dry_run", "demo", False)
+        conn.execute(
+            "INSERT INTO decisions (id, session_id, trading_date, created_at, spy_close) "
+            "VALUES (42, ?, '2026-10-23', 'original-time', 600.25)", (session.id,),
+        )
+        conn.commit()
+        # Before: the old UNIQUE(session_id) prevents a second decision.
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO decisions (session_id, trading_date, created_at) VALUES (?, 'date', 'time')",
+                (session.id,),
+            )
+        conn.rollback()
+        original = dict(conn.execute("SELECT * FROM decisions").fetchone())
+        conn.execute("UPDATE sqlite_sequence SET seq = 99 WHERE name = 'decisions'")
+        if not keep_row:
+            conn.execute("DELETE FROM decisions")
+        conn.commit()
+        assert migrations.migrate(conn) == 9
+        if keep_row:
+            copied = dict(conn.execute("SELECT * FROM decisions WHERE id = 42").fetchone())
+            assert copied.pop("phase") == "single"
+            assert copied == original
+        assert conn.execute("SELECT seq FROM sqlite_sequence WHERE name = 'decisions'").fetchone()[0] == 99
+        for phase, expected_id in [("A", 100), ("B", 101)]:
+            cur = conn.execute(
+                "INSERT INTO decisions (session_id, trading_date, created_at, phase) VALUES (?, 'date', 'time', ?)",
+                (session.id, phase),
+            )
+            assert cur.lastrowid == expected_id
+        conn.commit()
+        for phase in ("A", "invalid"):
+            with pytest.raises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO decisions (session_id, trading_date, created_at, phase) VALUES (?, 'date', 'time', ?)",
+                    (session.id, phase),
+                )
+            conn.rollback()
+        assert conn.execute("SELECT intents_json FROM decisions WHERE phase = 'A'").fetchone()[0] == "[]"
+        conn.execute("DELETE FROM sessions WHERE id = ?", (session.id,))
+        conn.commit()
+        assert conn.execute("SELECT COUNT(*) FROM decisions").fetchone()[0] == 0
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        fresh = connect(tmp_path / "fresh.db")
+        try:
+            assert migrations.migrate(fresh) == 9
+            ddl = "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
+            assert [tuple(r) for r in conn.execute(ddl)] == [tuple(r) for r in fresh.execute(ddl)]
+        finally:
+            fresh.close()
+    conn.close()
+
+
+def test_migration_009_rebuild_rolls_back_on_version_failure(tmp_path: Path, monkeypatch) -> None:
+    all_migrations = migrations.discover()
+    conn = connect(tmp_path / "rollback.db")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(migrations, "discover", lambda: [m for m in all_migrations if m.version <= 8])
+            assert migrations.migrate(conn) == 8
+        conn.execute(
+            "CREATE TRIGGER reject_v9 BEFORE INSERT ON schema_version "
+            "WHEN NEW.version = 9 BEGIN SELECT RAISE(ABORT, 'reject 009'); END"
+        )
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError, match="reject 009"):
+            migrations.migrate(conn)
+        assert migrations.current_version(conn) == 8
+        assert "phase" not in {r[1] for r in conn.execute("PRAGMA table_info(decisions)")}
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name IN ('decisions_new', 'close_observations')").fetchall() == []
+        conn.execute("DROP TRIGGER reject_v9")
+        conn.commit()
+        assert migrations.migrate(conn) == 9
     finally:
         conn.close()
