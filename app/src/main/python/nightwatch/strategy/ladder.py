@@ -368,6 +368,7 @@ class LadderIntent:
     position_ref: str | None = None
     reason: str = ""
     book: str | None = None
+    bucket_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -745,6 +746,7 @@ def _process_reentry_buckets(
         intents.append(LadderIntent(
             symbol="UPRO", side="open", amount=bucket.tranche_amount, book="reentry",
             reason=f"deferred reentry {bucket.bucket_id} {filled_bucket.tranches_bought}/3",
+            bucket_id=bucket.bucket_id,
         ))
         filled = True
         if filled_bucket.tranches_bought < 3:

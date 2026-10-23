@@ -1,6 +1,6 @@
-"""S7-3a buy executor (T028): SCHG "cash to core" buys, one at a time.
+"""Buy executor: SCHG and UPRO open buys, one at a time.
 
-For each SCHG open intent, in order, up to ``max_orders``:
+For each SCHG or UPRO open intent, in order, up to ``max_orders``:
 
 1. persist the intent (committed), then send the buy;
 2. persist the order and poll it to a terminal state;
@@ -177,6 +177,7 @@ def finish_filled_buy(
     res: OrderResult,
     order_id: str | None,
     order_row_id: int,
+    instrument_id: int,
     trading_date: date,
     spy: Any,
     sleep: Callable[[float], None],
@@ -212,12 +213,17 @@ def finish_filled_buy(
         tp_failed.append(position_id)
         return filled
 
+    if position.instrument_id != instrument_id:
+        followups.append(f"position {position_id}: instrument mismatch")
+        tp_failed.append(position_id)
+        return filled
+
     try:
         repo.insert_lot_annotation(
             LotAnnotation(
                 position_id=position_id,
-                symbol="SCHG",
-                book="catapult",
+                symbol=intent.symbol,
+                book=intent.book or "catapult",
                 entry_date=position.open_date or trading_date.isoformat(),
                 entry_amount=position.amount,
                 origin="app",
@@ -227,7 +233,7 @@ def finish_filled_buy(
                 entry_spy_close=spy.close,
                 entry_spy_drawdown=spy.drawdown,
                 entry_tier=spy.tier,
-                bucket_id=None,
+                bucket_id=intent.bucket_id,
                 entry_order_id=order_row_id,
                 is_open=True,
             )
@@ -257,7 +263,7 @@ def _buy_one(
     tp_failed: list[str],
     followups: list[str],
 ) -> ExecutedBuy:
-    instrument_id = instrument_ids["SCHG"]
+    instrument_id = instrument_ids[intent.symbol]
     request_id = new_request_id()
     sequence = repo.next_intent_sequence(session_id)
     intent_id = repo.insert_intent(
@@ -265,10 +271,11 @@ def _buy_one(
             session_id=session_id,
             request_id=request_id,
             sequence=sequence,
-            symbol="SCHG",
+            symbol=intent.symbol,
             side="buy",
             instrument_id=instrument_id,
-            book="catapult",
+            book=intent.book or "catapult",
+            bucket_id=intent.bucket_id,
             amount_usd=intent.amount,
             reason=intent.reason,
         )
@@ -327,7 +334,7 @@ def _buy_one(
             intent_id=intent_id,
             session_id=session_id,
             request_id=request_id,
-            symbol="SCHG",
+            symbol=intent.symbol,
             side="buy",
             instrument_id=instrument_id,
             order_id=order_id,
@@ -377,7 +384,8 @@ def _buy_one(
     return finish_filled_buy(
         repo=repo, client=client, intent=intent, intent_id=intent_id,
         request_id=request_id, res=res, order_id=effective_order_id,
-        order_row_id=order_row_id, trading_date=trading_date, spy=spy,
+        order_row_id=order_row_id, instrument_id=instrument_id,
+        trading_date=trading_date, spy=spy,
         sleep=sleep, followups=followups, tp_failed=tp_failed,
     )
 
@@ -396,14 +404,25 @@ def execute_buys(
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     sleep: Callable[[float], None] = time.sleep,
 ) -> ExecutionReport:
-    """Send SCHG cash-to-core buys one at a time, persisting every step.
+    """Send SCHG and UPRO open buys one at a time, persisting every step.
 
     ``spy`` is the decision's SPY context (``ath``, ``close``, ``drawdown``,
     ``tier``). Never resubmits: an ambiguous buy ends execution.
     """
     for intent in intents:
-        if intent.side != "open" or intent.symbol != "SCHG" or intent.amount is None or intent.amount <= 0:
-            raise ValueError(f"S7-3a executes SCHG opens only: {intent!r}")
+        if (
+            intent.side != "open"
+            or intent.symbol not in ("SCHG", "UPRO")
+            or intent.symbol not in instrument_ids
+            or intent.amount is None
+            or intent.amount <= 0
+        ):
+            raise ValueError(f"S7-3a executes SCHG opens only or UPRO opens: {intent!r}")
+        book = "catapult" if intent.symbol == "SCHG" and intent.book is None else intent.book
+        if book not in ("catapult", "reentry"):
+            raise ValueError(f"buy book must be catapult or reentry: {intent!r}")
+        if book == "reentry" and intent.bucket_id is None:
+            raise ValueError(f"reentry buy requires bucket_id: {intent!r}")
     if max_orders < 1:
         raise ValueError(f"max_orders must be at least 1, got {max_orders}")
     if now() >= deadline:
@@ -598,14 +617,15 @@ def _recover_intent(
         return
 
     ladder_intent = LadderIntent(
-        "SCHG", "open", amount=intent.amount_usd,
-        reason=intent.reason or "", book=intent.book,
+        intent.symbol, "open", amount=intent.amount_usd,
+        reason=intent.reason or "", book=intent.book, bucket_id=intent.bucket_id,
     )
     before = len(followups)
     finish_filled_buy(
         repo=repo, client=client, intent=ladder_intent, intent_id=intent_id,
         request_id=request_id, res=final, order_id=effective_order_id,
-        order_row_id=order_row_id, trading_date=date.fromisoformat(trading_date),
+        order_row_id=order_row_id, instrument_id=intent.instrument_id,
+        trading_date=date.fromisoformat(trading_date),
         spy=spy, sleep=sleep, followups=followups, tp_failed=tp_failed,
     )
     if any("not visible in portfolio" in line for line in followups[before:]):
