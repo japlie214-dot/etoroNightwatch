@@ -79,7 +79,9 @@ def test_armed_refused_without_session(repo, host, config_path, secrets_path, mo
     called = []
     monkeypatch.setattr(session, "build_preflight_gates", lambda **kwargs: fake_gates(called))
     result = session.run_session(host=host, config=config, repo=repo, client=FakeClient(), tiingo=FakeTiingo(), trading_date=TRADING_DATE)
-    assert result == session.SessionResult(None, "refused_armed", None, "armed execution not built (S7); refusing")
+    assert result.status == "refused_armed" and result.session_id is None
+    assert result.reason.startswith("armed but refused: ")
+    assert "risk.max_orders_per_session unset" in result.reason
     assert repo.latest_session() is None
     assert called == []
 

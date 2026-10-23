@@ -80,7 +80,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 1
     trading_date = args.date or datetime.now(ZoneInfo("America/New_York")).date()
     with Repo.open(default_db_path(host), host=host) as repo:
-        client = EtoroClient(config.etoro, role="read", repo=repo)
+        client = EtoroClient(config.etoro, role="write" if config.is_armed else "read", repo=repo)
         notifier = TelegramNotifier(config.telegram, repo, environment=config.environment.value)
         try:
             tiingo = TiingoClient(config.tiingo)
@@ -103,7 +103,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         finally:
             client.close()
             notifier.close()
-    return 0 if result.status in ("would_have_done", "already_ran") else 1
+    return 0 if result.status in ("would_have_done", "already_ran", "executed") else 1
 
 
 def _cmd_poll(args: argparse.Namespace) -> int:

@@ -23,7 +23,9 @@ from ..market.source import IexQuote, TiingoClient
 from ..market.window import AssembledSignal, WindowAssemblyError, assemble_spy_signal, resolve_provisional_close
 from ..notify.telegram import TelegramNotifier
 from ..strategy.ladder import decide, LadderConfig, LadderLot, ReentryBucket, LadderInputs, LadderIntent
-from ..strategy.state import load
+from ..strategy.state import load, save
+from .executor import ExecutionReport, RecoveryReport, execute_buys, recover_unfinished
+from .limits import apply_submission_limits
 from .halt import write_halt
 from .interval_pnl import ClosedLot, IntervalResult, _utc, compute_interval
 from .preflight import (
@@ -97,6 +99,8 @@ def fetch_server_date(base_url: str, *, timeout: float = 10.0) -> str | None:
 def build_preflight_gates(
     *, host: Host, config: Config, repo: Repo, client: EtoroClient, tiingo: TiingoClient,
     session_id: int, trading_date: date, now: Callable[[], datetime] | None = None,
+    recover: Callable[[], RecoveryReport] | None = None,
+    recovery_reports: list[RecoveryReport] | None = None,
 ) -> list[GateSpec]:
     now = now or host.now
     positions: list[list[Position] | None] = [None]
@@ -114,6 +118,13 @@ def build_preflight_gates(
         )
 
     def reconciliation() -> GateResult:
+        if recover is not None:
+            try:
+                report = recover()
+            except Exception as exc:
+                return GateResult(11, "Reconciliation", False, f"recovery: {type(exc).__name__}: {exc}")
+            if recovery_reports is not None:
+                recovery_reports.append(report)
         positions[0] = client.get_portfolio()
         instrument_symbols = {i.instrument_id: i.symbol for i in repo.list_instruments()}
         return gate_11_reconciliation(
@@ -164,7 +175,7 @@ class SnapshotError(Exception):
 def build_snapshot(
     *, session_id: int, taken_at: str, pnl: Mapping, available_cash: float | None,
     symbol_by_instrument: Mapping[int, str], session_prices: Mapping[str, float],
-    sleeve: Mapping[str, float],
+    sleeve: Mapping[str, float], phase: str = "post_decision",
 ) -> PortfolioSnapshot:
     if "clientPortfolio" not in pnl:
         raise SnapshotError("snapshot refused: pnl has no clientPortfolio")
@@ -199,7 +210,7 @@ def build_snapshot(
         session_id=session_id, taken_at=taken_at, cash=cash, available_cash=available_cash,
         equity=cash + sum(p.amount + p.unrealized_pnl for p in positions) if complete else None,
         unrealized_pnl=cp.get("unrealizedPnL"), realized_pnl=None, positions=positions,
-        raw={"version": 1, "phase": "post_decision", "source": "pnl", "complete": complete,
+        raw={"version": 1, "phase": phase, "source": "pnl", "complete": complete,
              "missing": missing, "account_currency_id": cp.get("accountCurrencyId"),
              "managed_instrument_ids": sorted(symbol_by_instrument), "sleeve": dict(sleeve),
              "mark_check": mark_check, "pnl": pnl},
@@ -335,13 +346,18 @@ def _run_session_core(
     tiingo: TiingoClient, wait: bool = True,
     sleep_until: Callable[[datetime], None] = _sleep_until,
 ) -> SessionResult:
-    """Run dry-run preflight and phase A, stopping at the arm gate.
+    """Run preflight and phase A, executing SCHG opens only when armed.
 
-    Construct the client with role="read", repo=repo so gate 8 caches missing
-    instrument rows before gate 11 reads them.
+    Construct the client with repo=repo so gate 8 caches missing instrument
+    rows before gate 11 reads them, and role="write" when armed.
     """
-    if config.is_armed:
-        return SessionResult(None, "refused_armed", None, "armed execution not built (S7); refusing")
+    armed = config.is_armed
+    if armed:
+        refusals = arming_refusals(config) + (
+            ["risk.max_orders_per_session unset"] if config.risk.max_orders_per_session is None else []
+        )
+        if refusals:
+            return SessionResult(None, "refused_armed", None, "armed but refused: " + "; ".join(refusals))
     iso = trading_date.isoformat()
     existing = repo.get_session_by_date(iso)
     if existing is not None:
@@ -350,13 +366,48 @@ def _run_session_core(
             f"session {existing.id} already exists for {iso} (state {existing.state})",
         )
     s = repo.create_session(
-        iso, mode="dry_run", environment=config.etoro.environment.value,
-        armed=False, state="preflight",
+        iso, mode="live" if armed else "dry_run", environment=config.etoro.environment.value,
+        armed=armed, state="preflight",
     )
+    recovery_reports = []
+    recovery_text = ""
+    halt_error = None
+    halt_text = ""
+
+    def halt_for_tp(items: Sequence[str]) -> None:
+        nonlocal halt_error, halt_text
+        if not items:
+            return
+        text = "take-profit not cleared on position(s) " + ", ".join(items)
+        try:
+            write_halt(host, reason=text, source="session")
+            halt_text += "; " + text + "; HALT set"
+        except Exception as exc:
+            halt_text += f"; {text}; HALT persistence failed: {type(exc).__name__}: {exc}"
+            halt_error = str(exc)
+
+    def abort(status: str, reason: str, gate: int | None = None) -> SessionResult:
+        reason += recovery_text + halt_text
+        repo.finish_session(s.id, state="aborted", outcome=reason, error=halt_error)
+        return SessionResult(s.id, status, gate, reason)
+
     outcome = run_preflight(build_preflight_gates(
         host=host, config=config, repo=repo, client=client, tiingo=tiingo,
         session_id=s.id, trading_date=trading_date,
+        recover=(lambda: recover_unfinished(
+            repo=repo, client=client,
+            abandon_after_sessions=config.reconciliation.non_terminal_order_sessions_before_abandoned,
+        )) if armed else None,
+        recovery_reports=recovery_reports,
     ), repo=repo, session_id=s.id)
+    recovery = recovery_reports[0] if recovery_reports else None
+    if recovery is not None:
+        halt_for_tp(recovery.tp_failed)
+        for name in ("resolved", "still_unresolved", "abandoned", "followups"):
+            lines = getattr(recovery, name)
+            recovery_text += f"; recovery {name} {len(lines)}"
+            if lines:
+                recovery_text += ": " + " | ".join(lines)
     failed = outcome.failed
     repo.update_session(
         s.id, preflight_verdict="pass" if outcome.passed else "fail",
@@ -365,8 +416,7 @@ def _run_session_core(
     )
     if not outcome.passed:
         reason = f"preflight gate {failed.gate} {failed.name}: {failed.reason}"
-        repo.finish_session(s.id, state="aborted", outcome=reason)
-        return SessionResult(s.id, "preflight_failed", failed.gate, reason)
+        return abort("preflight_failed", reason, failed.gate)
     t30 = session_close_datetime(trading_date) - timedelta(minutes=30)
     if wait and host.now() < t30:
         if sleep_until is _sleep_until:
@@ -386,8 +436,7 @@ def _run_session_core(
         )
     if not g.passed:
         reason = f"gate 10 rerun: {g.reason}"
-        repo.finish_session(s.id, state="aborted", outcome=reason)
-        return SessionResult(s.id, "rerun_failed", 10, reason)
+        return abort("rerun_failed", reason, 10)
     athes = [a.entry_spy_ath for a in repo.list_lot_annotations(is_open=True) if a.entry_spy_ath is not None]
     try:
         sig = assemble_spy_signal(
@@ -397,8 +446,7 @@ def _run_session_core(
         )
     except Exception as exc:
         reason = f"signal: {type(exc).__name__}: {exc}"
-        repo.finish_session(s.id, state="aborted", outcome=reason)
-        return SessionResult(s.id, "signal_failed", None, reason)
+        return abort("signal_failed", reason)
     fp = sig.fingerprint
     repo.record_price_window_fingerprint(PriceWindowFingerprint(
         trading_date=fp.trading_date, symbol=fp.symbol, window_start=fp.window_start,
@@ -410,8 +458,7 @@ def _run_session_core(
         balance = client.get_balance()
     except Exception as exc:
         reason = f"decide inputs: {type(exc).__name__}: {exc}"
-        repo.finish_session(s.id, state="aborted", outcome=reason)
-        return SessionResult(s.id, "decide_failed", None, reason)
+        return abort("decide_failed", reason)
     try:
         inputs, notes = build_ladder_inputs(
             iso=iso, year=trading_date.year, signal=sig,
@@ -421,8 +468,7 @@ def _run_session_core(
         )
     except DecideInputError as exc:
         reason = f"decide inputs: {type(exc).__name__}: {exc}"
-        repo.finish_session(s.id, state="aborted", outcome=reason)
-        return SessionResult(s.id, "decide_failed", None, reason)
+        return abort("decide_failed", reason)
     if config.strategy.budget_override_usd is not None:
         notes.append("budget_override_usd set but not honoured (ladder has no field)")
     try:
@@ -430,8 +476,7 @@ def _run_session_core(
         d = decide(inputs, state, LadderConfig.from_strategy_config(config.strategy))
     except Exception as exc:
         reason = f"decide inputs: {type(exc).__name__}: {exc}"
-        repo.finish_session(s.id, state="aborted", outcome=reason)
-        return SessionResult(s.id, "decide_failed", None, reason)
+        return abort("decide_failed", reason)
     repo.insert_decision(Decision(
         session_id=s.id, trading_date=iso, intents=[intent_to_dict(i) for i in d.intents],
         cone_z=inputs.cone_z, spy_close=inputs.spy.close, spy_ath=inputs.spy.ath,
@@ -447,22 +492,92 @@ def _run_session_core(
     summaries = []
     for (side, symbol), amounts in groups.items():
         n = len(amounts)
-        if amounts[0] is None:
+        if amounts[0] is None or (armed and any(a is None for a in amounts)):
             summaries.append(f"{side} {symbol} {n} lot(s)")
         else:
             total = sum(amounts)
             orders = f"{n}x ${amounts[0]:.2f}" if all(a == amounts[0] for a in amounts) else f"{n} orders"
             summaries.append(f"{side} {symbol} {orders} = ${total:.2f}")
     summary = "; ".join(summaries) or "none"
+    status = "executed" if armed else "would_have_done"
+    orders_sent = False
     reason = f"would have done {len(d.intents)} intent(s): {summary}; ladder: {d.reason}; arming refused: {'; '.join(refusals)}"
+    if armed:
+        reason = f"armed: {len(d.intents)} intent(s): {summary}; ladder: {d.reason}"
+        if recovery is not None and recovery.tp_failed:
+            status = "halted_before_execution"
+            reason += "; execution skipped: take-profit not cleared at recovery"
+            reason += "; strategy state not saved: take-profit not cleared at recovery"
+        elif any(i.side != "open" or i.symbol != "SCHG" or i.amount is None or i.amount <= 0
+                 for i in d.intents):
+            status = "armed_refused_intents"
+            reason = "armed: decision has non-SCHG-open intents, S7-3a refuses: " + summary
+            reason += "; strategy state not saved: non-SCHG-open intents"
+        else:
+            accepted, dropped = apply_submission_limits(
+                d.intents, cap_usd=config.risk.max_notional_per_session_usd,
+                reserved_usd=repo.reserved_buy_usd(iso), cash_usd=inputs.cash,
+                open_lots=len(repo.list_lot_annotations(is_open=True)),
+                max_open_lots=config.risk.max_open_lots,
+                min_order_usd={s: config.strategy.min_order_size for s in config.symbols.traded},
+            )
+            reason += f"; accepted {len(accepted)}, dropped {len(dropped)}"
+            report = ExecutionReport((), None, (), (), ())
+            execution_error = None
+            orders_sent = bool(accepted)
+            if accepted:
+                try:
+                    report = execute_buys(
+                        repo=repo, client=client, session_id=s.id, trading_date=trading_date,
+                        intents=accepted, instrument_ids=mi.instrument_ids, spy=inputs.spy,
+                        max_orders=config.risk.max_orders_per_session,
+                        deadline=session_close_datetime(trading_date) - timedelta(minutes=5),
+                        now=host.now,
+                    )
+                except Exception as exc:
+                    execution_error = f"execution error: {type(exc).__name__}: {exc}"
+                    reason += "; " + execution_error
+            for result in report.results:
+                fill = "n/a" if result.fill_amount_usd is None else f"{result.fill_amount_usd:.2f}"
+                reason += f"; {result.outcome} ${result.intent.amount:.2f} filled ${fill} {result.detail}"
+            reason += f"; stopped={report.stopped}; deferred {len(report.deferred)}; followups {len(report.followups)}"
+            if report.followups:
+                reason += ": " + " | ".join(report.followups)
+            unconfirmed = [f"order {r.order_id}" for r in report.results
+                           if r.outcome == "filled" and r.position_id is None]
+            halt_for_tp([*report.tp_failed, *unconfirmed])
+            if execution_error is not None:
+                not_saved = "execution exception"
+            elif dropped:
+                not_saved = "limits dropped intents"
+            elif report.stopped is not None:
+                not_saved = "execution stopped: " + report.stopped
+            elif report.deferred:
+                not_saved = "deferred intents"
+            elif any(r.outcome != "filled" for r in report.results):
+                not_saved = "non-filled result"
+            elif len(report.results) != len(d.intents):
+                not_saved = "result count differs from decision"
+            elif any("partial fill" in r.detail for r in report.results):
+                not_saved = "partial fill"
+            elif any(r.position_id is None for r in report.results):
+                not_saved = "filled result has no position id"
+            else:
+                not_saved = None
+            if not_saved is None:
+                save(repo, d.new_state)
+            else:
+                reason += "; strategy state not saved: " + not_saved
+    reason += recovery_text + halt_text
     if notes:
         reason += f"; inputs: {'; '.join(notes)}"
     if d.warnings:
         reason += f"; warnings: {'; '.join(d.warnings)}"
     interval = None
-    halt_error = None
     # No snapshot means no comparison and no interval-driven HALT.
     try:
+        if orders_sent:
+            balance = client.get_balance()
         prev = repo.latest_snapshot()
         pnl = client.get_pnl()
         snap = build_snapshot(
@@ -472,6 +587,7 @@ def _run_session_core(
             sleeve={"cash_reserve_usd": config.strategy.cash_reserve_usd,
                     "sleeve_cash": inputs.cash, "sleeve_equity": inputs.equity,
                     "schg_position_value": inputs.schg_position_value},
+            phase="post_execution" if armed else "post_decision",
         )
         sid = repo.insert_snapshot(snap)
         reason += f"; snapshot {sid}: {len(snap.positions)} position(s), equity={snap.equity}, complete={snap.raw['complete']}"
@@ -492,7 +608,7 @@ def _run_session_core(
     except Exception as e:
         reason += f"; snapshot failed: {type(e).__name__}: {e}"
     repo.finish_session(s.id, state="finished", outcome=reason, error=halt_error)
-    return SessionResult(s.id, "would_have_done", None, reason, interval=interval)
+    return SessionResult(s.id, status, None, reason, interval=interval)
 
 
 def format_session_report(
@@ -547,6 +663,18 @@ def run_session(
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Session report failed: %s", exc)
+    if notifier is not None and "take-profit not cleared" in result.reason:
+        failure = "HALT persistence failed: "
+        halt = ("HALT persistence FAILED: " + result.reason.split(failure, 1)[1]
+                if failure in result.reason else "HALT set")
+        tail = (" Next session is NOT protected." if failure in result.reason
+                else " Next session stops at gate 1 until you /resume.")
+        text = f"[{config.environment.value.upper()}] TP NOT CLEARED — {halt}." + tail
+        try:
+            notifier.send(text, event="tp_not_cleared", session_id=result.session_id,
+                          trading_date=trading_date.isoformat())
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Session tp_not_cleared alert failed: %s", exc)
     if notifier is not None and result.interval is not None:
         r = result.interval
         env = config.environment.value.upper()
