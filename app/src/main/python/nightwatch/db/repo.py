@@ -1299,6 +1299,137 @@ class Repo:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def insert_sale_effects(self, session_id: int, effects: Sequence[dict]) -> None:
+        """Commit retryable effects before sending; never replace confirmed proceeds."""
+        with self.conn:
+            self.conn.execute("BEGIN")
+            for effect in effects:
+                existing = self.conn.execute(
+                    "SELECT s.applied_at, EXISTS (SELECT 1 FROM close_observations c "
+                    "WHERE c.position_id = s.position_id "
+                    "AND c.observed_status = 'confirmed_full_close') AS confirmed "
+                    "FROM sale_effects s WHERE s.position_id = ?", (effect["position_id"],),
+                ).fetchone()
+                if existing is not None:
+                    if existing["applied_at"] is not None:
+                        raise ValueError(f"sale effect already applied for position {effect['position_id']}")
+                    if existing["confirmed"]:
+                        raise ValueError(f"confirmed sale effect must be applied before retry for position {effect['position_id']}")
+            self.conn.executemany(
+                "INSERT INTO sale_effects (session_id, position_id, gross_proceeds_cents, "
+                "classification, bucket_json, created_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(position_id) DO UPDATE SET session_id = excluded.session_id, "
+                "gross_proceeds_cents = excluded.gross_proceeds_cents, "
+                "classification = excluded.classification, bucket_json = excluded.bucket_json, "
+                "created_at = excluded.created_at WHERE sale_effects.applied_at IS NULL",
+                [(session_id, e["position_id"], e["gross_proceeds_cents"],
+                  e["classification"], json.dumps(e["bucket"]) if e["bucket"] else None,
+                  utcnow()) for e in effects],
+            )
+
+    def unapplied_sale_effects(self) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT position_id FROM sale_effects s WHERE applied_at IS NULL AND EXISTS "
+            "(SELECT 1 FROM close_observations c WHERE c.position_id = s.position_id "
+            "AND c.observed_status = 'confirmed_full_close') ORDER BY id"
+        ).fetchall()
+        return [r["position_id"] for r in rows]
+
+    def apply_sale_effect(self, position_id: str) -> bool:
+        """Apply confirmed proceeds once; a batch bucket holds confirmed cents only."""
+        from ..strategy.ladder import _floor_cents
+
+        with self.conn:
+            self.conn.execute("BEGIN")
+            effect = self.conn.execute(
+                "SELECT * FROM sale_effects s WHERE position_id = ? AND applied_at IS NULL "
+                "AND EXISTS (SELECT 1 FROM close_observations c WHERE "
+                "c.position_id = s.position_id AND c.observed_status = 'confirmed_full_close')",
+                (position_id,),
+            ).fetchone()
+            if effect is None:
+                return False
+            now = utcnow()
+            if effect["classification"] == "recyclable":
+                self.conn.execute(
+                    "INSERT OR IGNORE INTO strategy_state (id, updated_at) VALUES (1, ?)", (now,),
+                )
+                self.conn.execute(
+                    "UPDATE strategy_state SET recyclable_cash = ROUND(recyclable_cash + ?, 2), "
+                    "updated_at = ? WHERE id = 1",
+                    (effect["gross_proceeds_cents"] / 100, now),
+                )
+            else:
+                # One payload per session batch; later confirmations enlarge that same bucket.
+                payload_row = self.conn.execute(
+                    "SELECT bucket_json FROM sale_effects WHERE session_id = ? "
+                    "AND classification = 'bucket' AND bucket_json IS NOT NULL",
+                    (effect["session_id"],),
+                ).fetchone()
+                if payload_row is None:
+                    raise LookupError("sale batch has no bucket payload")
+                payload = json.loads(payload_row["bucket_json"])
+                bucket = payload["bucket"]
+                cents = self.conn.execute(
+                    "SELECT SUM(gross_proceeds_cents) FROM sale_effects s WHERE session_id = ? "
+                    "AND classification = 'bucket' AND EXISTS (SELECT 1 FROM close_observations c "
+                    "WHERE c.position_id = s.position_id AND c.observed_status = 'confirmed_full_close')",
+                    (effect["session_id"],),
+                ).fetchone()[0]
+                proceeds = cents / 100
+                self.conn.execute(
+                    "INSERT INTO buckets (bucket_id, sale_date, sale_spy_close, proceeds, "
+                    "tranche_amount, tranches_bought, last_reference_spy, created_bar, is_active, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, 0, ?, ?, 1, ?) ON CONFLICT(bucket_id) DO UPDATE SET "
+                    "proceeds = excluded.proceeds, tranche_amount = excluded.tranche_amount",
+                    (bucket["bucket_id"], bucket["sale_date"], bucket["sale_spy_close"], proceeds,
+                     _floor_cents(proceeds / payload["tranches"]), bucket["last_reference_spy"],
+                     bucket["created_bar"], now),
+                )
+            self.conn.execute(
+                "UPDATE sale_effects SET applied_at = ? WHERE id = ?", (now, effect["id"]),
+            )
+        return True
+
+    def unapplied_bucket_fills(self) -> list[int]:
+        rows = self.conn.execute(
+            "SELECT i.id FROM intents i WHERE i.status = 'filled' AND i.symbol = 'UPRO' "
+            "AND i.side = 'buy' AND i.book = 'reentry' AND i.bucket_id IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM bucket_fill_applications a WHERE a.intent_id = i.id) "
+            "ORDER BY i.id"
+        ).fetchall()
+        return [r["id"] for r in rows]
+
+    def apply_bucket_fill(self, intent_id: int) -> bool:
+        """Advance a directly filled or recovered reentry tranche exactly once."""
+        with self.conn:
+            self.conn.execute("BEGIN")
+            intent = self.conn.execute(
+                "SELECT i.*, d.spy_close FROM intents i LEFT JOIN decisions d "
+                "ON d.session_id = i.session_id AND d.phase = 'single' "
+                "WHERE i.id = ? AND i.status = 'filled' AND i.symbol = 'UPRO' "
+                "AND i.side = 'buy' AND i.book = 'reentry' AND i.bucket_id IS NOT NULL "
+                "AND NOT EXISTS (SELECT 1 FROM bucket_fill_applications a WHERE a.intent_id = i.id)",
+                (intent_id,),
+            ).fetchone()
+            if intent is None:
+                return False
+            if intent["spy_close"] is None:
+                raise LookupError(f"reentry intent {intent_id} has no decision SPY reference")
+            cur = self.conn.execute(
+                "UPDATE buckets SET tranches_bought = tranches_bought + 1, last_reference_spy = ?, "
+                "is_active = CASE WHEN tranches_bought + 1 >= 3 THEN 0 ELSE is_active END "
+                "WHERE bucket_id = ?",
+                (intent["spy_close"], intent["bucket_id"]),
+            )
+            if not cur.rowcount:
+                raise LookupError(f"reentry intent {intent_id} has no bucket")
+            self.conn.execute(
+                "INSERT INTO bucket_fill_applications (intent_id, bucket_id, applied_at) VALUES (?, ?, ?)",
+                (intent_id, intent["bucket_id"], utcnow()),
+            )
+        return True
+
     # -- lots --------------------------------------------------------------
 
     def next_intent_sequence(self, session_id: int) -> int:

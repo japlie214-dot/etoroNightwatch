@@ -5,7 +5,7 @@ S6c-2: preflight, SPY signal, phase A dry-run decision and portfolio snapshot.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 import logging
 import time
@@ -14,7 +14,7 @@ from typing import Callable, Mapping, Sequence
 import httpx
 
 from ..config import Config, TradingMode
-from ..db.repo import Decision, PortfolioSnapshot, PriceWindowFingerprint, Repo, SnapshotPosition, utcnow
+from ..db.repo import Bucket, Decision, PortfolioSnapshot, PriceWindowFingerprint, Repo, SnapshotPosition, utcnow
 from ..etoro.client import EtoroClient
 from ..etoro.models import Balance, Candle, Position, Rate
 from ..host import Host, get_host
@@ -22,9 +22,10 @@ from ..market.calendar import next_close_minus, session_close_datetime
 from ..market.source import IexQuote, TiingoClient
 from ..market.window import AssembledSignal, WindowAssemblyError, assemble_spy_signal, resolve_provisional_close
 from ..notify.telegram import TelegramNotifier
-from ..strategy.ladder import decide, LadderConfig, LadderLot, ReentryBucket, LadderInputs, LadderIntent
+from ..strategy.ladder import decide, _floor_cents, LadderConfig, LadderLot, ReentryBucket, LadderInputs, LadderIntent
 from ..strategy.state import load, save
 from .executor import ExecutionReport, RecoveryReport, execute_buys, recover_unfinished
+from .close_executor import execute_closes, recover_unfinished_closes
 from .limits import apply_submission_limits
 from .halt import write_halt
 from .interval_pnl import ClosedLot, IntervalResult, _utc, compute_interval
@@ -290,6 +291,8 @@ def arming_refusals(config: Config) -> list[str]:
              if getattr(config.risk, name) is None]
     if names:
         refusals.append(f"risk limits unset: {', '.join(names)}")
+    if config.strategy.exit_mode != "fixed":
+        refusals.append("armed sessions support fixed exits only")
     return refusals
 
 
@@ -341,12 +344,30 @@ def format_interval(r: IntervalResult) -> str:
     return text
 
 
+def reconcile_effects(repo: Repo) -> None:
+    """Apply recovered closes and reentry fills before the one decision."""
+    for position_id in repo.unapplied_sale_effects():
+        repo.apply_sale_effect(position_id)
+    for intent_id in repo.unapplied_bucket_fills():
+        repo.apply_bucket_fill(intent_id)
+
+
+def _supported_intent(i: LadderIntent) -> bool:
+    if i.side == "close":
+        return i.symbol == "UPRO" and i.amount is None and bool(i.position_ref)
+    if i.side != "open" or i.amount is None or not i.amount > 0:
+        return False
+    return (i.symbol == "SCHG" and i.book in (None, "catapult")) or (
+        i.symbol == "UPRO" and (i.book == "catapult" or (i.book == "reentry" and bool(i.bucket_id)))
+    )
+
+
 def _run_session_core(
     *, host: Host, config: Config, repo: Repo, client: EtoroClient, trading_date: date,
     tiingo: TiingoClient, wait: bool = True,
     sleep_until: Callable[[datetime], None] = _sleep_until,
 ) -> SessionResult:
-    """Run preflight and phase A, executing SCHG opens only when armed.
+    """Run one decision, executing UPRO closes before supported buys when armed.
 
     Construct the client with repo=repo so gate 8 caches missing instrument
     rows before gate 11 reads them, and role="write" when armed.
@@ -374,17 +395,27 @@ def _run_session_core(
     halt_error = None
     halt_text = ""
 
-    def halt_for_tp(items: Sequence[str]) -> None:
+    def halt(text: str) -> None:
         nonlocal halt_error, halt_text
-        if not items:
-            return
-        text = "take-profit not cleared on position(s) " + ", ".join(items)
         try:
             write_halt(host, reason=text, source="session")
             halt_text += "; " + text + "; HALT set"
         except Exception as exc:
             halt_text += f"; {text}; HALT persistence failed: {type(exc).__name__}: {exc}"
             halt_error = str(exc)
+
+    def halt_for_tp(items: Sequence[str]) -> None:
+        if items:
+            halt("take-profit not cleared on position(s) " + ", ".join(items))
+
+    close_recovery_reports = []
+
+    def recover():
+        close_recovery_reports.append(recover_unfinished_closes(repo=repo, client=client))
+        return recover_unfinished(
+            repo=repo, client=client,
+            abandon_after_sessions=config.reconciliation.non_terminal_order_sessions_before_abandoned,
+        )
 
     def abort(status: str, reason: str, gate: int | None = None) -> SessionResult:
         reason += recovery_text + halt_text
@@ -394,13 +425,11 @@ def _run_session_core(
     outcome = run_preflight(build_preflight_gates(
         host=host, config=config, repo=repo, client=client, tiingo=tiingo,
         session_id=s.id, trading_date=trading_date,
-        recover=(lambda: recover_unfinished(
-            repo=repo, client=client,
-            abandon_after_sessions=config.reconciliation.non_terminal_order_sessions_before_abandoned,
-        )) if armed else None,
+        recover=recover if armed else None,
         recovery_reports=recovery_reports,
     ), repo=repo, session_id=s.id)
     recovery = recovery_reports[0] if recovery_reports else None
+    close_recovery = close_recovery_reports[0] if close_recovery_reports else None
     if recovery is not None:
         halt_for_tp(recovery.tp_failed)
         for name in ("resolved", "still_unresolved", "abandoned", "followups"):
@@ -417,6 +446,13 @@ def _run_session_core(
     if not outcome.passed:
         reason = f"preflight gate {failed.gate} {failed.name}: {failed.reason}"
         return abort("preflight_failed", reason, failed.gate)
+    persistence_error = None
+    if armed:
+        try:
+            reconcile_effects(repo)
+        except Exception as exc:
+            persistence_error = f"sale-effect persistence failed: {type(exc).__name__}: {exc}"
+            halt("sale-effect persistence failed")
     t30 = session_close_datetime(trading_date) - timedelta(minutes=30)
     if wait and host.now() < t30:
         if sleep_until is _sleep_until:
@@ -508,66 +544,176 @@ def _run_session_core(
             status = "halted_before_execution"
             reason += "; execution skipped: take-profit not cleared at recovery"
             reason += "; strategy state not saved: take-profit not cleared at recovery"
-        elif any(i.side != "open" or i.symbol != "SCHG" or i.amount is None or i.amount <= 0
-                 for i in d.intents):
+        elif close_recovery is not None and close_recovery.blocks_buys:
+            status = "halted_before_execution"
+            reason += "; execution skipped: unresolved close at recovery"
+            reason += "; strategy state not saved: unresolved close at recovery"
+        elif persistence_error is not None:
+            status = "executed_partial"
+            reason += "; " + persistence_error + "; strategy state not saved: persistence failure"
+        elif any(not _supported_intent(i) for i in d.intents):
             status = "armed_refused_intents"
-            reason = "armed: decision has non-SCHG-open intents, S7-3a refuses: " + summary
-            reason += "; strategy state not saved: non-SCHG-open intents"
+            reason = "armed: unsupported intents (SCHG sells unsupported in S7-3b): " + summary
+            reason += "; strategy state not saved: unsupported intents"
         else:
-            accepted, dropped = apply_submission_limits(
-                d.intents, cap_usd=config.risk.max_notional_per_session_usd,
-                reserved_usd=repo.reserved_buy_usd(iso), cash_usd=inputs.cash,
-                open_lots=len(repo.list_lot_annotations(is_open=True)),
-                max_open_lots=config.risk.max_open_lots,
-                min_order_usd={s: config.strategy.min_order_size for s in config.symbols.traded},
-            )
-            reason += f"; accepted {len(accepted)}, dropped {len(dropped)}"
-            report = ExecutionReport((), None, (), (), ())
-            execution_error = None
-            orders_sent = bool(accepted)
-            if accepted:
+            closes = [i for i in d.intents if i.side == "close"]
+            buys = [i for i in d.intents if i.side == "open"]
+            new_buckets = [b for b in d.updated_buckets
+                           if b.bucket_id not in {x.bucket_id for x in inputs.buckets}]
+            close_error = None
+            cash = inputs.cash
+            if closes:
                 try:
-                    report = execute_buys(
-                        repo=repo, client=client, session_id=s.id, trading_date=trading_date,
-                        intents=accepted, instrument_ids=mi.instrument_ids, spy=inputs.spy,
-                        max_orders=config.risk.max_orders_per_session,
-                        deadline=session_close_datetime(trading_date) - timedelta(minutes=5),
-                        now=host.now,
-                    )
+                    positions = client.get_portfolio_strict()
+                    positions_by_id = {p.position_id: p for p in positions}
                 except Exception as exc:
-                    execution_error = f"execution error: {type(exc).__name__}: {exc}"
-                    reason += "; " + execution_error
-            for result in report.results:
-                fill = "n/a" if result.fill_amount_usd is None else f"{result.fill_amount_usd:.2f}"
-                reason += f"; {result.outcome} ${result.intent.amount:.2f} filled ${fill} {result.detail}"
-            reason += f"; stopped={report.stopped}; deferred {len(report.deferred)}; followups {len(report.followups)}"
-            if report.followups:
-                reason += ": " + " | ".join(report.followups)
-            unconfirmed = [f"order {r.order_id}" for r in report.results
-                           if r.outcome == "filled" and r.position_id is None]
-            halt_for_tp([*report.tp_failed, *unconfirmed])
-            if execution_error is not None:
-                not_saved = "execution exception"
-            elif dropped:
-                not_saved = "limits dropped intents"
-            elif report.stopped is not None:
-                not_saved = "execution stopped: " + report.stopped
-            elif report.deferred:
-                not_saved = "deferred intents"
-            elif any(r.outcome != "filled" for r in report.results):
-                not_saved = "non-filled result"
-            elif len(report.results) != len(d.intents):
-                not_saved = "result count differs from decision"
-            elif any("partial fill" in r.detail for r in report.results):
-                not_saved = "partial fill"
-            elif any(r.position_id is None for r in report.results):
-                not_saved = "filled result has no position id"
+                    close_error = f"close snapshot failed: {type(exc).__name__}: {exc}"
+                    status = "halted_before_execution"
+                if close_error is None:
+                    try:
+                        lots = {lot.position_ref: lot for lot in inputs.open_lots}
+                        effects = []
+                        for index, intent in enumerate(closes):
+                            effects.append({
+                                "position_id": intent.position_ref,
+                                "gross_proceeds_cents": round(100 * _floor_cents(
+                                    inputs.upro_price * lots[intent.position_ref].units)),
+                                "classification": "bucket" if new_buckets else "recyclable",
+                                "bucket": {"bucket": asdict(new_buckets[0]),
+                                           "tranches": config.strategy.reentry_tranches}
+                                if new_buckets and index == 0 else None,
+                            })
+                        repo.insert_sale_effects(s.id, effects)
+                    except Exception as exc:
+                        close_error = f"sale-effect insert failed: {type(exc).__name__}: {exc}"
+                        status = "halted_before_execution"
+                if close_error is None:
+                    # An executor raise cannot tell us whether the broker accepted a send.
+                    orders_sent = True
+                    try:
+                        close_report = execute_closes(
+                            repo=repo, client=client, session_id=s.id, intents=closes,
+                            instrument_ids=mi.instrument_ids, positions_by_id=positions_by_id,
+                            deadline=session_close_datetime(trading_date) - timedelta(minutes=5),
+                            now=host.now,
+                        )
+                    except Exception as exc:
+                        close_error = f"close executor error: {type(exc).__name__}: {exc}"
+                        halt(close_error)
+                    else:
+                        for r in close_report.results:
+                            reason += f"; close {r.position_id}: {r.outcome} {r.detail}"
+                        unverified = [r.position_id for r in close_report.results if r.outcome == "unverified"]
+                        if unverified:
+                            halt("close not verified for position(s) " + ", ".join(unverified))
+                        try:
+                            for r in close_report.results:
+                                if r.outcome == "confirmed":
+                                    repo.apply_sale_effect(r.position_id)
+                            if any(r.outcome == "confirmed" for r in close_report.results):
+                                checkpoint = replace(
+                                    load(repo), sale_batch_sequence=d.new_state.sale_batch_sequence,
+                                    sale_batch_date=d.new_state.sale_batch_date,
+                                )
+                                save(repo, checkpoint)
+                        except Exception as exc:
+                            close_error = f"sale-effect persistence failed: {type(exc).__name__}: {exc}"
+                            halt("sale-effect persistence failed")
+                        if close_error is None and (
+                            close_report.blocks_buys or close_report.stopped is not None
+                            or close_report.deferred or len(close_report.results) != len(closes)
+                            or any(r.outcome != "confirmed" for r in close_report.results)
+                        ):
+                            close_error = "closes not all confirmed"
+                    if close_error is not None:
+                        status = "executed_partial"
+                if close_error is None:
+                    try:
+                        balance = client.get_balance()
+                        cash = max(0, balance.available_cash - config.strategy.cash_reserve_usd)
+                    except Exception as exc:
+                        close_error = f"between-phase balance failed: {type(exc).__name__}: {exc}"
+                        status = "executed_partial"
+            if close_error is not None:
+                reason += "; " + close_error + "; strategy state not saved: " + close_error
             else:
-                not_saved = None
-            if not_saved is None:
-                save(repo, d.new_state)
-            else:
-                reason += "; strategy state not saved: " + not_saved
+                accepted, dropped = apply_submission_limits(
+                    buys, cap_usd=config.risk.max_notional_per_session_usd,
+                    reserved_usd=repo.reserved_buy_usd(iso), cash_usd=cash,
+                    open_lots=len(repo.list_lot_annotations(is_open=True)),
+                    max_open_lots=config.risk.max_open_lots,
+                    min_order_usd={s: config.strategy.min_order_size for s in config.symbols.traded},
+                )
+                reason += f"; accepted {len(accepted)}, dropped {len(dropped)}"
+                report = ExecutionReport((), None, (), (), ())
+                execution_error = None
+                orders_sent = orders_sent or bool(accepted)
+                if accepted:
+                    try:
+                        report = execute_buys(
+                            repo=repo, client=client, session_id=s.id, trading_date=trading_date,
+                            intents=accepted, instrument_ids=mi.instrument_ids, spy=inputs.spy,
+                            max_orders=config.risk.max_orders_per_session,
+                            deadline=session_close_datetime(trading_date) - timedelta(minutes=5),
+                            now=host.now,
+                        )
+                    except Exception as exc:
+                        execution_error = f"execution error: {type(exc).__name__}: {exc}"
+                        reason += "; " + execution_error
+                for result in report.results:
+                    fill = "n/a" if result.fill_amount_usd is None else f"{result.fill_amount_usd:.2f}"
+                    reason += f"; {result.outcome} ${result.intent.amount:.2f} filled ${fill} {result.detail}"
+                reason += f"; stopped={report.stopped}; deferred {len(report.deferred)}; followups {len(report.followups)}"
+                if report.followups:
+                    reason += ": " + " | ".join(report.followups)
+                unconfirmed = [f"order {r.order_id}" for r in report.results
+                               if r.outcome == "filled" and r.position_id is None]
+                halt_for_tp([*report.tp_failed, *unconfirmed])
+                try:
+                    for r in report.results:
+                        if r.outcome == "filled" and r.intent.bucket_id:
+                            repo.apply_bucket_fill(r.intent_id)
+                except Exception as exc:
+                    persistence_error = f"sale-effect persistence failed: {type(exc).__name__}: {exc}"
+                    reason += "; " + persistence_error
+                    halt("sale-effect persistence failed")
+                    status = "executed_partial"
+                if persistence_error is not None:
+                    not_saved = "persistence failure"
+                elif execution_error is not None:
+                    not_saved = "execution exception"
+                elif dropped:
+                    not_saved = "limits dropped intents"
+                elif report.stopped is not None:
+                    not_saved = "execution stopped: " + report.stopped
+                elif report.deferred:
+                    not_saved = "deferred intents"
+                elif any(r.outcome != "filled" for r in report.results):
+                    not_saved = "non-filled result"
+                elif len(report.results) != len(buys):
+                    not_saved = "result count differs from decision"
+                elif any("partial fill" in r.detail for r in report.results):
+                    not_saved = "partial fill"
+                elif any(r.position_id is None for r in report.results):
+                    not_saved = "filled result has no position id"
+                else:
+                    not_saved = None
+                if not_saved is None:
+                    simulated_proceeds = _floor_cents(sum(
+                        inputs.upro_price * lot.units for lot in inputs.open_lots
+                        if lot.position_ref in {i.position_ref for i in closes}
+                    )) if closes and not new_buckets else 0
+                    consumed = _floor_cents(state.recyclable_cash + simulated_proceeds
+                                            - d.new_state.recyclable_cash)
+                    final_state = replace(d.new_state, recyclable_cash=_floor_cents(
+                        load(repo).recyclable_cash - consumed))
+                    filled_buckets = {r.intent.bucket_id for r in report.results if r.outcome == "filled"}
+                    for b in inputs.buckets:
+                        if b.bucket_id not in {x.bucket_id for x in d.updated_buckets} and b.bucket_id not in filled_buckets:
+                            repo.upsert_bucket(Bucket(**asdict(b), is_active=False, expired_at=iso))
+                    save(repo, final_state)
+                else:
+                    reason += "; strategy state not saved: " + not_saved
     reason += recovery_text + halt_text
     if notes:
         reason += f"; inputs: {'; '.join(notes)}"
@@ -575,13 +721,19 @@ def _run_session_core(
         reason += f"; warnings: {'; '.join(d.warnings)}"
     interval = None
     # No snapshot means no comparison and no interval-driven HALT.
-    try:
-        if orders_sent:
+    snapshot_cash = balance.available_cash
+    if orders_sent:
+        try:
             balance = client.get_balance()
+            snapshot_cash = balance.available_cash
+        except Exception as exc:
+            snapshot_cash = None
+            reason += f"; snapshot balance failed: {type(exc).__name__}: {exc}"
+    try:
         prev = repo.latest_snapshot()
         pnl = client.get_pnl()
         snap = build_snapshot(
-            session_id=s.id, taken_at=utcnow(), pnl=pnl, available_cash=balance.available_cash,
+            session_id=s.id, taken_at=utcnow(), pnl=pnl, available_cash=snapshot_cash,
             symbol_by_instrument={v: k for k, v in mi.instrument_ids.items()},
             session_prices={s: mi.provisional_closes[s].value for s in mi.provisional_closes},
             sleeve={"cash_reserve_usd": config.strategy.cash_reserve_usd,
@@ -675,6 +827,20 @@ def run_session(
                           trading_date=trading_date.isoformat())
         except Exception as exc:
             logging.getLogger(__name__).warning("Session tp_not_cleared alert failed: %s", exc)
+    if notifier is not None and any(text in result.reason for text in (
+        "close executor error:", "close not verified for position(s)", "sale-effect persistence failed",
+    )):
+        failure = "HALT persistence failed: "
+        tail = (" Next session is NOT protected." if failure in result.reason
+                else " Next session stops at gate 1 until you /resume.")
+        try:
+            notifier.send(
+                f"[{config.environment.value.upper()}] EXECUTION HALT — {result.reason}" + tail,
+                event="execution_halt", session_id=result.session_id,
+                trading_date=trading_date.isoformat(),
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Session execution HALT alert failed: %s", exc)
     if notifier is not None and result.interval is not None:
         r = result.interval
         env = config.environment.value.upper()

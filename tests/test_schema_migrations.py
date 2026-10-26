@@ -186,7 +186,7 @@ def test_migration_009_preserves_decisions_and_sequence(tmp_path: Path, monkeypa
         if not keep_row:
             conn.execute("DELETE FROM decisions")
         conn.commit()
-        assert migrations.migrate(conn) == 9
+        assert migrations.migrate(conn) == migrations.discover()[-1].version
         if keep_row:
             copied = dict(conn.execute("SELECT * FROM decisions WHERE id = 42").fetchone())
             assert copied.pop("phase") == "single"
@@ -213,7 +213,7 @@ def test_migration_009_preserves_decisions_and_sequence(tmp_path: Path, monkeypa
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
         fresh = connect(tmp_path / "fresh.db")
         try:
-            assert migrations.migrate(fresh) == 9
+            assert migrations.migrate(fresh) == migrations.discover()[-1].version
             ddl = "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name"
             assert [tuple(r) for r in conn.execute(ddl)] == [tuple(r) for r in fresh.execute(ddl)]
         finally:
@@ -240,6 +240,6 @@ def test_migration_009_rebuild_rolls_back_on_version_failure(tmp_path: Path, mon
         assert conn.execute("SELECT name FROM sqlite_master WHERE name IN ('decisions_new', 'close_observations')").fetchall() == []
         conn.execute("DROP TRIGGER reject_v9")
         conn.commit()
-        assert migrations.migrate(conn) == 9
+        assert migrations.migrate(conn) == migrations.discover()[-1].version
     finally:
         conn.close()

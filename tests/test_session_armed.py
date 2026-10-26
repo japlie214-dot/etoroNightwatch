@@ -34,7 +34,7 @@ def armed(repo, host, config, monkeypatch):
                   risk=replace(config.risk, max_daily_loss_usd=100, max_open_lots=10,
                                max_orders_per_session=1))
     decision = SimpleNamespace(intents=[BUY], new_state=replace(session.load(repo), bars=1),
-                               reason="offline decision", warnings=[])
+                               reason="offline decision", warnings=[], updated_buckets=[])
     e = SimpleNamespace(config=cfg, client=client, decision=decision, calls=[], report=None,
                         recovery=RecoveryReport((), (), (), (), ()), failed_gate=None)
     monkeypatch.setattr(session, "decide", lambda *args: e.decision)
@@ -46,6 +46,12 @@ def armed(repo, host, config, monkeypatch):
         return e.recovery
     e.recover = Mock(side_effect=recover)
     monkeypatch.setattr(session, "recover_unfinished", e.recover)
+    from nightwatch.engine.close_executor import CloseRecoveryReport
+    def recover_closes(**kwargs):
+        e.calls.append("recover_closes")
+        return CloseRecoveryReport((), (), (), False)
+    e.recover_closes = Mock(side_effect=recover_closes)
+    monkeypatch.setattr(session, "recover_unfinished_closes", e.recover_closes)
 
     def gates(**kwargs):
         real = build_gates(**kwargs)
@@ -138,7 +144,7 @@ def test_recovery_inside_gate_11_before_portfolio(armed, repo, raises):
         armed.execute.assert_not_called()
         armed.save.assert_not_called()
     else:
-        assert armed.calls.index("recover") < armed.calls.index("portfolio")
+        assert armed.calls.index("recover_closes") < armed.calls.index("recover") < armed.calls.index("portfolio")
         assert result.status == "executed"
         for name, line in (("resolved", "resolved1"), ("still_unresolved", "pending1"),
                            ("abandoned", "old1"), ("followups", "inspect1")):
@@ -252,13 +258,14 @@ def test_execution_exception_still_rereads_balance_and_snapshots(armed, repo):
 
 @pytest.mark.parametrize("intent", [LadderIntent("UPRO", "open", amount=100),
                                      LadderIntent("SCHG", "close", position_ref="p1"),
+                                     LadderIntent("UPRO", "close", position_ref="p1", amount=5),
                                      replace(BUY, amount=None), replace(BUY, amount=0),
                                      replace(BUY, amount=-1)])
 def test_non_executable_intents_refused(armed, repo, intent):
     armed.decision.intents = [BUY, intent]
     result = armed.run()
     assert result.status == "armed_refused_intents"
-    assert "armed: decision has non-SCHG-open intents, S7-3a refuses:" in result.reason
+    assert "armed: unsupported intents (SCHG sells unsupported in S7-3b):" in result.reason
     armed.execute.assert_not_called()
     armed.save.assert_not_called()
     assert repo.latest_snapshot().raw["phase"] == "post_execution"
@@ -281,6 +288,7 @@ def test_dry_run_never_recovers_executes_or_saves(armed, repo):
     assert result.status == "would_have_done"
     row = repo.get_session(result.session_id)
     assert row.mode == "dry_run" and not row.armed
+    armed.recover_closes.assert_not_called()
     assert repo.latest_snapshot().raw["phase"] == "post_decision"
     armed.recover.assert_not_called()
     armed.execute.assert_not_called()
@@ -290,6 +298,7 @@ def test_dry_run_never_recovers_executes_or_saves(armed, repo):
 @pytest.mark.parametrize("is_armed,status,code", [(True, "executed", 0),
                                                  (True, "armed_refused_intents", 1),
                                                  (True, "halted_before_execution", 1),
+                                                 (True, "executed_partial", 1),
                                                  (False, "would_have_done", 0)])
 def test_cli_role_and_execution_exit_code(config, host, monkeypatch, is_armed, status, code):
     cfg = replace(config, mode=TradingMode.LIVE if is_armed else TradingMode.DRY_RUN,

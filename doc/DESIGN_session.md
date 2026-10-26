@@ -1035,6 +1035,17 @@ because that is not a failure state, it is the deliberately-safe default (DESIGN
 
 ## 7. State persistence
 
+**2026-10-26 — T038 armed-session supersession (§7.1–7.2):** Armed fixed-exit
+sessions call `decide` once (`phase='single'`). Position-keyed sale effects are
+committed before closes and applied transactionally per confirmed full close;
+reentry fills advance buckets once per filled buy intent. Both reconcile after
+recovery, before the next decision. Batch buckets contain the sum of confirmed
+per-lot cents (one payload and one bucket per batch). Sell checkpoints preserve
+`bars`; only a complete execution saves the final state, with reloaded recyclable
+cash minus the decision's actual filled-buy consumption. No trailing-state claim
+is made. Buys must already be eligible against pre-close cash; fresh cash limits
+apply after closes, and sale-only-funded buys wait for a later session.
+
 ### 7.1 `LadderState.bars` — the trap, addressed exactly
 
 `strategy/ladder.py::decide` increments `bars` by exactly one per call and has **no memory of
