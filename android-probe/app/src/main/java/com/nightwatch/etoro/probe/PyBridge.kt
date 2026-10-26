@@ -12,6 +12,17 @@ import com.chaquo.python.android.AndroidPlatform
 object PyBridge {
     private var started = false
     private var callCounter = 0
+    private val sessionLock = Any()
+
+    // Separate monitor keeps probe methods usable during the wait. Python GIL/shared
+    // interpreter contention remains: probes during a session may run slower.
+    fun runSessionDry(context: Context, baseDir: String): String {
+        ensureStarted(context)
+        return synchronized(sessionLock) {
+            Python.getInstance().getModule("nightwatch.android_entry")
+                .callAttr("run_session_dry", baseDir).toString()
+        }
+    }
 
     @Synchronized
     fun ensureStarted(context: Context) {
