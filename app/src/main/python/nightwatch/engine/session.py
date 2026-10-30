@@ -28,7 +28,7 @@ from .executor import ExecutionReport, RecoveryReport, execute_buys, recover_unf
 from .close_executor import execute_closes, recover_unfinished_closes
 from .limits import apply_submission_limits
 from .halt import write_halt
-from .interval_pnl import ClosedLot, IntervalResult, _utc, compute_interval
+from .interval_pnl import ClosedLot, IntervalResult, PartialCloseEvidence, _utc, compute_interval, observe
 from .preflight import (
     GateResult, GateSpec, etoro_reachability_probe, gate_1_halt,
     gate_2_power, gate_3_network, gate_4_clock, gate_5_database,
@@ -301,9 +301,14 @@ def intent_to_dict(i: LadderIntent) -> dict:
             "position_ref": i.position_ref, "reason": i.reason, "book": i.book}
 
 
-def _interval_for(prev, snap, *, client, managed_ids, config, today) -> IntervalResult:
+def _interval_for(prev, snap, *, repo, client, managed_ids, config, today) -> IntervalResult:
     closed = []
+    partial_closes = []
     if prev is not None:
+        ids = observe(prev, managed_ids).keys() & observe(snap, managed_ids).keys()
+        partial_closes = [PartialCloseEvidence(
+            e["position_id"], e["units_before"], e["units_after"], e["slice_position_id"],
+        ) for e in repo.confirmed_partial_closes(ids)]
         try:
             rows = client.get_trade_history(start_date=prev.taken_at[:10], end_date=today.isoformat())
         except Exception:
@@ -325,6 +330,7 @@ def _interval_for(prev, snap, *, client, managed_ids, config, today) -> Interval
                                         r.profit, r.fees, r.open_date, r.close_date))
     return compute_interval(
         prev, snap, managed_ids=managed_ids, closed=closed, entry_marks={}, exit_marks={},
+        partial_closes=partial_closes,
         loss_alert_usd=config.risk.max_daily_loss_usd if config.risk.max_daily_loss_usd is not None else float("inf"),
         residual_halt_usd=config.risk.max_unexplained_loss_usd if config.risk.max_unexplained_loss_usd is not None else float("inf"),
     )
@@ -337,6 +343,8 @@ def format_interval(r: IntervalResult) -> str:
     pct = "n/a" if r.pnl_pct is None else f"{r.pnl_pct:.2f}%"
     res = "n/a" if r.residual_usd is None else f"${r.residual_usd:,.2f}"
     text = f"interval: {r.state}, P&L {pnl}, {pct}, residual {res}"
+    if r.excluded_positions:
+        text += "; excluded positions: " + ", ".join(r.excluded_positions)
     if r.reasons:
         text += "; reasons: " + " | ".join(r.reasons[:5])
         if len(r.reasons) > 5:
@@ -744,15 +752,19 @@ def _run_session_core(
         sid = repo.insert_snapshot(snap)
         reason += f"; snapshot {sid}: {len(snap.positions)} position(s), equity={snap.equity}, complete={snap.raw['complete']}"
         interval = _interval_for(
-            prev, snap, client=client,
+            prev, snap, repo=repo, client=client,
             managed_ids=frozenset(mi.instrument_ids[s] for s in config.symbols.traded),
             config=config, today=trading_date,
         )
         reason += "; " + format_interval(interval)
         if interval.state == "integrity" or interval.alert_c:
             try:
-                write_halt(host, reason=interval.reasons[0] if interval.reasons
-                           else f"alert C residual ${interval.residual_usd:,.2f}", source="session")
+                if interval.alert_c:
+                    label = "modelled-subset residual" if interval.state == "incomplete" else "residual"
+                    halt_reason = f"alert C {label} ${interval.modelled_residual_usd:,.2f}"
+                else:
+                    halt_reason = interval.reasons[0]
+                write_halt(host, reason=halt_reason, source="session")
                 reason += "; HALT set"
             except Exception as e:
                 reason += f"; HALT persistence failed: {type(e).__name__}: {e}"
@@ -845,7 +857,6 @@ def run_session(
         r = result.interval
         env = config.environment.value.upper()
         pnl = "n/a" if r.pnl_usd is None else f"${r.pnl_usd:,.2f}"
-        res = "n/a" if r.residual_usd is None else f"${r.residual_usd:,.2f}"
         messages = []
         if r.alert_a:
             messages.append(("alert_a", f"[{env}] ALERT A — UPRO+SCHG P&L {pnl} since last session (threshold -${config.risk.max_daily_loss_usd:,.0f}). Alert only, trading continues."))
@@ -855,11 +866,14 @@ def run_session(
                 else "HALT set.")
         next_session = " Next session stops at gate 1 until you /resume." if failure not in result.reason else ""
         if r.alert_c:
-            messages.append(("alert_c", f"[{env}] ALERT C — {halt} Loss not explained by market: residual {res} (threshold -${config.risk.max_unexplained_loss_usd:,.0f})." + next_session))
+            label = "modelled-subset residual" if r.state == "incomplete" else "residual"
+            res = f"${r.modelled_residual_usd:,.2f}"
+            messages.append(("alert_c", f"[{env}] ALERT C — {halt} Loss not explained by market: {label} {res} (threshold -${config.risk.max_unexplained_loss_usd:,.0f})." + next_session))
         if r.state == "integrity":
             messages.append(("integrity", f"[{env}] INTEGRITY — {halt} " + " | ".join(r.reasons[:5]) + next_session))
         if r.state == "incomplete":
-            messages.append(("interval_incomplete", f"[{env}] INCOMPLETE P&L check — no HALT. " + " | ".join(r.reasons[:5])))
+            status = halt if r.alert_c or "; HALT set" in result.reason or failure in result.reason else "no HALT."
+            messages.append(("interval_incomplete", f"[{env}] INCOMPLETE P&L check — {status} " + " | ".join(r.reasons[:5])))
         for event, text in messages:
             try:
                 notifier.send(text, event=event, session_id=result.session_id,

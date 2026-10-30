@@ -6,6 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from nightwatch.db.repo import Intent
 from nightwatch.engine import session
 from nightwatch.engine.halt import read_halt
 from nightwatch.engine.interval_pnl import ClosedLot, IntervalResult
@@ -48,7 +49,7 @@ class Notifier:
 
 
 def run(repo, host, config, monkeypatch, *, current=None, baseline=True, history_error=False,
-        notifier=None):
+        notifier=None, history_rows=()):
     if baseline:
         seed(repo)
     client = prepare_session(host, monkeypatch)
@@ -57,7 +58,7 @@ def run(repo, host, config, monkeypatch, *, current=None, baseline=True, history
         assert kwargs == {"start_date": "2026-10-01", "end_date": DAY.isoformat()}
         if history_error:
             raise RuntimeError("fake history offline")
-        return []
+        return list(history_rows)
     client.get_trade_history = history
     config = replace(config, risk=replace(config.risk, max_daily_loss_usd=500))
     return session.run_session(host=host, config=config, repo=repo, client=client,
@@ -172,13 +173,13 @@ def test_history_filter_mapping_and_dedup(repo, config, monkeypatch):
     client = SimpleNamespace(get_trade_history=Mock(return_value=rows))
     compute = Mock(return_value="sentinel")
     monkeypatch.setattr(session, "compute_interval", compute)
-    assert session._interval_for(prev, prev, client=client, managed_ids=frozenset([IDS["UPRO"]]),
+    assert session._interval_for(prev, prev, repo=repo, client=client, managed_ids=frozenset([IDS["UPRO"]]),
                                  config=config, today=DAY) == "sentinel"
     assert compute.call_args.kwargs["closed"] == [ClosedLot("20", IDS["UPRO"], 2, 3, -1, row.open_date, row.close_date)]
     assert compute.call_args.kwargs["entry_marks"] == compute.call_args.kwargs["exit_marks"] == {}
     client.get_trade_history.assert_called_once_with(start_date="2026-10-01", end_date="2026-10-02")
     client.get_trade_history.return_value = [SimpleNamespace(**{**vars(row), "close_date": None})]
-    session._interval_for(prev, prev, client=client, managed_ids=frozenset([IDS["UPRO"]]), config=config, today=DAY)
+    session._interval_for(prev, prev, repo=repo, client=client, managed_ids=frozenset([IDS["UPRO"]]), config=config, today=DAY)
     assert compute.call_args.kwargs["closed"] is None
 
 
@@ -188,7 +189,7 @@ def test_disabled_thresholds(repo, config):
                                   pnl=envelope(mark=40, pnl=-700), available_cash=1000,
                                   symbol_by_instrument={}, session_prices={}, sleeve={})
     config = replace(config, risk=replace(config.risk, max_daily_loss_usd=None, max_unexplained_loss_usd=None))
-    r = session._interval_for(prev, cur, client=SimpleNamespace(get_trade_history=lambda **kw: []),
+    r = session._interval_for(prev, cur, repo=repo, client=SimpleNamespace(get_trade_history=lambda **kw: []),
                               managed_ids=frozenset([IDS["UPRO"]]), config=config, today=DAY)
     assert r.state == "complete" and r.pnl_usd == -700 and r.residual_usd == -100
     assert not r.alert_a and not r.alert_c
@@ -201,3 +202,67 @@ def test_interval_format():
                                            "reasons: 0 | 1 | 2 | 3 | 4 (+2 more)")
     assert session.format_interval(replace(r, state="incomplete", pnl_usd=None, pnl_pct=None,
                                            residual_usd=None, reasons=())) == "interval: incomplete, P&L n/a, n/a, residual n/a"
+    assert "; excluded positions: schg" in session.format_interval(replace(r, excluded_positions=("schg",)))
+
+
+@pytest.mark.parametrize("residual", [-60, -10])
+@pytest.mark.parametrize("slice_id", ["slice", None])
+def test_confirmed_partial_close_keeps_other_loss_halt(repo, host, config, monkeypatch, residual, slice_id):
+    prev = seed(repo)
+    before = envelope()["clientPortfolio"]["positions"][0].copy()
+    before.update(positionID="schg", instrumentID=IDS["SCHG"], units=3.621089)
+    prev.raw["pnl"]["clientPortfolio"]["positions"].append(before)
+    prev = replace(prev, positions=[*prev.positions, replace(
+        prev.positions[0], position_id="schg", instrument_id=IDS["SCHG"], symbol="SCHG", units=3.621089)])
+    repo.insert_snapshot(prev)
+    # Recovery confirmed after the snapshot interval; endpoint binding still accepts it.
+    recovery = repo.create_session("2026-10-03", "dry_run", "demo", False)
+    intent = Intent(recovery.id, "partial", 1, "SCHG", "close", instrument_id=IDS["SCHG"],
+                    units=1.810545, position_id="schg")
+    _, ledger_id = repo.begin_schg_close_leg(intent, position_id="schg", units_before=3.621089,
+                                            units_deducted=1.810545)
+    repo.finish_schg_close_leg(ledger_id, status="confirmed", intent_status="filled", resolved=True,
+                               units_after=1.810544, slice_position_id=slice_id)
+    assert repo.confirmed_partial_closes(["schg"])[0]["confirmed_at"] > "2026-10-02"
+    current = envelope(pnl=residual)
+    current["clientPortfolio"]["positions"].append({**before, "units": 1.810544})
+    history = SimpleNamespace(position_id="slice", instrument_id=IDS["SCHG"], units=1.810545,
+                              profit=100, fees=0, open_date="2026-10-02T14:00:00Z",
+                              close_date="2026-10-02T15:00:00Z")
+    notifier = Notifier(host)
+    result = run(repo, host, config, monkeypatch, current=current, baseline=False,
+                 history_rows=(history,), notifier=notifier)
+    r = result.interval
+    assert r.state == ("complete" if slice_id else "incomplete")
+    assert r.excluded_positions == ("schg",)
+    assert r.modelled_residual_usd == residual
+    assert r.alert_c is (residual == -60)
+    assert host.halt_flag_path().exists() is r.alert_c
+    assert all(call[2] is r.alert_c for call in notifier.calls)
+    assert "; excluded positions: schg" in result.reason
+    if r.alert_c:
+        label = "residual" if slice_id else "modelled-subset residual"
+        assert read_halt(host)["reason"] == f"alert C {label} $-60.00"
+        alert = next(text for meta, text, _ in notifier.calls if meta["event"] == "alert_c")
+        assert f"{label} $-60.00" in alert
+        assert "n/a" not in alert
+        assert not any("no HALT" in text for _, text, _ in notifier.calls)
+    else:
+        assert not any(meta["event"] == "alert_c" for meta, _, _ in notifier.calls)
+
+
+def test_unmodelled_profit_cannot_cancel_modelled_loss_in_session(repo, host, config, monkeypatch):
+    history = SimpleNamespace(position_id="roundtrip", instrument_id=IDS["SCHG"], units=1,
+                              profit=100, fees=0, open_date="2026-10-02T14:00:00Z",
+                              close_date="2026-10-02T15:00:00Z")
+    notifier = Notifier(host)
+    result = run(repo, host, config, monkeypatch, current=envelope(pnl=-60),
+                 history_rows=(history,), notifier=notifier)
+    assert result.interval.state == "incomplete"
+    assert result.interval.pnl_usd == 40
+    assert result.interval.residual_usd is None
+    assert result.interval.modelled_residual_usd == -60
+    assert result.interval.alert_c
+    assert read_halt(host)["reason"] == "alert C modelled-subset residual $-60.00"
+    assert any("modelled-subset residual $-60.00" in text for _, text, _ in notifier.calls)
+    assert not any("no HALT" in text for _, text, _ in notifier.calls)

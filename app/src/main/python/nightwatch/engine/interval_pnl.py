@@ -31,6 +31,14 @@ class ClosedLot:
 
 
 @dataclass(frozen=True)
+class PartialCloseEvidence:
+    position_id: str
+    units_before: float
+    units_after: float
+    slice_position_id: str | None
+
+
+@dataclass(frozen=True)
 class IntervalResult:
     state: str
     pnl_usd: float | None
@@ -41,6 +49,8 @@ class IntervalResult:
     alert_c: bool
     reasons: tuple[str, ...]
     lines: tuple[str, ...]
+    excluded_positions: tuple[str, ...] = ()
+    modelled_residual_usd: float | None = None
 
 
 def observe(snap: PortfolioSnapshot, managed_ids: frozenset[int]) -> dict[str, PosObs]:
@@ -76,6 +86,7 @@ def compute_interval(
     exit_marks: Mapping[str, float],
     loss_alert_usd: float = 500.0,
     residual_halt_usd: float = 50.0,
+    partial_closes: Sequence[PartialCloseEvidence] = (),
 ) -> IntervalResult:
     if prev is None:
         return IntervalResult("no_baseline", None, None, None, None, False, False,
@@ -88,6 +99,11 @@ def compute_interval(
     pnl_parts: list[float] = []
     expl_parts: list[float] = []
     lines: list[str] = []
+    modelled_parts: list[float] = []
+    modelled_eligible = (closed is not None and prev.raw.get("complete") is True
+                         and cur.raw.get("complete") is True)
+    excluded = set()
+    excluded_slices = set()
     if closed is None:
         incomplete = True
         reasons.append("trade history not supplied: closes and round trips unknown")
@@ -107,6 +123,18 @@ def compute_interval(
         expl = None
         if p0 is not None and p1 is not None:
             kind = "held"
+            if p1.units < p0.units:
+                matches = [e for e in partial_closes if e.position_id == id
+                           and abs(e.units_before - p0.units) <= 2e-6
+                           and abs(e.units_after - p1.units) <= 2e-6]
+                # One leg per position per session; chained reductions are not evidence.
+                if len(matches) == 1:
+                    excluded.add(id)
+                    if matches[0].slice_position_id is not None:
+                        excluded_slices.add(matches[0].slice_position_id)
+                    lines.append(f"{id} app partial close {p0.units}->{p1.units}: excluded from residual")
+                    reasons.append(f"position {id}: app partial close excluded")
+                    continue
             if abs(p1.units - p0.units) > 1e-9:
                 integrity = True
                 reasons.append(f"position {id}: units changed {p0.units}->{p1.units}")
@@ -151,12 +179,13 @@ def compute_interval(
         pnl_parts.append(pnl_c)
         if expl is not None:
             expl_parts.append(expl)
+            modelled_parts.append(pnl_c - expl)
         market = "n/a" if expl is None else f"{expl:+.2f}"
         lines.append(f"{id} {kind}: pnl {pnl_c:+.2f}, market {market}")
 
     for lot in closed:
         id = lot.position_id
-        if (id in O0 or id in O1 or lot.instrument_id not in managed_ids
+        if (id in excluded_slices or id in O0 or id in O1 or lot.instrument_id not in managed_ids
                 or lot.open_date is None or _utc(lot.open_date) <= _utc(prev.taken_at)):
             continue
         pnl_c = lot.net_profit + lot.fees
@@ -169,6 +198,7 @@ def compute_interval(
         else:
             expl = lot.units * (Bx - Be)
             expl_parts.append(expl)
+            modelled_parts.append(pnl_c - expl)
         market = "n/a" if expl is None else f"{expl:+.2f}"
         lines.append(f"{id} round trip: pnl {pnl_c:+.2f}, market {market}")
 
@@ -176,10 +206,11 @@ def compute_interval(
     state = "integrity" if integrity else "incomplete" if incomplete else "complete"
     explained_usd = sum(expl_parts, 0.0) if state == "complete" else None
     residual_usd = pnl_usd - explained_usd if state == "complete" else None
+    modelled_residual_usd = sum(modelled_parts, 0.0) if modelled_eligible and not integrity else None
     rows = {row.position_id: row for row in prev.positions}
     base = 0.0
     for id, p0 in O0.items():
-        if id in skipped:
+        if id in skipped or id in excluded:
             continue
         row = rows.get(id)
         if row is None or row.amount is None or p0.pnl is None:
@@ -190,6 +221,6 @@ def compute_interval(
     return IntervalResult(
         state, pnl_usd, pnl_pct, explained_usd, residual_usd,
         state == "complete" and pnl_usd <= -loss_alert_usd,
-        state == "complete" and residual_usd <= -residual_halt_usd,
-        tuple(reasons), tuple(lines),
+        modelled_residual_usd is not None and modelled_residual_usd <= -residual_halt_usd,
+        tuple(reasons), tuple(lines), tuple(sorted(excluded)), modelled_residual_usd,
     )

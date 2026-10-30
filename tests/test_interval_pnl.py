@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from nightwatch.db.repo import PortfolioSnapshot, SnapshotPosition
-from nightwatch.engine.interval_pnl import ClosedLot, compute_interval, observe
+from nightwatch.engine.interval_pnl import ClosedLot, PartialCloseEvidence, compute_interval, observe
 
 
 managed = frozenset({3244, 1084})
@@ -54,6 +54,7 @@ def numbers(result, pnl, market, residual):
     assert result.pnl_usd == pytest.approx(pnl, abs=1e-9)
     assert result.explained_usd == pytest.approx(market, abs=1e-9)
     assert result.residual_usd == pytest.approx(residual, abs=1e-9)
+    assert result.modelled_residual_usd == pytest.approx(residual, abs=1e-9)
     assert result.reasons == ()
 
 
@@ -160,6 +161,7 @@ def test_incomplete_snapshot_no_partial_threshold(side):
                      snap([pos(rate=149, pnl=-600)], complete=side != "cur"))
     pending(result, "snapshot marks incomplete")
     assert result.pnl_usd == pytest.approx(-600, abs=1e-9)
+    assert result.modelled_residual_usd is None
 
 
 @pytest.mark.parametrize("field", ["closeRate", "pnL"])
@@ -224,3 +226,118 @@ def test_naive_dates_are_utc_and_custom_thresholds():
     result = compute(snap([]), snap([]), closed=(lot,), entry_marks={"4": 100},
                      exit_marks={"4": 10}, loss_alert_usd=501, residual_halt_usd=51)
     assert not result.alert_a and not result.alert_c
+
+
+@pytest.mark.parametrize("residual", [-10, -60])
+@pytest.mark.parametrize("slice_id", [None, "slice"])
+def test_app_partial_close_and_modelled_loss(residual, slice_id):
+    prev = snap([pos("schg", instrument=1084, units=3.621089), pos("upro")])
+    cur = snap([pos("schg", instrument=1084, units=1.810544, pnl=999),
+                pos("upro", pnl=residual)])
+    lot = ClosedLot("slice", 1084, 1.810545, 100, 0,
+                    "2026-10-09T14:00:00Z", "2026-10-09T15:00:00Z")
+    result = compute(prev, cur, closed=(lot,), partial_closes=(
+        PartialCloseEvidence("schg", 3.621089, 1.810544, slice_id),))
+    assert result.excluded_positions == ("schg",)
+    assert result.state == ("complete" if slice_id else "incomplete")
+    assert result.modelled_residual_usd == residual
+    assert result.alert_c is (residual == -60)
+    assert result.pnl_pct == pytest.approx(100 * result.pnl_usd / 1500)
+    assert "schg app partial close 3.621089->1.810544: excluded from residual" in result.lines
+    assert "position schg: app partial close excluded" in result.reasons
+    if slice_id:
+        assert result.pnl_usd == result.residual_usd == residual
+        assert not any("round trip" in line for line in result.lines)
+    else:
+        assert result.pnl_usd == residual + 100
+        assert result.residual_usd is result.explained_usd is None
+        assert "position slice: round trip, missing independent mark" in result.reasons
+
+
+def test_all_partial_positions_excluded_and_endpoint_tolerance():
+    result = compute(snap([pos(units=8)]), snap([pos(units=6)]), partial_closes=(
+        PartialCloseEvidence("1", 8.0000019, 5.9999981, None),))
+    assert result.state == "complete"
+    assert result.pnl_usd == result.explained_usd == result.residual_usd == result.modelled_residual_usd == 0
+    assert result.pnl_pct is None
+    assert result.excluded_positions == ("1",)
+    assert not result.alert_a and not result.alert_c
+
+
+@pytest.mark.parametrize("before,after,evidence", [
+    (6, 4, (PartialCloseEvidence("1", 8, 6, None),)),  # stale
+    (8, 4, (PartialCloseEvidence("1", 8, 6, None), PartialCloseEvidence("1", 6, 4, None))),
+    (3.62, 1.81, (PartialCloseEvidence("1", 3.62, 1.80, None),)),
+    (8, 6, (PartialCloseEvidence("other", 8, 6, None),)),
+    (8, 6, (PartialCloseEvidence("1", 8, 6, None),) * 2),
+    (6, 8, (PartialCloseEvidence("1", 6, 8, None),)),
+    (8, 6, ()),
+    (8, 6, (PartialCloseEvidence("1", 8.0000021, 6, None),)),
+    (8, 6, (PartialCloseEvidence("1", 8, 6.0000021, None),)),
+])
+def test_partial_close_nonmatching_evidence_is_integrity(before, after, evidence):
+    result = compute(snap([pos(units=before), pos("upro")]),
+                     snap([pos(units=after), pos("upro", pnl=-60)]), partial_closes=evidence)
+    pending(result, "units changed", state="integrity")
+    assert result.excluded_positions == ()
+    assert result.modelled_residual_usd is None
+
+
+def test_already_reflected_partial_close_is_not_used():
+    evidence = (PartialCloseEvidence("1", 3.62, 1.81, "slice"),)
+    result = compute(snap([pos(units=1.81)]), snap([pos(units=1.81)]), partial_closes=evidence)
+    numbers(result, 0, 0, 0)
+    assert result.excluded_positions == ()
+
+
+@pytest.mark.parametrize("residual", [-60, -10])
+@pytest.mark.parametrize("unmodelled", ["held", "opened", "closed", "round_trip", "short", "leveraged"])
+def test_row_incompleteness_keeps_only_paired_modelled_terms(residual, unmodelled):
+    prev, cur = [pos("upro")], [pos("upro", pnl=residual)]
+    lots = ()
+    row = pos("other", instrument=1084)
+    if unmodelled == "held":
+        prev.append(row)
+        cur.append(pos("other", instrument=1084, pnl=None))
+    elif unmodelled == "opened":
+        cur.append(pos("other", instrument=1084, pnl=100, fees=0))
+    elif unmodelled in ("closed", "round_trip"):
+        if unmodelled == "closed":
+            prev.append(row)
+        lots = (ClosedLot("other", 1084, 10, 100, 0,
+                          "2026-10-09T14:00:00Z", "2026-10-09T15:00:00Z"),)
+    else:
+        row["isBuy"] = unmodelled != "short"
+        row["leverage"] = 2 if unmodelled == "leveraged" else 1
+        prev.append(row)
+        cur.append(row)
+    result = compute(snap(prev), snap(cur), closed=lots)
+    assert result.state == "incomplete"
+    assert result.explained_usd is result.residual_usd is None
+    assert result.modelled_residual_usd == residual
+    assert result.alert_c is (residual == -60)
+    if unmodelled == "round_trip":
+        assert result.pnl_usd == residual + 100
+
+
+@pytest.mark.parametrize("kind", ["opened", "closed"])
+def test_modelled_opened_and_closed_rows_remain_eligible(kind):
+    prev, cur = [pos("missing", pnl=None)], [pos("missing", pnl=None)]
+    lots, entry, exit = (), {}, {}
+    if kind == "opened":
+        cur.append(pos("modelled", rate=150, pnl=-60, fees=0))
+        entry = {"modelled": 150}
+    else:
+        prev.append(pos("modelled", fees=0))
+        lots = (ClosedLot("modelled", 3244, 10, -60, 0, None, None),)
+        exit = {"modelled": 150}
+    result = compute(snap(prev), snap(cur), closed=lots, entry_marks=entry, exit_marks=exit)
+    assert result.state == "incomplete"
+    assert result.modelled_residual_usd == -60
+    assert result.alert_c
+
+
+def test_history_unavailable_disables_modelled_subset():
+    result = compute(snap([pos()]), snap([pos(pnl=-60)]), closed=None)
+    pending(result, "trade history not supplied")
+    assert result.modelled_residual_usd is None
