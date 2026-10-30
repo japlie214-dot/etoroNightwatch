@@ -3,6 +3,9 @@ package com.nightwatch.etoro.probe
 import android.content.Context
 import android.os.SystemClock
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.Dispatchers
+import java.io.File
+import java.time.Instant
 
 /**
  * Problem 3 — the headline feature: the phone's side of the full remote-command loop.
@@ -74,9 +77,14 @@ object CommandHandler {
                 try {
                     val instant = java.time.Instant.parse(iso)
                     val triggerAt = instant.toEpochMilli()
-                    AlarmScheduler.scheduleAbsolute(context, triggerAt)
-                    store.log("COMMAND_SCHEDULE", "next alarm set for $iso (epoch $triggerAt)")
-                    NotificationHelper.post(context, "Nightwatch: schedule", "Next alarm set for $iso")
+                    val next = AlarmScheduler.scheduleAbsolute(context, triggerAt)
+                    if (next == null) {
+                        store.log("COMMAND_SCHEDULE_FAILED", "not scheduled")
+                        NotificationHelper.postFailure(context, "schedule command failed", "Alarm not scheduled")
+                    } else {
+                        store.log("COMMAND_SCHEDULE", "next alarm set for $iso (epoch $next)")
+                        NotificationHelper.post(context, "Nightwatch: schedule", "Next alarm set for $iso")
+                    }
                 } catch (e: Exception) {
                     store.log("COMMAND_SCHEDULE_FAILED", "${e.javaClass.simpleName}: ${e.message}")
                     NotificationHelper.postFailure(context, "schedule command failed", "$iso is not valid ISO-8601: ${e.message}")
@@ -105,15 +113,62 @@ object CommandHandler {
             }
 
             "halt" -> {
-                HaltFlag.set(context, true)
-                store.log("COMMAND_HALT", "HALT flag set")
-                NotificationHelper.post(context, "Nightwatch: HALT", "Halt flag is now SET")
+                synchronized(AlarmScheduler) {
+                    HaltFlag.set(context, true)
+                    try {
+                        val file = HaltFlag.file(context)
+                        file.parentFile?.mkdirs()
+                        file.writeText("kotlin halt command ${Instant.now()}")
+                        store.log("COMMAND_HALT", "HALT file created; latch set")
+                    } catch (e: Exception) {
+                        store.log("COMMAND_HALT_FAILED", "file error=${e.javaClass.simpleName}; latch remains set")
+                        NotificationHelper.postFailure(context, "HALT file sync failed", e.javaClass.simpleName)
+                    } finally {
+                        try {
+                            AlarmScheduler.cancel(context)
+                        } catch (e: Exception) {
+                            store.log("COMMAND_HALT_CANCEL_FAILED", "error=${e.javaClass.simpleName}")
+                            NotificationHelper.postFailure(context, "HALT alarm cancellation failed", e.javaClass.simpleName)
+                        } finally {
+                            NotificationHelper.postOngoingHalt(context)
+                        }
+                    }
+                }
             }
 
             "resume" -> {
-                HaltFlag.set(context, false)
-                store.log("COMMAND_RESUME", "HALT flag cleared")
-                NotificationHelper.post(context, "Nightwatch: resume", "Halt flag is now CLEARED")
+                val resumed = synchronized(AlarmScheduler) {
+                    try {
+                        val file = HaltFlag.file(context)
+                        check(!file.exists() || file.delete()) { "HALT delete failed" }
+                        check(!file.exists()) { "HALT still present" }
+                        HaltFlag.set(context, false)
+                        NotificationHelper.clearOngoingHalt(context)
+                        store.log("COMMAND_RESUME", "HALT file absent; latch and notification cleared")
+                        true
+                    } catch (e: Exception) {
+                        HaltFlag.set(context, true)
+                        store.log("COMMAND_RESUME_FAILED", "error=${e.javaClass.simpleName}; latch remains set")
+                        try {
+                            AlarmScheduler.cancel(context)
+                        } catch (cancelError: Exception) {
+                            store.log("COMMAND_RESUME_CANCEL_FAILED", "error=${cancelError.javaClass.simpleName}")
+                        }
+                        NotificationHelper.postOngoingHalt(context)
+                        NotificationHelper.postFailure(context, "resume failed", e.javaClass.simpleName)
+                        false
+                    }
+                }
+                if (resumed) {
+                    try {
+                        val next = runBlocking(Dispatchers.IO) { AlarmScheduler.rescheduleFromSavedState(context) }
+                        store.log("COMMAND_RESUME_SCHEDULE", "next=$next; null means not scheduled")
+                        NotificationHelper.post(context, "Nightwatch: resume", "HALT cleared; next=$next (null: not scheduled)")
+                    } catch (e: Exception) {
+                        store.log("COMMAND_RESUME_SCHEDULE_FAILED", "error=${e.javaClass.simpleName}")
+                        NotificationHelper.postFailure(context, "Resume alarm not scheduled", e.javaClass.simpleName)
+                    }
+                }
             }
 
             "help" -> {
@@ -131,16 +186,37 @@ object CommandHandler {
     }
 }
 
-/** Minimal halt-flag stand-in for DESIGN §6.I / §5 gate 1 — this probe has nothing to halt yet,
- * but the flag is real, persisted, and visible, so the real app's preflight gate 1 has a proven
- * mechanism to build on. */
+/** Resume-only latch; a missing Python HALT file never clears it. */
 object HaltFlag {
     private const val PREFS = "nightwatch_probe_halt_prefs"
     private const val KEY_HALT = "halt"
 
+    fun file(context: Context): File = File(context.filesDir, "nightwatch_config/HALT")
+
+    fun reconcile(context: Context) {
+        synchronized(AlarmScheduler) {
+            try {
+                if (file(context).exists()) set(context, true)
+            } catch (e: Exception) {
+                set(context, true)
+                EventStore.get(context).log("HALT_RECONCILE_FAILED", "error=${e.javaClass.simpleName}")
+                NotificationHelper.postFailure(context, "HALT check failed", e.javaClass.simpleName)
+            }
+            if (isHalted(context)) {
+                try {
+                    AlarmScheduler.cancel(context)
+                } finally {
+                    NotificationHelper.postOngoingHalt(context)
+                }
+            }
+        }
+    }
+
     fun set(context: Context, halted: Boolean) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .edit().putBoolean(KEY_HALT, halted).apply()
+        synchronized(AlarmScheduler) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                .edit().putBoolean(KEY_HALT, halted).apply()
+        }
     }
 
     fun isHalted(context: Context): Boolean =

@@ -15,8 +15,8 @@ import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
 /** Probe battery plus the alarm-only dry-run desktop-host simulation on Android.
- * Saved nightly alarms are registered before long work; this is not market-calendar/DST-aware
- * production scheduling. Process death, Doze, power gating and device overlap remain device proof.
+ * Saved alarms are registered before long work, including market-calendar/DST-aware scheduling.
+ * Process death, Doze, power gating and device overlap remain device proof.
  */
 class WakeService : Service() {
 
@@ -67,6 +67,11 @@ class WakeService : Service() {
         val wakeLock = newWakeLock("NightwatchProbe:WakeLock")
         try {
             wakeLock.acquire(10 * 60 * 1000L)
+            try {
+                HaltFlag.reconcile(this)
+            } catch (e: Exception) {
+                store.log("WAKE_HALT_CHECK_FAILED", "error=${e.javaClass.simpleName}")
+            }
             // One-shot saved modes return null, retaining their no-reschedule semantics.
             if (trigger == "alarm") {
                 try {
@@ -140,7 +145,9 @@ class WakeService : Service() {
 
             // 5b. Only alarms enter the new read-role, never-armed Python route.
             if (trigger == "alarm") {
-                if (skipSession || !sessionRunning.compareAndSet(false, true)) {
+                if (HaltFlag.isHalted(this)) {
+                    store.log("SESSION_SKIPPED_HALT", "trigger=$trigger")
+                } else if (skipSession || !sessionRunning.compareAndSet(false, true)) {
                     store.log("SESSION_SKIPPED_BUSY", "trigger=$trigger")
                 } else {
                     try {
@@ -167,9 +174,14 @@ class WakeService : Service() {
             val handle = newWakeLock("NightwatchProbe:Session")
             sessionWakeLock = handle
             handle.acquire(50 * 60 * 1000L)
+            if (HaltFlag.isHalted(this)) {
+                store.log("SESSION_SKIPPED_HALT", "latched before Python session call")
+                return
+            }
             val raw = PyBridge.runSessionDry(this, File(filesDir, "nightwatch_config").absolutePath)
             val parsed = JSONObject(raw)
             require(parsed.get("status") is String && parsed.get("armed") == false)
+            require(parsed.get("halt") is Boolean)
             require(parsed.get("reason_code") is String)
             require(parsed.get("error_type") == JSONObject.NULL || parsed.get("error_type") is String)
             for (key in listOf("session_id", "failed_gate")) {
@@ -188,9 +200,26 @@ class WakeService : Service() {
             JSONObject().put("status", "bridge_error").put("armed", false)
                 .put("session_id", JSONObject.NULL).put("failed_gate", JSONObject.NULL)
                 .put("reason_code", "bridge_error").put("error_type", e.javaClass.simpleName)
-                .put("gates", org.json.JSONArray())
+                .put("gates", org.json.JSONArray()).put("halt", HaltFlag.isHalted(this))
         } finally {
             sessionWakeLock?.let { if (it.isHeld) it.release() }
+        }
+        try {
+            if (result.optBoolean("halt", false) ||
+                (result.optString("status") == "preflight_failed" && result.optInt("failed_gate") == 1)) {
+                synchronized(AlarmScheduler) {
+                    HaltFlag.set(this, true)
+                    try {
+                        AlarmScheduler.cancel(this)
+                    } finally {
+                        NotificationHelper.postOngoingHalt(this)
+                    }
+                    store.log("HALT_LINKED", "session HALT latched; sessions stopped until resume")
+                }
+            }
+        } catch (e: Exception) {
+            store.log("HALT_LINK_FAILED", "error=${e.javaClass.simpleName}")
+            NotificationHelper.postFailure(this, "HALT link failed", e.javaClass.simpleName)
         }
         try {
             val line = result.toString()

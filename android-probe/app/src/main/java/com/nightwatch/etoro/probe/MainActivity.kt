@@ -108,7 +108,8 @@ class MainActivity : AppCompatActivity() {
             val minutes = binding.editFireMinutes.text.toString().toIntOrNull() ?: 2
             val at = AlarmScheduler.scheduleInMinutes(this, minutes)
             refreshStatus()
-            binding.txtStatus.text = "Test alarm scheduled for epoch $at (in $minutes min)"
+            binding.txtStatus.text = if (at == null) "Test alarm not scheduled" else
+                "Test alarm scheduled for epoch $at (in $minutes min)"
         }
 
         binding.btnPickTime.setOnClickListener { showTimePicker() }
@@ -120,7 +121,24 @@ class MainActivity : AppCompatActivity() {
             } else {
                 val at = AlarmScheduler.scheduleNightly(this, pickedHour, pickedMinute, days)
                 refreshStatus()
-                binding.txtStatus.text = "Nightly alarm scheduled for epoch $at"
+                binding.txtStatus.text = if (at == null) "Nightly alarm not scheduled" else
+                    "Nightly alarm scheduled for epoch $at"
+            }
+        }
+
+        binding.btnScheduleMarket.setOnClickListener {
+            binding.txtStatus.text = "Computing next market session..."
+            lifecycleScope.launch {
+                try {
+                    val at = withContext(Dispatchers.IO) { AlarmScheduler.scheduleMarket(this@MainActivity) }
+                    refreshStatus()
+                    binding.txtStatus.text = if (at == null) "Market session not scheduled" else
+                        "Market session scheduled for epoch $at"
+                } catch (e: Exception) {
+                    store.log("ALARM_MARKET_SCHEDULE_FAILED", "error=${e.javaClass.simpleName}")
+                    binding.txtStatus.text = "Market session not scheduled"
+                    NotificationHelper.postFailure(this@MainActivity, "Market alarm not scheduled", e.javaClass.simpleName)
+                }
             }
         }
 
@@ -540,7 +558,7 @@ class MainActivity : AppCompatActivity() {
     private fun updateCountdown() {
         val nextEpoch = AlarmScheduler.currentNextFireEpochMs(this)
         if (nextEpoch == null) {
-            binding.txtNextFireAbsolute.text = "Next fire: (no nightly schedule set)"
+            binding.txtNextFireAbsolute.text = "Next fire: (not scheduled)"
             binding.txtCountdown.text = "Fires in: --"
             return
         }

@@ -34,7 +34,7 @@ class ExactAlarmPermissionReceiver : BroadcastReceiver() {
         }
         if (granted) {
             // Mirrors DESIGN's "re-register alarms when the permission is granted back".
-            AlarmScheduler.rescheduleFromSavedState(context)
+            AlarmScheduler.rescheduleFromReceiver(context, goAsync(), "EXACT_ALARM_PERMISSION")
         }
     }
 }

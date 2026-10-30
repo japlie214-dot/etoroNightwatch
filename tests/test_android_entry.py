@@ -1,7 +1,7 @@
 """Offline Android entry contract, including real-engine and kernel-lock proofs."""
 
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import subprocess
@@ -24,7 +24,14 @@ from .test_session_market import FakeTiingo, MarketClient, assembled_signal
 
 NOW = datetime(2026, 10, 2, 19, 30, tzinfo=timezone.utc)
 MARKER = "SECRET_MARKER_123"
-KEYS = {"status", "armed", "session_id", "failed_gate", "reason_code", "error_type", "gates"}
+KEYS = {"status", "armed", "session_id", "failed_gate", "reason_code", "error_type", "gates", "halt"}
+
+
+@pytest.fixture(autouse=True, params=[False, True], ids=["halt-absent", "halt-present"])
+def halt_file(host, request):
+    if request.param:
+        (host.root / "HALT").write_text("test halt")
+    return request.param
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +78,7 @@ def wired(config_path, host, monkeypatch):
 def invoke(host, **kwargs):
     result = json.loads(entry.run_session_dry(str(host.root), now_utc=kwargs.pop("now_utc", NOW), **kwargs))
     assert set(result) == KEYS and result["armed"] is False
+    assert result["halt"] is (host.root / "HALT").exists()
     assert MARKER not in json.dumps(result)
     return result
 
@@ -79,7 +87,7 @@ def test_happy_shape_and_persisted_gates(wired):
     host, clients, closed = wired
     result = invoke(host)
     assert result == dict(status="would_have_done", armed=False, session_id=1, failed_gate=None,
-                          reason_code="would_have_done", error_type=None,
+                          reason_code="would_have_done", error_type=None, halt=(host.root / "HALT").exists(),
                           gates=[[n, f"gate_{n}", True] for n in range(1, 13)])
     assert clients == ["read"] and set(closed) == {"client", "notifier", "tiingo"}
     assert (host.data_dir() / "session.lock").is_file()
@@ -249,6 +257,7 @@ def test_exception_envelopes_and_release(wired, monkeypatch, stage):
     result = json.loads(raw)
     assert set(result) == KEYS and result["armed"] is False
     assert result["status"] == "error" and result["error_type"] == "ConfigError"
+    assert result["halt"] is (host.root / "HALT").exists()
     if (host.root / "data").exists():
         with entry._session_lock(host.data_dir() / "session.lock") as acquired:
             assert acquired
@@ -332,3 +341,114 @@ def test_prior_date_unfinished_reaches_real_gate_five(config_path, host, monkeyp
     assert result["status"] == "preflight_failed" and result["failed_gate"] == 5
     with Repo.open(default_db_path(host), host=host) as repo:
         assert repo.get_session(previous.id) == previous
+
+
+@pytest.mark.parametrize("instant,expected", [
+    ("2026-10-01T18:00:00+00:00", "2026-10-01T19:05:00+00:00"),
+    ("2026-10-01T19:05:00+00:00", "2026-10-02T19:05:00+00:00"),
+    ("2026-10-01T19:05:01+00:00", "2026-10-02T19:05:00+00:00"),
+    ("2026-10-02T20:00:00+00:00", "2026-10-05T19:05:00+00:00"),
+    ("2026-11-25T21:00:00+00:00", "2026-11-27T17:05:00+00:00"),
+    ("2026-11-27T16:00:00+00:00", "2026-11-27T17:05:00+00:00"),
+    ("2026-10-30T18:00:00+00:00", "2026-10-30T19:05:00+00:00"),
+    ("2026-10-30T20:00:00+00:00", "2026-11-02T20:05:00+00:00"),
+    ("2026-03-06T19:00:00+00:00", "2026-03-06T20:05:00+00:00"),
+    ("2026-03-06T21:00:00+00:00", "2026-03-09T19:05:00+00:00"),
+])
+def test_next_market_wake_calendar(instant, expected):
+    now = datetime.fromisoformat(instant)
+    epoch = entry.next_session_wake_epoch_ms(int(now.timestamp() * 1000))
+    assert type(epoch) is int
+    wake = datetime.fromtimestamp(epoch / 1000, timezone.utc)
+    assert wake == datetime.fromisoformat(expected)
+    local = wake.astimezone(entry.EASTERN)
+    assert entry.is_trading_day(local.date())
+    close = entry.session_close_datetime(local.date())
+    assert close - timedelta(minutes=60) <= local <= close - timedelta(minutes=25)
+
+
+def test_next_market_wake_has_no_io(monkeypatch):
+    import builtins
+    import socket
+    import sqlite3
+
+    def forbidden(*a, **k):
+        raise AssertionError("helper must not access host, DB, config, files or network")
+
+    for name in ("DesktopHost", "set_host", "load_config", "default_db_path", "EtoroClient", "TiingoClient"):
+        monkeypatch.setattr(entry, name, forbidden)
+    monkeypatch.setattr(Repo, "open", forbidden)
+    monkeypatch.setattr(sqlite3, "connect", forbidden)
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(builtins, "open", forbidden)
+    monkeypatch.setattr(Path, "open", forbidden)
+    monkeypatch.setattr(Path, "exists", forbidden)
+    now = datetime(2026, 10, 30, 18, tzinfo=timezone.utc)
+    assert entry.next_session_wake_epoch_ms(int(now.timestamp() * 1000)) == 1793387100000
+
+
+def test_next_market_wake_real_clock_and_errors(monkeypatch):
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 2, 19, tzinfo=timezone.utc).astimezone(tz)
+
+    monkeypatch.setattr(entry, "datetime", Clock)
+    assert entry.next_session_wake_epoch_ms() == int(datetime(2026, 11, 2, 20, 5, tzinfo=timezone.utc).timestamp() * 1000)
+
+    def fail(*a, **k):
+        raise RuntimeError("calendar failure")
+
+    monkeypatch.setattr(entry, "next_close_minus", fail)
+    with pytest.raises(RuntimeError, match="calendar failure"):
+        entry.next_session_wake_epoch_ms()
+
+
+@pytest.mark.parametrize("status", sorted(entry._STATUSES) + ["unknown"])
+def test_engine_status_halt_envelopes(wired, monkeypatch, status):
+    host, _, _ = wired
+    monkeypatch.setattr(entry, "run_session", lambda **k: session.SessionResult(None, status, None, MARKER))
+    assert invoke(host)["status"] == (status if status in entry._STATUSES else "error")
+
+
+def test_real_halt_gate(config_path, host, halt_file, monkeypatch):
+    from nightwatch.engine.preflight import gate_1_halt
+
+    monkeypatch.setattr(entry, "EtoroClient", lambda *a, **k: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(entry, "TiingoClient", lambda c: FakeTiingo())
+    monkeypatch.setattr(session, "build_preflight_gates", lambda **k: [
+        GateSpec(n, "halt" if n == 1 else f"gate_{n}",
+                 lambda n=n: gate_1_halt(host) if n == 1 else GateResult(n, f"gate_{n}", False, "stop offline"))
+        for n in range(1, 13)
+    ])
+    result = invoke(host)
+    assert result["status"] == "preflight_failed"
+    assert result["failed_gate"] == (1 if halt_file else 2)
+    assert result["halt"] is halt_file
+
+
+def test_halt_created_during_engine_is_reported(wired, monkeypatch):
+    host, _, _ = wired
+
+    def run(**kwargs):
+        (host.root / "HALT").write_text("engine halt")
+        return session.SessionResult(None, "preflight_failed", 1, MARKER)
+
+    monkeypatch.setattr(entry, "run_session", run)
+    result = invoke(host)
+    assert result["halt"] is True and result["failed_gate"] == 1
+
+
+def test_halt_existence_error_falls_back_false(wired, monkeypatch):
+    host, _, _ = wired
+    original = Path.exists
+
+    def exists(path):
+        if path == host.root / "HALT":
+            raise OSError(MARKER)
+        return original(path)
+
+    monkeypatch.setattr(Path, "exists", exists)
+    result = json.loads(entry.run_session_dry(str(host.root), now_utc=NOW))
+    assert result["halt"] is False and result["armed"] is False
+    assert MARKER not in json.dumps(result)

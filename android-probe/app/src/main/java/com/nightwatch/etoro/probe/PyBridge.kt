@@ -24,6 +24,13 @@ object PyBridge {
         }
     }
 
+    /** Market scheduling callers must use a background dispatcher. */
+    fun nextSessionWakeEpochMs(context: Context): Long {
+        ensureStarted(context)
+        return Python.getInstance().getModule("nightwatch.android_entry")
+            .callAttr("next_session_wake_epoch_ms").toLong()
+    }
+
     @Synchronized
     fun ensureStarted(context: Context) {
         if (!started) {

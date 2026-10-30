@@ -1,9 +1,8 @@
 """Dry-run desktop-host simulation on Android, not an AndroidHost.
 
-Power gates are assumed satisfied; Kotlin's SharedPreferences HALT is not the
-Python HALT file. Provision a fresh, separately migrated phone DB, never the
-desktop book: reconciliation against existing positions may legitimately fail.
-Current alarms are not market-calendar/DST-aware production scheduling.
+Power gates are assumed satisfied (T046); Kotlin latches the Python HALT file.
+Provision a fresh, separately migrated phone DB, never the desktop book:
+reconciliation against existing positions may legitimately fail.
 
 The in-window start bounds the T-30 wait to <=35 minutes (no engine deadline
 API); network retries remain bounded only by existing client timeouts.
@@ -26,7 +25,7 @@ from .db.repo import Repo, default_db_path
 from .engine.session import run_session
 from .etoro.client import EtoroClient
 from .host import DesktopHost, set_host
-from .market.calendar import EASTERN, is_trading_day, session_close_datetime
+from .market.calendar import EASTERN, is_trading_day, next_close_minus, session_close_datetime
 from .market.source import TiingoClient
 from .notify.telegram import TelegramNotifier
 
@@ -61,6 +60,13 @@ _STATUSES = frozenset({
     "would_have_done", "already_ran", "preflight_failed", "rerun_failed",
     "signal_failed", "decide_failed", "refused_armed",
 })
+
+
+def next_session_wake_epoch_ms(now_epoch_ms: int | None = None) -> int:
+    """Next NYSE close minus 55 minutes; the lead is a margin, not a timing guarantee."""
+    now = (datetime.now(timezone.utc) if now_epoch_ms is None else
+           datetime.fromtimestamp(now_epoch_ms / 1000, timezone.utc))
+    return int(next_close_minus(55, after=now).timestamp() * 1000)
 
 
 def run_session_dry(base_dir: str, *, now_utc: datetime | None = None) -> str:
@@ -136,9 +142,13 @@ def run_session_dry(base_dir: str, *, now_utc: datetime | None = None) -> str:
     except Exception as exc:
         envelope.update(status="error", reason_code="entry_error", error_type=type(exc).__name__)
     try:
+        envelope["halt"] = (Path(base_dir) / "HALT").exists()
+    except Exception:
+        envelope["halt"] = False
+    try:
         return json.dumps(envelope)
     except Exception as exc:
         # No exception text, even if serialization itself is broken.
         return ('{"status":"error","armed":false,"session_id":null,"failed_gate":null,'
                 '"reason_code":"serialization_error","error_type":"' + type(exc).__name__
-                + '","gates":[]}')
+                + '","gates":[],"halt":' + ('true' if envelope["halt"] else 'false') + '}')

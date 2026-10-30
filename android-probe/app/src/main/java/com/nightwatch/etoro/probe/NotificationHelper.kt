@@ -21,7 +21,24 @@ import androidx.core.app.NotificationCompat
 object NotificationHelper {
     private const val CHANNEL_ROUTINE = "nightwatch_probe_events"
     private const val CHANNEL_FAILURE = "nightwatch_probe_failures"
+    private const val HALT_NOTIFICATION_ID = -7002
     private var nextNotificationId = 1000
+
+    fun postOngoingHalt(context: Context) {
+        ensureChannel(context)
+        val notification = NotificationCompat.Builder(context, CHANNEL_FAILURE)
+            .setSmallIcon(android.R.drawable.stat_notify_error)
+            .setContentTitle("Nightwatch HALTED")
+            .setContentText("Nightwatch HALTED: sessions stopped until resume")
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .build()
+        context.getSystemService(NotificationManager::class.java).notify(HALT_NOTIFICATION_ID, notification)
+    }
+
+    fun clearOngoingHalt(context: Context) {
+        context.getSystemService(NotificationManager::class.java).cancel(HALT_NOTIFICATION_ID)
+    }
 
     fun ensureChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {

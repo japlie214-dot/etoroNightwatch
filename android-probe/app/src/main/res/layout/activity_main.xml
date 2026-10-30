@@ -148,6 +148,12 @@
             android:layout_height="wrap_content"
             android:text="Schedule nightly alarm (picked time + checked days)" />
 
+        <Button
+            android:id="@+id/btnScheduleMarket"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Schedule market session" />
+
         <TextView
             android:id="@+id/txtNextFireAbsolute"
             android:layout_width="match_parent"
