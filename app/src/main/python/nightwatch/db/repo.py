@@ -1216,6 +1216,127 @@ class Repo:
             error=row["error"],
         )
 
+    # -- SCHG close legs ---------------------------------------------------
+
+    def begin_schg_close_leg(
+        self, intent: Intent, *, position_id: str, units_before: float,
+        units_deducted: float | None,
+    ) -> tuple[int, int]:
+        """Commit the intent, pending evidence and sent status atomically before send."""
+        now = utcnow()
+        with self.conn:
+            self.conn.execute("BEGIN")
+            cur = self.conn.execute(
+                "INSERT INTO intents (session_id, request_id, sequence, symbol, side, "
+                "instrument_id, units, position_id, reason, status, created_at, sent_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sent', ?, ?)",
+                (intent.session_id, intent.request_id, intent.sequence, intent.symbol,
+                 intent.side, intent.instrument_id, intent.units, position_id,
+                 intent.reason, intent.created_at or now, now),
+            )
+            intent_id = int(cur.lastrowid)
+            cur = self.conn.execute(
+                "INSERT INTO partial_close_effects (intent_id, position_id, units_before, "
+                "units_deducted, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+                (intent_id, position_id, units_before, units_deducted, now),
+            )
+            ledger_id = int(cur.lastrowid)
+        return intent_id, ledger_id
+
+    def insert_partial_close(
+        self, intent_id: int, *, position_id: str, units_before: float,
+        units_deducted: float | None,
+    ) -> int:
+        with self.conn:
+            cur = self.conn.execute(
+                "INSERT INTO partial_close_effects (intent_id, position_id, units_before, "
+                "units_deducted, status, created_at) VALUES (?, ?, ?, ?, 'pending', ?)",
+                (intent_id, position_id, units_before, units_deducted, utcnow()),
+            )
+        return int(cur.lastrowid)
+
+    def set_partial_close_order(self, ledger_id: int, order_row_id: int, order_id: str | None) -> None:
+        with self.conn:
+            self.conn.execute(
+                "UPDATE partial_close_effects SET order_row_id = ?, order_id = ? WHERE id = ?",
+                (order_row_id, order_id, ledger_id),
+            )
+
+    def _update_partial_close(
+        self, ledger_id: int, *, status: str, units_after: float | None = None,
+        slice_position_id: str | None = None, close_price: float | None = None,
+        proceeds: float | None = None, raw: dict | None = None,
+    ) -> int:
+        row = self.conn.execute(
+            "SELECT intent_id, status FROM partial_close_effects WHERE id = ?", (ledger_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"no partial close id={ledger_id}")
+        if row["status"] in ("confirmed", "rejected"):
+            raise ValueError("partial close is final")
+        self.conn.execute(
+            "UPDATE partial_close_effects SET status = ?, units_after = ?, "
+            "slice_position_id = ?, close_price = ?, proceeds = ?, raw_json = ?, "
+            "confirmed_at = ? WHERE id = ?",
+            (status, units_after, slice_position_id, close_price, proceeds,
+             json.dumps(raw or {}), utcnow() if status == "confirmed" else None, ledger_id),
+        )
+        return row["intent_id"]
+
+    def update_partial_close(self, ledger_id: int, *, status: str, **fields: Any) -> None:
+        with self.conn:
+            self._update_partial_close(ledger_id, status=status, **fields)
+
+    def finish_schg_close_leg(
+        self, ledger_id: int, *, status: str, intent_status: str, resolved: bool,
+        **fields: Any,
+    ) -> None:
+        expected = {"confirmed": ("filled", True), "rejected": ("rejected", True),
+                    "unresolved": ("sent", False), "unverified": ("sent", False)}
+        if expected.get(status) != (intent_status, resolved):
+            raise ValueError("inconsistent SCHG close lifecycle")
+        with self.conn:
+            self.conn.execute("BEGIN")
+            intent_id = self._update_partial_close(ledger_id, status=status, **fields)
+            self.conn.execute(
+                "UPDATE intents SET status = ?, resolved_at = ? WHERE id = ?",
+                (intent_status, utcnow() if resolved else None, intent_id),
+            )
+
+    def pending_partial_closes(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT p.* FROM partial_close_effects p JOIN intents i ON i.id = p.intent_id "
+            "WHERE p.status IN ('pending', 'unresolved', 'unverified') "
+            "AND i.resolved_at IS NULL ORDER BY p.id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def confirmed_partial_closes(self, position_ids: Iterable[str]) -> list[dict]:
+        ids = tuple(position_ids)
+        if not ids:
+            return []
+        rows = self.conn.execute(
+            "SELECT * FROM partial_close_effects WHERE status = 'confirmed' "
+            "AND units_deducted IS NOT NULL AND position_id IN ("
+            + ",".join("?" for _ in ids) + ") ORDER BY id", ids,
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def repair_confirmed_schg_closes(self) -> list[int]:
+        """Repair legacy split writes without re-polling or changing final evidence."""
+        with self.conn:
+            rows = self.conn.execute(
+                "SELECT i.id FROM intents i JOIN partial_close_effects p ON p.intent_id = i.id "
+                "WHERE i.symbol = 'SCHG' AND i.side = 'close' AND p.status = 'confirmed' "
+                "AND (i.resolved_at IS NULL OR i.status != 'filled')"
+            ).fetchall()
+            ids = [row["id"] for row in rows]
+            self.conn.executemany(
+                "UPDATE intents SET status = 'filled', resolved_at = ? WHERE id = ?",
+                [(utcnow(), intent_id) for intent_id in ids],
+            )
+        return ids
+
     # -- close observations ------------------------------------------------
 
     def record_close_observation(

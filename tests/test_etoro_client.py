@@ -680,6 +680,69 @@ def test_lookup_close_order_rejects_unknown_or_malformed_status_payloads(
     with pytest.raises(EtoroValidationError, match=match):
         client.lookup_close_order(9)
 
+def partial_close_payload():
+    # T037 step_4 shape; original remains open, slice has a separate ID.
+    return {"orderID": 900, "statusID": 3, "proceeds": 62.56, "positions": [
+        {"positionID": "101", "occurred": "2026-10-30T15:14:00Z", "rate": 34.55,
+         "units": 1.810545, "conversionRate": 1.0, "amount": 62.47},
+        {"positionID": "100"},
+    ]}
+
+
+def test_partial_close_lookup_and_poll_pass_expected_original_id():
+    scripted = ScriptedTransport([httpx.Response(200, json=partial_close_payload())] * 2)
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    result = client.lookup_close_order("900", expected_position_id="100")
+    assert result.position_id == "100" and result.fill_units == 1.810545
+    assert result.fill_price == 34.55 and result.fill_amount_usd == 62.56
+    assert result.raw == partial_close_payload()
+    assert client.poll_order_to_terminal(order_id="900", kind="close",
+                                         expected_position_id="100").order == result
+    assert len(scripted.requests) == 2
+
+
+def test_partial_close_default_still_refuses_multiple_ids():
+    with pytest.raises(EtoroValidationError, match="close-orders returned multiple position IDs"):
+        EtoroClient._parse_close_order_result(partial_close_payload(), expected_order_id="900")
+
+
+@pytest.mark.parametrize("change,expected", [
+    (lambda p: p["positions"].append({"positionID": "102"}), "100"),
+    (lambda p: None, "999"),
+    (lambda p: p["positions"][1].update(units=1), "100"),
+    (lambda p: p["positions"][0].pop("units"), "100"),
+    (lambda p: p["positions"][0].update(units=True), "100"),
+    (lambda p: p["positions"][0].update(units=0), "100"),
+    (lambda p: p["positions"].append({"positionID": "100"}), "100"),
+])
+def test_partial_close_parser_refuses_malformed_two_id_shapes(change, expected):
+    payload = partial_close_payload()
+    change(payload)
+    with pytest.raises(EtoroValidationError, match="close-orders"):
+        EtoroClient._parse_close_order_result(payload, expected_order_id="900",
+                                              expected_position_id=expected)
+
+
+def test_expected_position_id_cannot_be_used_for_open_poll():
+    scripted = ScriptedTransport([])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(ValueError, match="only supported for close"):
+        client.poll_order_to_terminal(order_id="900", expected_position_id="100")
+    assert not scripted.requests
+
+
+def test_partial_close_poll_passes_expected_id_on_subsequent_lookup():
+    queued = partial_close_payload()
+    queued["statusID"] = 1
+    scripted = ScriptedTransport([httpx.Response(200, json=queued),
+                                  httpx.Response(200, json=partial_close_payload())])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler),
+                         clock=Counter(), sleep=_no_sleep)
+    result = client.poll_order_to_terminal(order_id="900", kind="close", expected_position_id="100")
+    assert result.attempts == 2 and result.order.status == OrderStatus.FILLED
+    assert result.order.position_id == "100"
+
+
 REAL_ORDERS_LOOKUP_PAYLOAD = (
     Path(__file__).resolve().parents[1]
     / "data"

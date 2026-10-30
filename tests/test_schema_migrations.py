@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 
 from nightwatch.db import migrations
-from nightwatch.db.repo import Repo, connect
+from nightwatch.db.repo import Intent, Repo, connect
 
 #: Every table DESIGN §3 names, plus `commands` (task brief §1) and the two
 #: implementation-detail tables (`schema_version`, `portfolio_snapshot_positions`).
@@ -32,6 +32,7 @@ EXPECTED_TABLES = {
     "commands",
     "notifications",
     "schema_version",
+    "partial_close_effects",
 }
 
 
@@ -103,6 +104,79 @@ def test_failed_version_record_rolls_back_ddl_and_can_retry(tmp_path: Path) -> N
         assert "invested" not in columns
     finally:
         conn.close()
+
+
+def schg_leg(repo, request="schg-request"):
+    sid = repo.create_session("2026-10-30", "armed", "demo", True).id
+    intent = Intent(sid, request, 1, "SCHG", "close", instrument_id=42, units=2, position_id="100")
+    return intent
+
+
+def test_migration_011_upgrades_version_10(tmp_path, monkeypatch):
+    all_migrations = migrations.discover()
+    conn = connect(tmp_path / "upgrade.db")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(migrations, "discover", lambda: [m for m in all_migrations if m.version <= 10])
+            assert migrations.migrate(conn) == 10
+        assert migrations.migrate(conn) == 11
+        assert "partial_close_effects" in Repo(conn).table_names()
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
+
+
+def test_begin_schg_leg_rolls_back_intent_on_ledger_failure(repo):
+    intent = schg_leg(repo)
+    repo.conn.execute("CREATE TRIGGER fail_leg BEFORE INSERT ON partial_close_effects "
+                      "BEGIN SELECT RAISE(ABORT, 'simulated crash'); END")
+    repo.conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="simulated crash"):
+        repo.begin_schg_close_leg(intent, position_id="100", units_before=4, units_deducted=2)
+    assert repo.get_intents(intent.session_id) == []
+    assert repo.pending_partial_closes() == []
+    assert not repo.conn.in_transaction
+
+
+@pytest.mark.parametrize("status,intent_status", [("confirmed", "filled"), ("rejected", "rejected")])
+def test_finish_schg_leg_atomic_and_final_state_guard(repo, status, intent_status):
+    intent = schg_leg(repo)
+    iid, lid = repo.begin_schg_close_leg(intent, position_id="100", units_before=4, units_deducted=2)
+    repo.conn.execute("CREATE TRIGGER fail_finish BEFORE UPDATE ON intents "
+                      "BEGIN SELECT RAISE(ABORT, 'simulated finish crash'); END")
+    repo.conn.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="simulated finish crash"):
+        repo.finish_schg_close_leg(lid, status=status, intent_status=intent_status, resolved=True)
+    assert repo.pending_partial_closes()[0]["status"] == "pending"
+    assert repo.get_intent_by_request_id(intent.request_id).status == "sent"
+    repo.conn.execute("DROP TRIGGER fail_finish")
+    repo.conn.commit()
+    repo.finish_schg_close_leg(lid, status=status, intent_status=intent_status, resolved=True,
+                               units_after=2 if status == "confirmed" else None)
+    saved = repo.get_intent_by_request_id(intent.request_id)
+    assert saved.id == iid and saved.status == intent_status and saved.resolved_at
+    with pytest.raises(ValueError, match="final"):
+        repo.update_partial_close(lid, status="unresolved")
+    with pytest.raises(ValueError, match="final"):
+        repo.finish_schg_close_leg(lid, status="unresolved", intent_status="sent", resolved=False)
+    assert repo.get_intent_by_request_id(intent.request_id) == saved
+    assert not repo.pending_partial_closes()
+
+
+def test_partial_close_unique_check_and_unverified_selection(repo):
+    intent = schg_leg(repo)
+    iid, lid = repo.begin_schg_close_leg(intent, position_id="100", units_before=4, units_deducted=2)
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.insert_partial_close(iid, position_id="100", units_before=4, units_deducted=2)
+    with pytest.raises(sqlite3.IntegrityError):
+        repo.update_partial_close(lid, status="made_up")
+    assert repo.pending_partial_closes()[0]["status"] == "pending"
+    for status in ("unresolved", "unverified"):
+        repo.finish_schg_close_leg(lid, status=status, intent_status="sent", resolved=False)
+        assert repo.pending_partial_closes()[0]["status"] == status
+        assert repo.confirmed_partial_closes(["100"]) == []
+    with pytest.raises(ValueError, match="inconsistent"):
+        repo.finish_schg_close_leg(lid, status="unverified", intent_status="filled", resolved=True)
 
 
 def test_pragmas_are_set(tmp_path: Path) -> None:

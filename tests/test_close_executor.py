@@ -424,6 +424,46 @@ def test_intent_is_durable_and_sent_before_close_call(setup):
     assert len(client.calls) == 1 and repo.get_intents(sid)[0].status == "filled"
 
 
+@pytest.mark.parametrize("state", ["pending", "unresolved", "unverified", "confirmed", "orphan", "no_order"])
+def test_schg_recovery_is_ledger_only_and_never_sends(setup, state):
+    repo, sid, client = setup
+    intent = Intent(sid, "schg-request", 1, "SCHG", "close", instrument_id=42,
+                    units=2, position_id="100")
+    if state == "orphan":
+        iid = repo.insert_intent(intent)
+    else:
+        iid, lid = repo.begin_schg_close_leg(intent, position_id="100", units_before=4, units_deducted=2)
+        if state != "no_order":
+            oid = repo.insert_order(Order(iid, sid, "schg-request", "SCHG", "close",
+                                          order_id="900", position_id="100"))
+            repo.set_partial_close_order(lid, oid, "900")
+        if state in ("confirmed", "unresolved", "unverified"):
+            # Legacy split-write crash: evidence is final but intent remains sent.
+            repo.update_partial_close(lid, status=state, units_after=2)
+    lookups = []
+    def lookup(order_id, **kwargs):
+        lookups.append((order_id, kwargs))
+        return OrderResult("900", None, OrderStatus.FILLED, position_id="100", fill_units=2,
+                           raw={"positions": [{"positionID": "101", "units": 2},
+                                              {"positionID": "100"}]})
+    client.lookup_close_order = lookup
+    client.reads = [[replace(POSITION, position_id="100", units=2)]]
+    report = recover(setup)
+    saved_intent = repo.get_intent_by_request_id("schg-request")
+    assert not client.calls and not client.poll_calls  # no UPRO finisher or sidecar
+    if state in ("orphan", "no_order"):
+        assert report.blocks_buys and not lookups and client.read_count == 0
+        assert saved_intent.status in ("pending", "sent") and not saved_intent.resolved_at
+        assert ("without ledger" if state == "orphan" else "send unverified") in report.followups[0]
+    else:
+        assert not report.blocks_buys and saved_intent.status == "filled" and saved_intent.resolved_at
+        assert len(lookups) == (0 if state == "confirmed" else 1)
+        assert repo.confirmed_partial_closes(["100"])[0]["units_after"] == 2
+        assert not recover(setup).blocks_buys
+        assert len(lookups) == (0 if state == "confirmed" else 1)
+    assert not repo.list_close_observations()
+
+
 def test_recovery_ignores_pending_buys(setup):
     _, _, client = setup
     saved(setup, side="buy")

@@ -1622,7 +1622,9 @@ class EtoroClient:
             )
         return result
 
-    def lookup_close_order(self, order_id: str | int) -> OrderResult:
+    def lookup_close_order(
+        self, order_id: str | int, *, expected_position_id: str | None = None,
+    ) -> OrderResult:
         """Fetch close-order status and affected positions by its order ID.
 
         eToro documents close orders separately from open orders at
@@ -1641,13 +1643,17 @@ class EtoroClient:
                 request_class="read",
                 response_capture=captured,
             )
-            return self._parse_close_order_result(response.json(), expected_order_id=close_id)
+            return self._parse_close_order_result(
+                response.json(), expected_order_id=close_id,
+                expected_position_id=expected_position_id,
+            )
         finally:
             self.last_close_lookup_responses.extend(captured)
 
     @classmethod
     def _parse_close_order_result(
-        cls, data: Any, *, expected_order_id: str
+        cls, data: Any, *, expected_order_id: str,
+        expected_position_id: str | None = None,
     ) -> OrderResult:
         """Parse the documented close-orders payload, failing on unknown IDs or status."""
         if not isinstance(data, Mapping):
@@ -1679,7 +1685,31 @@ class EtoroClient:
                 raise EtoroValidationError("close-orders positionID must be a positive integer")
             position_ids.add(position_id)
         if len(position_ids) > 1:
-            raise EtoroValidationError("close-orders returned multiple position IDs")
+            if expected_position_id is None:
+                raise EtoroValidationError("close-orders returned multiple position IDs")
+            if len(position_ids) != 2 or expected_position_id not in position_ids:
+                raise EtoroValidationError("close-orders expected exactly two IDs including expected position")
+            originals = [p for p in raw_positions if str(p["positionID"]) == expected_position_id]
+            slices = [p for p in raw_positions if str(p["positionID"]) != expected_position_id]
+            if len(originals) != 1 or "units" in originals[0] or len(slices) != 1:
+                raise EtoroValidationError("close-orders expected bare original and one slice entry")
+            slice_row = slices[0]
+            units = slice_row.get("units")
+            if isinstance(units, bool) or not isinstance(units, (int, float)) or not math.isfinite(units) or units <= 0:
+                raise EtoroValidationError("close-orders slice must have numeric units > 0")
+            def optional_number(value):
+                return float(value) if (
+                    not isinstance(value, bool) and isinstance(value, (int, float))
+                    and math.isfinite(value)
+                ) else None
+            return OrderResult(
+                order_id=order_id,
+                reference_id=cls._id_string(data.get("referenceID"), "referenceID"),
+                status=status, position_id=expected_position_id, fill_units=float(units),
+                fill_price=optional_number(slice_row.get("rate")),
+                fill_amount_usd=optional_number(data.get("proceeds")),
+                reject_reason=data.get("errorMessage"), raw=dict(data),
+            )
         position_id = next(iter(position_ids), None)
         if status in FILLED_ORDER_STATUSES and position_id is None:
             raise EtoroValidationError(
@@ -2011,6 +2041,7 @@ class EtoroClient:
         interval_seconds: float | None = None,
         timeout_seconds: float | None = None,
         kind: str = "open",
+        expected_position_id: str | None = None,
     ) -> PollResult:
         """Poll open or close orders until a terminal status or a timeout.
 
@@ -2025,6 +2056,8 @@ class EtoroClient:
         """
         if kind not in ("open", "close"):
             raise ValueError("poll_order_to_terminal: kind must be 'open' or 'close'")
+        if kind == "open" and expected_position_id is not None:
+            raise ValueError("expected_position_id is only supported for close orders")
         if kind == "close" and not order_id:
             raise ValueError("poll_order_to_terminal: kind='close' requires order_id")
         interval = interval_seconds if interval_seconds is not None else self._poll_interval
@@ -2032,7 +2065,7 @@ class EtoroClient:
         deadline = self._clock() + timeout
         attempts = 0
         result = (
-            self.lookup_close_order(order_id) if kind == "close"
+            self.lookup_close_order(order_id, expected_position_id=expected_position_id) if kind == "close"
             else self.lookup_order(order_id=order_id, reference_id=reference_id)
         )
         attempts += 1
@@ -2041,7 +2074,7 @@ class EtoroClient:
                 return PollResult(order=result, attempts=attempts, timed_out=True)
             self._sleep(interval)
             result = (
-                self.lookup_close_order(order_id) if kind == "close"
+                self.lookup_close_order(order_id, expected_position_id=expected_position_id) if kind == "close"
                 else self.lookup_order(
                     order_id=order_id or result.order_id, reference_id=reference_id
                 )

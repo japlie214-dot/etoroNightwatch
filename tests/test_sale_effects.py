@@ -177,8 +177,8 @@ def test_migration_010_on_009_and_idempotent(tmp_path, monkeypatch):
         with monkeypatch.context() as patch:
             patch.setattr(migrations, "discover", lambda: [m for m in all_migrations if m.version <= 9])
             assert migrations.migrate(conn) == 9
-        assert migrations.migrate(conn) == 10
-        assert migrations.migrate(conn) == 10
+        assert migrations.migrate(conn) == all_migrations[-1].version
+        assert migrations.migrate(conn) == all_migrations[-1].version
         assert {r[1] for r in conn.execute("PRAGMA table_info(sale_effects)")} == {
             "id", "session_id", "position_id", "gross_proceeds_cents", "classification",
             "bucket_json", "created_at", "applied_at",
