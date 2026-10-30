@@ -1517,7 +1517,7 @@ class EtoroClient:
         )
 
     def clear_take_profit(self, request_id: str, position_id: str) -> EditPositionAck:
-        """Remove a demo position's broker take-profit with one PATCH.
+        """Remove a position's broker take-profit with one PATCH (demo: /demo/positions, real: /positions; eToro docs 2026-10-16).
 
         The caller must persist ``request_id`` before this call. Acceptance
         is asynchronous: the caller must re-read the portfolio and check with
@@ -1527,8 +1527,6 @@ class EtoroClient:
             raise ValueError("clear_take_profit: request_id must be non-empty")
         if not position_id or not position_id.isdigit():
             raise ValueError("clear_take_profit: position_id must be non-empty and all digits")
-        if self._demo() == "":
-            raise EtoroValidationError("clear_take_profit: real-account path unconfirmed (T012)")
         response = self._request(
             "PATCH",
             f"/api/v2/trading/{self._demo()}positions/{position_id}",

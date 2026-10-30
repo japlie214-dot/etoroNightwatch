@@ -334,16 +334,35 @@ def test_clear_take_profit_invalid_input_never_sends(
     assert len(scripted.requests) == 0
 
 
-def test_clear_take_profit_real_mode_never_sends() -> None:
+def test_clear_take_profit_real_mode_sends_real_patch() -> None:
     config = _config(environment=EtoroEnvironment.REAL, secrets={
         "ETORO_PRIVATE_KEY": "fake_private_key_for_tests",
         "ETORO_PUBLIC_KEY": "fake_public_key_for_tests",
     })
-    scripted = ScriptedTransport([])
+    scripted = ScriptedTransport([httpx.Response(200, json={
+        "operationId": "op-1", "positionId": "3550406905",
+    })])
     client = EtoroClient(config, transport=httpx.MockTransport(scripted.handler))
-    with pytest.raises(EtoroValidationError, match="unconfirmed"):
+    ack = client.clear_take_profit("request-1", "3550406905")
+    assert ack.position_id == "3550406905"
+    assert len(scripted.requests) == 1
+    request = scripted.requests[0]
+    assert request.method == "PATCH"
+    assert request.url.path == "/api/v2/trading/positions/3550406905"
+    assert json.loads(request.content) == {"clearTakeProfit": True}
+    assert request.headers["x-request-id"] == "request-1"
+
+
+def test_clear_take_profit_real_mode_wrong_position_refused() -> None:
+    config = _config(environment=EtoroEnvironment.REAL, secrets={
+        "ETORO_PRIVATE_KEY": "fake_private_key_for_tests",
+        "ETORO_PUBLIC_KEY": "fake_public_key_for_tests",
+    })
+    scripted = ScriptedTransport([httpx.Response(200, json={"positionId": "123"})])
+    client = EtoroClient(config, transport=httpx.MockTransport(scripted.handler))
+    with pytest.raises(EtoroValidationError, match="expected 3550406905"):
         client.clear_take_profit("request-1", "3550406905")
-    assert len(scripted.requests) == 0
+    assert len(scripted.requests) == 1
 
 
 @pytest.mark.parametrize("status_code, error", [
