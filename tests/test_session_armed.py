@@ -205,7 +205,11 @@ def test_execution_tp_failure_halt_and_persistence_error(armed, repo, host, monk
                 host, reason="take-profit not cleared on position(s) p1", source="session")
         return get_pnl()
     monkeypatch.setattr(armed.client, "get_pnl", pnl)
+    before = repo.get_strategy_state()
     result = armed.run()
+    armed.save.assert_not_called()
+    assert repo.get_strategy_state() == before
+    assert "strategy state not saved: take-profit not cleared" in result.reason
     assert "followups 1: inspect TP" in result.reason
     row = repo.get_session(result.session_id)
     if persistence_fails:
@@ -330,7 +334,7 @@ def test_filled_without_position_sets_halt_and_never_saves(armed, host):
     result = armed.run()
     assert "order order1" in host.halt_flag_path().read_text()
     assert "HALT set" in result.reason
-    assert "strategy state not saved: filled result has no position id" in result.reason
+    assert "strategy state not saved: take-profit not cleared" in result.reason
     armed.save.assert_not_called()
 
 

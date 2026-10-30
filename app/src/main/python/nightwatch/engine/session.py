@@ -726,6 +726,8 @@ def _run_session_core(
                     status = "executed_partial"
                 if persistence_error is not None:
                     not_saved = "persistence failure"
+                elif report.tp_failed or unconfirmed:
+                    not_saved = "take-profit not cleared"
                 elif execution_error is not None:
                     not_saved = "execution exception"
                 elif dropped:

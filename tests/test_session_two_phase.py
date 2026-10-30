@@ -648,6 +648,71 @@ def test_schg_real_executor_sequence_cash_and_saves(schg, repo, monkeypatch, upr
     assert schg.client.close_position.call_count == 1 + int(upro)
 
 
+@pytest.mark.parametrize("upro", [False, True])
+@pytest.mark.parametrize("tp_failed", [False, True])
+def test_schg_then_buy_tp_veto_preserves_close_evidence_and_bucket_fill(schg, repo, host, upro, tp_failed):
+    bucket(repo)
+    schg.decision.intents = ([CLOSE] if upro else []) + [SELL, BUY, REENTRY]
+    schg.decision.new_state = replace(schg.decision.new_state, recyclable_cash=200 if upro else 0)
+
+    def execute(**kwargs):
+        schg.calls.append("execute")
+        assert kwargs["intents"] == [BUY, REENTRY]
+        iid = reentry(repo, kwargs["session_id"])
+        return ExecutionReport((filled(BUY), filled(REENTRY, intent_id=iid)),
+                               None, (), ("p1",) if tp_failed else (), ())
+
+    schg.execute.side_effect = execute
+    result = schg.run()
+    assert result.status == "executed"
+    assert schg.save.call_count == int(upro) + int(not tp_failed)
+    assert repo.get_strategy_state().bars == int(not tp_failed)
+    assert repo.get_strategy_state().recyclable_cash == (200 if upro else 0)
+    if upro:
+        checkpoint = schg.save.call_args_list[0].args[1]
+        assert checkpoint.bars == 0 and checkpoint.sale_batch_sequence == 1
+        assert checkpoint.sale_batch_date == DAY.isoformat()
+        effect, = repo.conn.execute("SELECT * FROM sale_effects").fetchall()
+        assert effect["position_id"] == "u" and effect["gross_proceeds_cents"] == 20000
+        assert effect["applied_at"] is not None
+        observation, = repo.list_close_observations("u")
+        assert observation["observed_status"] == "confirmed_full_close"
+    else:
+        assert repo.conn.execute("SELECT COUNT(*) FROM sale_effects").fetchone()[0] == 0
+    closes = [i for i in repo.get_intents(result.session_id) if i.side == "close"]
+    assert len(closes) == 1 + int(upro) and all(i.status == "filled" for i in closes)
+    evidence, = repo.confirmed_partial_closes(["s"])
+    assert evidence["status"] == "confirmed" and evidence["slice_position_id"] == "slice"
+    assert repo.get_bucket("b").tranches_bought == 1
+    assert repo.conn.execute("SELECT COUNT(*) FROM bucket_fill_applications").fetchone()[0] == 1
+    assert host.halt_flag_path().exists() == tp_failed
+    if tp_failed:
+        assert "p1" in host.halt_flag_path().read_text()
+        assert "HALT set" in result.reason
+        assert "strategy state not saved: take-profit not cleared" in result.reason
+    else:
+        assert "strategy state not saved" not in result.reason
+    assert repo.get_session(result.session_id).outcome == result.reason
+    session.reconcile_effects(repo)
+    assert repo.get_bucket("b").tranches_bought == 1
+
+
+def test_bucket_persistence_failure_precedes_tp_save_veto(two, repo, host, monkeypatch):
+    bucket(repo)
+    two.decision.intents = [REENTRY]
+    two.report = ExecutionReport((filled(REENTRY),), None, (), ("p1",), ())
+    monkeypatch.setattr(repo, "apply_bucket_fill", Mock(side_effect=RuntimeError("apply failed")))
+    result = two.run()
+    assert result.status == "executed_partial"
+    assert "take-profit not cleared on position(s) p1" in result.reason
+    assert "strategy state not saved: persistence failure" in result.reason
+    assert "strategy state not saved: take-profit not cleared" not in result.reason
+    assert "sale-effect persistence failed: RuntimeError: apply failed" in result.reason
+    assert host.halt_flag_path().exists()
+    two.save.assert_not_called()
+    assert repo.get_strategy_state().bars == 0
+
+
 @pytest.mark.parametrize("bad", [replace(SELL, amount=float("inf")), replace(SELL, amount=float("nan")),
                                   replace(SELL, amount=0), replace(SELL, amount=-1),
                                   replace(SELL, amount=None), replace(SELL, position_ref="s")])
