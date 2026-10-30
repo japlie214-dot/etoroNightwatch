@@ -88,6 +88,10 @@ class SessionResult:
     failed_gate: int | None
     reason: str
     interval: "IntervalResult | None" = None
+    tp_failed: bool = False
+    execution_halted: bool = False
+    halt_set: bool = False
+    halt_failure: str | None = None
 
 
 def fetch_server_date(base_url: str, *, timeout: float = 10.0) -> str | None:
@@ -374,6 +378,19 @@ def _supported_intent(i: LadderIntent) -> bool:
     )
 
 
+def _redact_reason(text: str, *, config: Config, fallback: str, limit: int | None = None) -> str:
+    from ..logging_setup import REDACTED, RedactionFilter
+
+    try:
+        secrets = {value for section in (config.etoro, config.telegram, config.tiingo)
+                   for value in section.secrets.values() if value}
+        for value in sorted(secrets, key=len, reverse=True):
+            text = text.replace(value, REDACTED)
+        return RedactionFilter.redact(text)[:limit]
+    except Exception:
+        return fallback
+
+
 def _run_session_core(
     *, host: Host, config: Config, repo: Repo, client: EtoroClient, trading_date: date,
     tiingo: TiingoClient, wait: bool = True,
@@ -385,21 +402,21 @@ def _run_session_core(
     rows before gate 11 reads them, and role="write" when armed.
     """
     from ..etoro.errors import EtoroNetworkError
-    from ..logging_setup import REDACTED, RedactionFilter
-
     armed = config.is_armed
     if armed:
         refusals = arming_refusals(config) + (
             ["risk.max_orders_per_session unset"] if config.risk.max_orders_per_session is None else []
         )
         if refusals:
-            return SessionResult(None, "refused_armed", None, "armed but refused: " + "; ".join(refusals))
+            return SessionResult(None, "refused_armed", None, _redact_reason(
+                "armed but refused: " + "; ".join(refusals), config=config, fallback="refused_armed"))
     iso = trading_date.isoformat()
     existing = repo.get_session_by_date(iso)
     if existing is not None:
         return SessionResult(
             existing.id, "already_ran", None,
-            f"session {existing.id} already exists for {iso} (state {existing.state})",
+            _redact_reason(f"session {existing.id} already exists for {iso} (state {existing.state})",
+                           config=config, fallback="already_ran"),
         )
     s = repo.create_session(
         iso, mode="live" if armed else "dry_run", environment=config.etoro.environment.value,
@@ -410,6 +427,10 @@ def _run_session_core(
     recovery_counts = ""
     halt_error = None
     halt_text = ""
+    tp_failed = False
+    execution_halted = False
+    halt_set = False
+    halt_failure = None
     broker_write_attempted = False
     intent_read_failed = False
 
@@ -423,17 +444,25 @@ def _run_session_core(
             intent_read_failed = True
             return False
 
-    def halt(text: str) -> None:
-        nonlocal halt_error, halt_text
+    def halt(text: str, *, execution: bool = False) -> None:
+        nonlocal halt_error, halt_text, halt_set, halt_failure, execution_halted
+        execution_halted |= execution
         try:
-            write_halt(host, reason=text, source="session")
+            write_halt(host, reason=_redact_reason(
+                text, config=config, fallback="HALT details omitted"), source="session")
+            halt_set = True
             halt_text += "; " + text + "; HALT set"
         except Exception as exc:
-            halt_text += f"; {text}; HALT persistence failed: {type(exc).__name__}: {exc}"
-            halt_error = str(exc)
+            halt_text += _redact_reason(
+                f"; {text}; HALT persistence failed: {type(exc).__name__}: {exc}",
+                config=config, fallback=f"; {type(exc).__name__}; HALT details omitted")
+            halt_error = _redact_reason(str(exc), config=config, fallback=type(exc).__name__)
+            halt_failure = f"{type(exc).__name__}: {halt_error}"
 
     def halt_for_tp(items: Sequence[str]) -> None:
+        nonlocal tp_failed
         if items:
+            tp_failed = True
             halt("take-profit not cleared on position(s) " + ", ".join(items))
 
     close_recovery_reports = []
@@ -466,22 +495,18 @@ def _run_session_core(
                     delattr(client, name)
 
     def abort(status: str, reason: str, gate: int | None = None, *, exc: Exception | None = None) -> SessionResult:
-        if status in ("market_data_failed", "aborted_before_orders"):
-            prefix = reason if exc is None else f"{reason}: {type(exc).__name__}"
-            try:
-                message = prefix + ("" if exc is None else f": {exc}") + recovery_text + halt_text
-                secrets = {value for section in (config.etoro, config.telegram, config.tiingo)
-                           for value in section.secrets.values() if value}
-                for value in sorted(secrets, key=len, reverse=True):
-                    message = message.replace(value, REDACTED)
-                # Recovery can contain foreign exception text too; compose before redacting/truncating.
-                reason = RedactionFilter.redact(message)[:300 if exc is None else len(prefix) + 2 + 300]
-            except Exception:
-                reason = prefix + recovery_counts + ("; HALT details omitted" if halt_text else "")
-        else:
-            reason += recovery_text + halt_text
+        prefix = reason if exc is None else f"{reason}: {type(exc).__name__}"
+        limited = status in ("market_data_failed", "aborted_before_orders")
+        fallback = prefix if limited else status + ("" if exc is None else f": {type(exc).__name__}")
+        reason = _redact_reason(
+            prefix + ("" if exc is None else f": {exc}") + recovery_text + halt_text,
+            config=config,
+            fallback=fallback + recovery_counts + ("; HALT details omitted" if halt_text else ""),
+            limit=(300 if exc is None else len(prefix) + 2 + 300) if limited else None,
+        )
         repo.finish_session(s.id, state="aborted", outcome=reason, error=halt_error)
-        return SessionResult(s.id, status, gate, reason)
+        return SessionResult(s.id, status, gate, reason, tp_failed=tp_failed,
+                             execution_halted=execution_halted, halt_set=halt_set, halt_failure=halt_failure)
 
     try:
         outcome = run_preflight(build_preflight_gates(
@@ -515,7 +540,7 @@ def _run_session_core(
                 reconcile_effects(repo)
             except Exception as exc:
                 persistence_error = f"sale-effect persistence failed: {type(exc).__name__}: {exc}"
-                halt("sale-effect persistence failed")
+                halt("sale-effect persistence failed", execution=True)
         t30 = session_close_datetime(trading_date) - timedelta(minutes=30)
         if wait and host.now() < t30:
             if sleep_until is _sleep_until:
@@ -565,8 +590,7 @@ def _run_session_core(
                 cone_horizon=config.strategy.cone_horizon, open_lot_entry_spy_ath=athes,
             )
         except Exception as exc:
-            reason = f"signal: {type(exc).__name__}: {exc}"
-            return abort("signal_failed", reason)
+            return abort("signal_failed", "signal", exc=exc)
         fp = sig.fingerprint
         repo.record_price_window_fingerprint(PriceWindowFingerprint(
             trading_date=fp.trading_date, symbol=fp.symbol, window_start=fp.window_start,
@@ -577,8 +601,7 @@ def _run_session_core(
             positions = client.get_portfolio()
             balance = client.get_balance()
         except Exception as exc:
-            reason = f"decide inputs: {type(exc).__name__}: {exc}"
-            return abort("decide_failed", reason)
+            return abort("decide_failed", "decide inputs", exc=exc)
         try:
             inputs, notes = build_ladder_inputs(
                 iso=iso, year=trading_date.year, signal=sig,
@@ -587,16 +610,14 @@ def _run_session_core(
                 balance=balance, repo=repo, cash_reserve_usd=config.strategy.cash_reserve_usd,
             )
         except DecideInputError as exc:
-            reason = f"decide inputs: {type(exc).__name__}: {exc}"
-            return abort("decide_failed", reason)
+            return abort("decide_failed", "decide inputs", exc=exc)
         if config.strategy.budget_override_usd is not None:
             notes.append("budget_override_usd set but not honoured (ladder has no field)")
         try:
             state = load(repo)
             d = decide(inputs, state, LadderConfig.from_strategy_config(config.strategy))
         except Exception as exc:
-            reason = f"decide inputs: {type(exc).__name__}: {exc}"
-            return abort("decide_failed", reason)
+            return abort("decide_failed", "decide inputs", exc=exc)
         repo.insert_decision(Decision(
             session_id=s.id, trading_date=iso, intents=[intent_to_dict(i) for i in d.intents],
             cone_z=inputs.cone_z, spy_close=inputs.spy.close, spy_ath=inputs.spy.ath,
@@ -687,13 +708,13 @@ def _run_session_core(
                             )
                         except Exception as exc:
                             close_error = f"close executor error: {type(exc).__name__}: {exc}"
-                            halt(close_error)
+                            halt(close_error, execution=True)
                         else:
                             for r in close_report.results:
                                 reason += f"; close {r.position_id}: {r.outcome} {r.detail}"
                             unverified = [r.position_id for r in close_report.results if r.outcome == "unverified"]
                             if unverified:
-                                halt("close not verified for position(s) " + ", ".join(unverified))
+                                halt("close not verified for position(s) " + ", ".join(unverified), execution=True)
                             try:
                                 for r in close_report.results:
                                     if r.outcome == "confirmed":
@@ -706,7 +727,7 @@ def _run_session_core(
                                     save(repo, checkpoint)
                             except Exception as exc:
                                 close_error = f"sale-effect persistence failed: {type(exc).__name__}: {exc}"
-                                halt("sale-effect persistence failed")
+                                halt("sale-effect persistence failed", execution=True)
                             if close_error is None and (
                                 close_report.blocks_buys or close_report.stopped is not None
                                 or close_report.deferred or len(close_report.results) != len(closes)
@@ -736,7 +757,7 @@ def _run_session_core(
                             )
                         except Exception as exc:
                             close_error = f"SCHG close executor error: {type(exc).__name__}: {exc}"
-                            halt(close_error)
+                            halt(close_error, execution=True)
                         else:
                             for r in schg_report.results:
                                 reason += f"; SCHG close {r.position_id}: {r.outcome} {r.detail}"
@@ -794,7 +815,7 @@ def _run_session_core(
                     except Exception as exc:
                         persistence_error = f"sale-effect persistence failed: {type(exc).__name__}: {exc}"
                         reason += "; " + persistence_error
-                        halt("sale-effect persistence failed")
+                        halt("sale-effect persistence failed", execution=True)
                         status = "executed_partial"
                     if persistence_error is not None:
                         not_saved = "persistence failure"
@@ -876,15 +897,27 @@ def _run_session_core(
                         halt_reason = f"alert C {label} ${interval.modelled_residual_usd:,.2f}"
                     else:
                         halt_reason = interval.reasons[0]
-                    write_halt(host, reason=halt_reason, source="session")
+                    write_halt(host, reason=_redact_reason(
+                        halt_reason, config=config, fallback="HALT details omitted"), source="session")
+                    halt_set = True
                     reason += "; HALT set"
                 except Exception as e:
-                    reason += f"; HALT persistence failed: {type(e).__name__}: {e}"
-                    halt_error = str(e)
+                    failure_text = _redact_reason(
+                        f"; HALT persistence failed: {type(e).__name__}: {e}",
+                        config=config, fallback=f"; {type(e).__name__}; HALT details omitted")
+                    halt_text += failure_text
+                    reason += failure_text
+                    halt_error = _redact_reason(str(e), config=config, fallback=type(e).__name__)
+                    halt_failure = f"{type(e).__name__}: {halt_error}"
         except Exception as e:
             reason += f"; snapshot failed: {type(e).__name__}: {e}"
+        reason = _redact_reason(
+            reason, config=config,
+            fallback=status + recovery_counts + ("; HALT details omitted" if halt_text else ""),
+        )
         repo.finish_session(s.id, state="finished", outcome=reason, error=halt_error)
-        return SessionResult(s.id, status, None, reason, interval=interval)
+        return SessionResult(s.id, status, None, reason, interval=interval, tp_failed=tp_failed,
+                             execution_halted=execution_halted, halt_set=halt_set, halt_failure=halt_failure)
     except Exception as exc:
         if not before_orders():
             raise
@@ -931,6 +964,12 @@ def run_session(
             repo.update_session(result.session_id, next_run_at=next_iso)
         except Exception as exc:
             logging.getLogger(__name__).warning("Session next_run_at update failed: %s", exc)
+    halt_failed = result.halt_failure is not None
+    halt = "HALT persistence FAILED: " + result.halt_failure if halt_failed else "HALT set"
+    tail = (" Next session is NOT protected." if halt_failed
+            else " Next session stops at gate 1 until you /resume.")
+    halt_fallback = ("HALT persistence FAILED." + tail if halt_failed else
+                     "HALT set." + tail if result.halt_set else "no HALT.")
     if notifier is not None:
         try:
             text = format_session_report(
@@ -938,32 +977,25 @@ def run_session(
                 next_run_at=next_iso,
             )
             notifier.send(
-                text, event="session_report", session_id=result.session_id,
+                _redact_reason(text, config=config, fallback=f"{result.status}; session details omitted; {halt_fallback}"),
+                event="session_report", session_id=result.session_id,
                 trading_date=trading_date.isoformat(),
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Session report failed: %s", exc)
-    if notifier is not None and "take-profit not cleared" in result.reason:
-        failure = "HALT persistence failed: "
-        halt = ("HALT persistence FAILED: " + result.reason.split(failure, 1)[1]
-                if failure in result.reason else "HALT set")
-        tail = (" Next session is NOT protected." if failure in result.reason
-                else " Next session stops at gate 1 until you /resume.")
+    if notifier is not None and result.tp_failed:
         text = f"[{config.environment.value.upper()}] TP NOT CLEARED — {halt}." + tail
         try:
-            notifier.send(text, event="tp_not_cleared", session_id=result.session_id,
+            notifier.send(_redact_reason(text, config=config, fallback=f"tp_not_cleared; HALT details omitted; {halt_fallback}"),
+                          event="tp_not_cleared", session_id=result.session_id,
                           trading_date=trading_date.isoformat())
         except Exception as exc:
             logging.getLogger(__name__).warning("Session tp_not_cleared alert failed: %s", exc)
-    if notifier is not None and any(text in result.reason for text in (
-        "close executor error:", "close not verified for position(s)", "sale-effect persistence failed",
-    )):
-        failure = "HALT persistence failed: "
-        tail = (" Next session is NOT protected." if failure in result.reason
-                else " Next session stops at gate 1 until you /resume.")
+    if notifier is not None and result.execution_halted:
         try:
             notifier.send(
-                f"[{config.environment.value.upper()}] EXECUTION HALT — {result.reason}" + tail,
+                _redact_reason(f"[{config.environment.value.upper()}] EXECUTION HALT — {result.reason}" + tail,
+                               config=config, fallback=f"execution_halt; HALT details omitted; {halt_fallback}"),
                 event="execution_halt", session_id=result.session_id,
                 trading_date=trading_date.isoformat(),
             )
@@ -976,11 +1008,8 @@ def run_session(
         messages = []
         if r.alert_a:
             messages.append(("alert_a", f"[{env}] ALERT A — UPRO+SCHG P&L {pnl} since last session (threshold -${config.risk.max_daily_loss_usd:,.0f}). Alert only, trading continues."))
-        failure = "HALT persistence failed: "
-        halt = ("HALT persistence FAILED: " + result.reason.split(failure, 1)[1]
-                + ". Next session is NOT protected." if failure in result.reason
-                else "HALT set.")
-        next_session = " Next session stops at gate 1 until you /resume." if failure not in result.reason else ""
+        halt = halt + "." + (tail if halt_failed else "")
+        next_session = "" if halt_failed else tail
         if r.alert_c:
             label = "modelled-subset residual" if r.state == "incomplete" else "residual"
             res = f"${r.modelled_residual_usd:,.2f}"
@@ -988,11 +1017,12 @@ def run_session(
         if r.state == "integrity":
             messages.append(("integrity", f"[{env}] INTEGRITY — {halt} " + " | ".join(r.reasons[:5]) + next_session))
         if r.state == "incomplete":
-            status = halt if r.alert_c or "; HALT set" in result.reason or failure in result.reason else "no HALT."
+            status = halt if result.halt_set or halt_failed else "no HALT."
             messages.append(("interval_incomplete", f"[{env}] INCOMPLETE P&L check — {status} " + " | ".join(r.reasons[:5])))
         for event, text in messages:
             try:
-                notifier.send(text, event=event, session_id=result.session_id,
+                notifier.send(_redact_reason(text, config=config, fallback=f"{event}; interval details omitted; {halt_fallback}"),
+                              event=event, session_id=result.session_id,
                               trading_date=trading_date.isoformat())
             except Exception as exc:
                 logging.getLogger(__name__).warning("Session %s alert failed: %s", event, exc)
