@@ -1,0 +1,55 @@
+{
+  "requests": [
+    {
+      "request_id": "REFERENCE_1",
+      "purpose": "open",
+      "position_id": null,
+      "time": 1793371011.8905962
+    },
+    {
+      "request_id": "REFERENCE_5",
+      "purpose": "open",
+      "position_id": null,
+      "time": 1793371015.1619945
+    },
+    {
+      "request_id": "REFERENCE_9",
+      "purpose": "open",
+      "position_id": null,
+      "time": 1793371016.4590418
+    }
+  ],
+  "steps": {
+    "1": {
+      "status": "fail",
+      "elapsed_seconds": 3.407707452774048
+    },
+    "2": {
+      "status": "fail",
+      "elapsed_seconds": 1.5020370483398438e-05
+    },
+    "3": {
+      "status": "fail",
+      "elapsed_seconds": 2.3603439331054688e-05
+    },
+    "4": {
+      "status": "fail",
+      "elapsed_seconds": 1.296513319015503
+    },
+    "5": {
+      "status": "fail",
+      "elapsed_seconds": 1.5494160652160645
+    }
+  },
+  "opened": [
+    "POSITION_1",
+    "POSITION_2",
+    "POSITION_3"
+  ],
+  "remaining_position_ids": [],
+  "unresolved_open_requests": [],
+  "cleanup": {
+    "remaining_position_ids": [],
+    "errors": []
+  }
+}

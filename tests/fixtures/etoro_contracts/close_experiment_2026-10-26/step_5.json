@@ -1,0 +1,169 @@
+{
+  "step": 5,
+  "status": "fail",
+  "result": {
+    "error_type": "RuntimeError"
+  },
+  "calls": [
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_10"
+      },
+      "request": "[REDACTED]",
+      "started": 1793371016.395971,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100001.52,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06282854080200195
+    },
+    {
+      "method": "POST",
+      "path": "/api/v2/trading/execution/demo/orders",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_9",
+        "content-length": "163",
+        "content-type": "application/json"
+      },
+      "request": {
+        "action": "open",
+        "transaction": "buy",
+        "instrumentId": 1084,
+        "orderType": "mkt",
+        "leverage": 1,
+        "amount": 50.0,
+        "orderCurrency": "usd",
+        "settlementType": "real"
+      },
+      "started": 1793371016.4850407,
+      "status_code": 200,
+      "response": {
+        "orderId": "ORDER_3",
+        "referenceId": "REFERENCE_9"
+      },
+      "elapsed_seconds": 0.2714724540710449
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "orderId": "ORDER_3"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_11"
+      },
+      "request": "[REDACTED]",
+      "started": 1793371016.7571344,
+      "status_code": 404,
+      "response": {
+        "message": "Order category for ORDER_3 not found"
+      },
+      "elapsed_seconds": 0.8334505558013916
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/orders/ORDER_3",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_12"
+      },
+      "request": "[REDACTED]",
+      "started": 1793371017.5919623,
+      "status_code": 200,
+      "response": {
+        "orderID": "ORDER_3",
+        "CID": "ACCOUNT",
+        "referenceID": "REFERENCE_13",
+        "statusID": 3,
+        "orderType": 17,
+        "openActionType": 0,
+        "errorCode": 0,
+        "instrumentID": 1084,
+        "amount": 50.0,
+        "units": 1.449275,
+        "requestOccurred": "2026-10-30T14:36:56.603Z",
+        "positions": [
+          {
+            "positionID": "POSITION_3",
+            "orderType": 17,
+            "occurred": "2026-10-30T14:36:56.687Z",
+            "rate": 34.2,
+            "units": 1.449275,
+            "conversionRate": 1.0,
+            "amount": 49.57,
+            "isOpen": true
+          }
+        ]
+      },
+      "elapsed_seconds": 0.27430033683776855
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_14"
+      },
+      "request": "[REDACTED]",
+      "started": 1793371017.8729007,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100001.52,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07207036018371582
+    }
+  ]
+}

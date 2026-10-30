@@ -1,0 +1,77 @@
+{
+  "requests": [
+    {
+      "request_id": "REFERENCE_1",
+      "purpose": "open",
+      "position_id": null,
+      "time": 1793373200.9262183
+    },
+    {
+      "request_id": "REFERENCE_2",
+      "purpose": "full",
+      "position_id": "POSITION_1",
+      "time": 1793373209.9652386
+    },
+    {
+      "request_id": "REFERENCE_97",
+      "purpose": "open",
+      "position_id": null,
+      "time": 1793373394.525139
+    },
+    {
+      "request_id": "REFERENCE_98",
+      "purpose": "partial",
+      "position_id": "POSITION_2",
+      "time": 1793373405.001845
+    },
+    {
+      "request_id": "REFERENCE_108",
+      "purpose": "open",
+      "position_id": null,
+      "time": 1793373408.057174
+    },
+    {
+      "request_id": "REFERENCE_109",
+      "purpose": "full",
+      "position_id": "POSITION_4",
+      "time": 1793373416.0182157
+    }
+  ],
+  "steps": {
+    "1": {
+      "status": "pass",
+      "elapsed_seconds": 9.4175865650177
+    },
+    "2": {
+      "status": "pass",
+      "elapsed_seconds": 92.7795774936676
+    },
+    "3": {
+      "status": "fail",
+      "elapsed_seconds": 90.29656791687012
+    },
+    "4": {
+      "status": "fail",
+      "elapsed_seconds": 13.763290166854858
+    },
+    "5": {
+      "status": "pass",
+      "elapsed_seconds": 188.68981862068176
+    }
+  },
+  "opened": [
+    "POSITION_1",
+    "POSITION_2",
+    "POSITION_4"
+  ],
+  "remaining_position_ids": [
+    "POSITION_2"
+  ],
+  "unresolved_open_requests": [],
+  "cleanup": {
+    "remaining_position_ids": [
+      "POSITION_2"
+    ],
+    "errors": []
+  }
+}

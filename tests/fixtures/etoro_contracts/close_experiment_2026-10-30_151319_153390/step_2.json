@@ -1,0 +1,1765 @@
+{
+  "step": 2,
+  "status": "pass",
+  "result": {
+    "lookup": {
+      "order_id": "ORDER_2",
+      "reference_id": null,
+      "status": 3,
+      "position_id": "POSITION_1",
+      "fill_price": null,
+      "fill_units": null,
+      "fill_amount_usd": null,
+      "reject_reason": null,
+      "status_label": null,
+      "raw": {
+        "orderID": "ORDER_2",
+        "CID": "ACCOUNT",
+        "statusID": 3,
+        "orderType": 19,
+        "closeActionType": 0,
+        "operationType": 2,
+        "errorCode": 0,
+        "assetCurrencyID": 1,
+        "accountCurrencyID": 1,
+        "instrumentID": 1084,
+        "requestOccurred": "2026-10-30T15:13:30.153Z",
+        "proceeds": 50.01,
+        "externalOperationType": 0,
+        "positions": [
+          {
+            "positionID": "POSITION_1",
+            "occurred": "2026-10-30T15:13:30.23Z",
+            "rate": 34.53,
+            "units": 1.448435,
+            "conversionRate": 1.0,
+            "amount": 49.97
+          }
+        ]
+      }
+    },
+    "poll": {
+      "order": {
+        "order_id": "ORDER_2",
+        "reference_id": null,
+        "status": 3,
+        "position_id": "POSITION_1",
+        "fill_price": null,
+        "fill_units": null,
+        "fill_amount_usd": null,
+        "reject_reason": null,
+        "status_label": null,
+        "raw": {
+          "orderID": "ORDER_2",
+          "CID": "ACCOUNT",
+          "statusID": 3,
+          "orderType": 19,
+          "closeActionType": 0,
+          "operationType": 2,
+          "errorCode": 0,
+          "assetCurrencyID": 1,
+          "accountCurrencyID": 1,
+          "instrumentID": 1084,
+          "requestOccurred": "2026-10-30T15:13:30.153Z",
+          "proceeds": 50.01,
+          "externalOperationType": 0,
+          "positions": [
+            {
+              "positionID": "POSITION_1",
+              "occurred": "2026-10-30T15:13:30.23Z",
+              "rate": 34.53,
+              "units": 1.448435,
+              "conversionRate": 1.0,
+              "amount": 49.97
+            }
+          ]
+        }
+      },
+      "attempts": 2,
+      "timed_out": false
+    },
+    "lookup_errors": [
+      {
+        "error_type": "EtoroValidationError",
+        "error_message": "404 from /***REDACTED***: Order was not found for OrderID=ORDER_2 with RefereceID=",
+        "status_code": 404
+      }
+    ],
+    "position_gone": true,
+    "portfolio": [],
+    "balance": {
+      "credit": 100004.69,
+      "total_balance": null,
+      "available_cash": 100004.69,
+      "raw": {
+        "positions": [],
+        "mirrors": [],
+        "credit": 100004.69,
+        "orders": [],
+        "stockOrders": [],
+        "entryOrders": [],
+        "exitOrders": [],
+        "ordersForOpen": [],
+        "ordersForClose": [],
+        "ordersForCloseMultiple": [],
+        "bonusCredit": 0.0
+      }
+    },
+    "cash_change": 50.01000000000931,
+    "passed": true
+  },
+  "calls": [
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/close-orders/ORDER_2",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_11"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373210.2970965,
+      "status_code": 404,
+      "response": "[REDACTED]",
+      "elapsed_seconds": 0.3170485496520996
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/close-orders/ORDER_2",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_12"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373212.615568,
+      "status_code": 200,
+      "response": {
+        "orderID": "ORDER_2",
+        "CID": "ACCOUNT",
+        "statusID": 3,
+        "orderType": 19,
+        "closeActionType": 0,
+        "operationType": 2,
+        "errorCode": 0,
+        "assetCurrencyID": 1,
+        "accountCurrencyID": 1,
+        "instrumentID": 1084,
+        "requestOccurred": "2026-10-30T15:13:30.153Z",
+        "proceeds": 50.01,
+        "externalOperationType": 0,
+        "positions": [
+          {
+            "positionID": "POSITION_1",
+            "occurred": "2026-10-30T15:13:30.23Z",
+            "rate": 34.53,
+            "units": 1.448435,
+            "conversionRate": 1.0,
+            "amount": 49.97
+          }
+        ]
+      },
+      "elapsed_seconds": 0.32138848304748535
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_13"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373212.937423,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [
+            {
+              "positionID": "POSITION_1",
+              "CID": "ACCOUNT",
+              "openDateTime": "2026-10-30T15:13:21.65Z",
+              "openRate": 34.5,
+              "instrumentID": 1084,
+              "isBuy": true,
+              "takeProfitRate": 0.0,
+              "stopLossRate": 0.0001,
+              "mirrorID": 0,
+              "parentPositionID": 0,
+              "amount": 49.97,
+              "leverage": 1,
+              "orderID": "ORDER_1",
+              "orderType": 17,
+              "units": 1.448435,
+              "totalFees": 0.0,
+              "initialAmountInDollars": 49.97,
+              "isTslEnabled": false,
+              "stopLossVersion": 1,
+              "isSettled": true,
+              "redeemStatusID": 0,
+              "initialUnits": 1.448435,
+              "isPartiallyAltered": false,
+              "unitsBaseValueDollars": 49.97,
+              "isDiscounted": true,
+              "openPositionActionType": 0,
+              "settlementTypeID": 1,
+              "isDetached": false,
+              "openConversionRate": 1.0,
+              "pnlVersion": 1,
+              "totalExternalFees": 0.0,
+              "totalExternalTaxes": 0.0,
+              "isNoTakeProfit": true,
+              "isNoStopLoss": true,
+              "lotCount": 1.448435
+            }
+          ],
+          "mirrors": [],
+          "credit": 99954.68,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.051671743392944336
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_14"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373214.9901352,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [
+            {
+              "positionID": "POSITION_1",
+              "CID": "ACCOUNT",
+              "openDateTime": "2026-10-30T15:13:21.65Z",
+              "openRate": 34.5,
+              "instrumentID": 1084,
+              "isBuy": true,
+              "takeProfitRate": 0.0,
+              "stopLossRate": 0.0001,
+              "mirrorID": 0,
+              "parentPositionID": 0,
+              "amount": 49.97,
+              "leverage": 1,
+              "orderID": "ORDER_1",
+              "orderType": 17,
+              "units": 1.448435,
+              "totalFees": 0.0,
+              "initialAmountInDollars": 49.97,
+              "isTslEnabled": false,
+              "stopLossVersion": 1,
+              "isSettled": true,
+              "redeemStatusID": 0,
+              "initialUnits": 1.448435,
+              "isPartiallyAltered": false,
+              "unitsBaseValueDollars": 49.97,
+              "isDiscounted": true,
+              "openPositionActionType": 0,
+              "settlementTypeID": 1,
+              "isDetached": false,
+              "openConversionRate": 1.0,
+              "pnlVersion": 1,
+              "totalExternalFees": 0.0,
+              "totalExternalTaxes": 0.0,
+              "isNoTakeProfit": true,
+              "isNoStopLoss": true,
+              "lotCount": 1.448435
+            }
+          ],
+          "mirrors": [],
+          "credit": 99954.68,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.058080434799194336
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_15"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373217.0492325,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [
+            {
+              "positionID": "POSITION_1",
+              "CID": "ACCOUNT",
+              "openDateTime": "2026-10-30T15:13:21.65Z",
+              "openRate": 34.5,
+              "instrumentID": 1084,
+              "isBuy": true,
+              "takeProfitRate": 0.0,
+              "stopLossRate": 0.0001,
+              "mirrorID": 0,
+              "parentPositionID": 0,
+              "amount": 49.97,
+              "leverage": 1,
+              "orderID": "ORDER_1",
+              "orderType": 17,
+              "units": 1.448435,
+              "totalFees": 0.0,
+              "initialAmountInDollars": 49.97,
+              "isTslEnabled": false,
+              "stopLossVersion": 1,
+              "isSettled": true,
+              "redeemStatusID": 0,
+              "initialUnits": 1.448435,
+              "isPartiallyAltered": false,
+              "unitsBaseValueDollars": 49.97,
+              "isDiscounted": true,
+              "openPositionActionType": 0,
+              "settlementTypeID": 1,
+              "isDetached": false,
+              "openConversionRate": 1.0,
+              "pnlVersion": 1,
+              "totalExternalFees": 0.0,
+              "totalExternalTaxes": 0.0,
+              "isNoTakeProfit": true,
+              "isNoStopLoss": true,
+              "lotCount": 1.448435
+            }
+          ],
+          "mirrors": [],
+          "credit": 99954.68,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06550741195678711
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_16"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373219.1153193,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [
+            {
+              "positionID": "POSITION_1",
+              "CID": "ACCOUNT",
+              "openDateTime": "2026-10-30T15:13:21.65Z",
+              "openRate": 34.5,
+              "instrumentID": 1084,
+              "isBuy": true,
+              "takeProfitRate": 0.0,
+              "stopLossRate": 0.0001,
+              "mirrorID": 0,
+              "parentPositionID": 0,
+              "amount": 49.97,
+              "leverage": 1,
+              "orderID": "ORDER_1",
+              "orderType": 17,
+              "units": 1.448435,
+              "totalFees": 0.0,
+              "initialAmountInDollars": 49.97,
+              "isTslEnabled": false,
+              "stopLossVersion": 1,
+              "isSettled": true,
+              "redeemStatusID": 0,
+              "initialUnits": 1.448435,
+              "isPartiallyAltered": false,
+              "unitsBaseValueDollars": 49.97,
+              "isDiscounted": true,
+              "openPositionActionType": 0,
+              "settlementTypeID": 1,
+              "isDetached": false,
+              "openConversionRate": 1.0,
+              "pnlVersion": 1,
+              "totalExternalFees": 0.0,
+              "totalExternalTaxes": 0.0,
+              "isNoTakeProfit": true,
+              "isNoStopLoss": true,
+              "lotCount": 1.448435
+            }
+          ],
+          "mirrors": [],
+          "credit": 99954.68,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.08309459686279297
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_17"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373221.1990702,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.28868770599365234
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_18"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373223.4886687,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07010245323181152
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_19"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373225.5596118,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.05651068687438965
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_20"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373227.6170712,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07663416862487793
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_21"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373229.6945252,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.062021493911743164
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_22"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373231.7578375,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.3712728023529053
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_23"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373234.1301088,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06531715393066406
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_24"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373236.1969552,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.4400334358215332
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_25"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373238.638006,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06815218925476074
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_26"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373240.7087626,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.10104250907897949
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_27"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373242.8105938,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.2974233627319336
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_28"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373245.108877,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07260751724243164
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_29"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373247.1820781,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.057446956634521484
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_30"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373249.2403426,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07017946243286133
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_31"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373251.31113,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06294798851013184
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_32"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373253.3746536,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.27446746826171875
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_33"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373255.6507726,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.05638313293457031
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_34"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373257.708034,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07834839820861816
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_35"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373259.7874274,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.08478617668151855
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_36"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373261.873471,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07442951202392578
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_37"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373263.9490428,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.31527161598205566
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_38"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373266.2658086,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.05804610252380371
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_39"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373268.3247206,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.05377054214477539
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_40"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373270.3795488,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07206082344055176
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_41"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373272.4527214,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06747031211853027
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_42"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373274.5214021,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.27369117736816406
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_43"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373276.796045,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06256484985351562
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_44"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373278.8595517,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06668329238891602
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_45"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373280.9277852,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06892943382263184
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_46"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373282.99759,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07506990432739258
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_47"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373285.0737891,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.28174471855163574
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_48"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373287.3565097,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06385254859924316
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_49"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373289.4215488,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.060030221939086914
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_50"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373291.4824214,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.058138132095336914
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_51"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373293.541681,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.060359954833984375
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_52"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373295.6030507,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.29546022415161133
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_53"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373297.8996332,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.0662374496459961
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_54"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373299.9668612,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.061757564544677734
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_55"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373302.0298173,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06401705741882324
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_56"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373302.938043,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07013916969299316
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_57"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373303.008779,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.06725931167602539
+    }
+  ]
+}

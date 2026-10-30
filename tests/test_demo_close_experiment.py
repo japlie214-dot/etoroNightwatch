@@ -108,11 +108,346 @@ class Broker:
         raise AssertionError(f"unexpected fake request: {request.method} {path}")
 
 
+class Clock:
+    def __init__(self):
+        self.now = 0.0
+        self.waits = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.waits.append(seconds)
+        self.now += seconds
+
+
 def make_run(tmp_path, **kwargs):
     run_dir, fixture_dir = tmp_path / "run", tmp_path / "fixtures"
     broker = Broker(run_dir / "report.json", **kwargs)
-    run = experiment.Experiment(config(), run_dir, fixture_dir, transport=httpx.MockTransport(broker.handle))
+    clock = Clock()
+    run = experiment.Experiment(config(), run_dir, fixture_dir, transport=httpx.MockTransport(broker.handle),
+                                clock=clock, sleep=clock.sleep, settle_timeout=6)
     return run, broker
+
+
+@pytest.mark.parametrize("legacy_visible", [False, True])
+def test_open_lookup_404_then_visible_never_resends_buy(tmp_path, legacy_visible):
+    run, broker = make_run(tmp_path)
+    lookups, legacy = [], []
+
+    def handle(request):
+        path = request.url.path
+        if "orders:lookup" in path and "orderId" in request.url.params:
+            lookups.append(run.clock.now)
+            if legacy_visible or len(lookups) <= 2:
+                return httpx.Response(404, json={"message": "Order category not found"})
+        if "/orders/" in path and request.method == "GET":
+            legacy.append(request)
+            if not legacy_visible:
+                return httpx.Response(404, json={"message": "Order was not found"})
+            return httpx.Response(200, json=broker.orders[path.rsplit("/", 1)[-1]])
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1, 2])
+    assert all(s["status"] == "pass" for s in report["steps"].values())
+    assert lookups == ([0] if legacy_visible else [0, 2, 4])
+    assert len(legacy) == (1 if legacy_visible else 2)
+    assert len(broker.posts) == 2
+    assert report["unresolved_open_requests"] == report["remaining_position_ids"] == []
+
+
+@pytest.mark.parametrize("cleanup_only", [False, True])
+def test_open_lookup_stays_404_portfolio_recovers_owned_id_for_cleanup(tmp_path, cleanup_only):
+    run, broker = make_run(tmp_path)
+    lookups, portfolio_reads = [], []
+
+    def handle(request):
+        path = request.url.path
+        if request.method == "GET" and ("orders:lookup" in path or "/orders/" in path):
+            lookups.append(request)
+            return httpx.Response(404, json={"message": "Order was not found"})
+        if path.endswith("portfolio") and broker.posts and not run.full_attempted:
+            portfolio_reads.append(request)
+            if len(portfolio_reads) <= 2:
+                return httpx.Response(200, json={"clientPortfolio": {"positions": []}})
+        if request.method == "POST" and "market-close-orders" in path:
+            persisted = json.loads(run.report_path.read_text())
+            pid = path.rsplit("/", 1)[-1]
+            assert pid in persisted["opened"] and pid in run.owned
+            assert persisted["unresolved_open_requests"] == []
+        response = broker.handle(request)
+        if request.method == "POST" and "market-close-orders" not in path:
+            # A new, unrelated instrument must not be adopted or closed.
+            broker.positions["901"] = {**broker.position("901", 1), "instrumentID": 88}
+        return response
+
+    if cleanup_only:
+        def step(number):
+            run.open_position(run.minimum)
+            raise RuntimeError("failure after recovered open")
+        run.step = step
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1])
+    assert report["steps"]["1"]["status"] == ("fail" if cleanup_only else "pass")
+    assert len(lookups) == 8  # Four bounded v2 lookups, each followed by the v1 GET.
+    assert len(report["opened"]) == 1
+    assert report["remaining_position_ids"] == report["unresolved_open_requests"] == []
+    assert set(broker.positions) == {"900", "901"}
+    assert len(broker.posts) == 2  # Exactly one buy and one close, including cleanup.
+
+
+@pytest.mark.parametrize("visibility", ["absent", "ambiguous", "wrong_instrument"])
+def test_open_lookup_404_does_not_adopt_unproven_portfolio_position(tmp_path, visibility):
+    run, broker = make_run(tmp_path)
+
+    def handle(request):
+        path = request.url.path
+        if request.method == "GET" and ("orders:lookup" in path or "/orders/" in path):
+            return httpx.Response(404, json={"message": "not visible"})
+        if path.endswith("portfolio") and broker.posts:
+            rows = []
+            if visibility == "ambiguous":
+                rows = [broker.position("1101", 2), broker.position("1102", 2)]
+            elif visibility == "wrong_instrument":
+                rows = [{**broker.position("1101", 2), "instrumentID": 88}]
+            return httpx.Response(200, json={"clientPortfolio": {"positions": rows}})
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1, 4, 5])
+    assert list(report["steps"]) == ["1"]
+    assert report["steps"]["1"]["status"] == "fail"
+    assert len(report["unresolved_open_requests"]) == 1
+    assert report["opened"] == [] and run.owned == {}
+    assert len(broker.posts) == 1
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+def test_reference_lookup_404_retries_bounded_without_writes(tmp_path, persistent):
+    run, broker = make_run(tmp_path)
+    attempts = []
+
+    def handle(request):
+        if "orders:lookup" in request.url.path and "referenceId" in request.url.params:
+            attempts.append(run.clock.now)
+            if persistent or len(attempts) <= 2:
+                return httpx.Response(404, json={"message": "reference not indexed"})
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1, 3])
+    assert report["steps"]["3"]["status"] == ("fail" if persistent else "pass")
+    assert attempts == ([0, 2, 4, 6] if persistent else [0, 2, 4])
+    assert len(broker.posts) == 2
+    assert report["remaining_position_ids"] == []
+
+
+def test_open_lookup_non_404_is_not_retried_or_resubmitted(tmp_path):
+    run, broker = make_run(tmp_path)
+    attempts = []
+
+    def handle(request):
+        if "orders:lookup" in request.url.path:
+            attempts.append(request)
+            return httpx.Response(400, json={"message": "invalid lookup"})
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1, 4])
+    assert list(report["steps"]) == ["1"]
+    assert len(attempts) == len(broker.posts) == 1
+    assert len(report["unresolved_open_requests"]) == 1
+
+
+def test_lagging_open_close_partial_and_lookup_settle_without_resends(tmp_path):
+    run, broker = make_run(tmp_path)
+    stale, reads_left = None, 0
+    missing = {}
+
+    def handle(request):
+        nonlocal stale, reads_left
+        path = request.url.path
+        if path.endswith("portfolio") and reads_left:
+            reads_left -= 1
+            return httpx.Response(200, json=stale)
+        if request.method == "GET" and "close-orders/" in path:
+            oid = path.rsplit("/", 1)[-1]
+            missing[oid] = missing.get(oid, 0) + 1
+            if missing[oid] <= 2:
+                return httpx.Response(404, json={"message": f"Order was not found for OrderID={oid}"})
+        if request.method == "POST":
+            stale = {"clientPortfolio": {"positions": [dict(p) for p in broker.positions.values()],
+                                         "credit": broker.cash, "orders": [], "ordersForOpen": []}}
+            reads_left = 2
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1, 2, 3, 4, 5])
+    assert [row["status"] for row in report["steps"].values()] == ["pass"] * 5
+    assert report["remaining_position_ids"] == []
+    assert set(broker.positions) == {"900"}
+    assert len(broker.posts) == 7
+    assert all(count == 3 for count in missing.values())
+    for step in (2, 4):
+        result = json.loads((run.fixture_dir / f"step_{step}.json").read_text())["result"]
+        assert len(result["lookup_errors"]) == 2
+        assert result["lookup_errors"][0]["status_code"] == 404
+        assert "ORDER_" in result["lookup_errors"][0]["error_message"]
+    assert run.clock.now >= 6
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_persistent_close_lookup_404_falls_back_to_settled_portfolio(tmp_path, partial):
+    run, broker = make_run(tmp_path)
+    reads = []
+
+    def handle(request):
+        if request.method == "GET" and "close-orders/" in request.url.path:
+            reads.append(request)
+            return httpx.Response(404, json={"message": "not yet visible"})
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([4] if partial else [1, 2])
+    assert all(row["status"] == "pass" for row in report["steps"].values())
+    assert report["remaining_position_ids"] == []
+    assert len(reads) == (8 if partial else 4)
+    assert len([r for r in broker.posts if "market-close-orders" in r.url.path]) == (2 if partial else 1)
+
+
+@pytest.mark.parametrize("appears_in_cleanup", [False, True])
+def test_cleanup_tracks_order_owned_position_even_when_portfolio_empty(tmp_path, appears_in_cleanup):
+    run, broker = make_run(tmp_path)
+    hidden_reads = 0
+
+    def handle(request):
+        nonlocal hidden_reads
+        if request.url.path.endswith("portfolio") and len(broker.positions) > 1:
+            hidden_reads += 1
+            if not appears_in_cleanup or hidden_reads <= 5:
+                return httpx.Response(200, json={"clientPortfolio": {
+                    "positions": [], "credit": broker.cash, "orders": [], "ordersForOpen": []}})
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1])
+    assert report["steps"]["1"]["status"] == "fail"
+    assert report["opened"]
+    assert hidden_reads >= 4
+    if appears_in_cleanup:
+        assert report["remaining_position_ids"] == []
+        assert set(broker.positions) == {"900"}
+        assert len(broker.posts) == 2
+    else:
+        assert report["remaining_position_ids"] == report["opened"]
+        assert set(report["opened"]) <= broker.positions.keys()
+        assert len(broker.posts) == 1
+    result = json.loads((run.fixture_dir / "step_1.json").read_text())["result"]
+    assert result["error_message"] == "open not confirmed filled and present"
+
+
+def test_cleanup_retains_all_three_owned_ids_when_they_never_appear(tmp_path):
+    run, broker = make_run(tmp_path)
+
+    def handle(request):
+        if request.url.path.endswith("portfolio"):
+            return httpx.Response(200, json={"clientPortfolio": {"positions": []}})
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1, 4, 5])
+    assert len(report["opened"]) == 3
+    assert report["remaining_position_ids"] == sorted(report["opened"])
+    assert set(report["remaining_position_ids"]) <= broker.positions.keys()
+    assert all("market-close-orders" not in request.url.path for request in broker.posts)
+    assert run.clock.now == 36  # 6s per open, then 6s per owned cleanup candidate
+
+
+@pytest.mark.parametrize("timeout,interval", [(0, 2), (90, 0), (float("inf"), 2)])
+def test_invalid_polling_bounds_refused_before_files(tmp_path, timeout, interval):
+    with pytest.raises(ValueError, match="invalid polling bounds"):
+        experiment.Experiment(config(), tmp_path / "run", tmp_path / "fixtures",
+                              settle_timeout=timeout, poll_interval=interval)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_non_404_close_lookup_error_is_not_retried(tmp_path):
+    run, broker = make_run(tmp_path)
+    lookups = []
+
+    def handle(request):
+        if request.method == "GET" and "close-orders/" in request.url.path:
+            lookups.append(request)
+            return httpx.Response(400, json={"message": "invalid lookup"})
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1, 2])
+    assert report["steps"]["2"]["status"] == "fail"
+    assert len(lookups) == 1
+    assert len(broker.posts) == 2
+    assert report["remaining_position_ids"] == []
+    result = json.loads((run.fixture_dir / "step_2.json").read_text())["result"]
+    assert result["status_code"] == 400
+    assert "invalid lookup" in result["error_message"]
+
+
+def test_cleanup_does_not_call_a_temporary_empty_snapshot_closed(tmp_path):
+    run, broker = make_run(tmp_path, close_error="timeout")
+    empty_reads = 0
+
+    def handle(request):
+        nonlocal empty_reads
+        if request.url.path.endswith("portfolio") and run.full_attempted:
+            empty_reads += 1
+            if empty_reads <= 2:
+                return httpx.Response(200, json={"clientPortfolio": {"positions": []}})
+        return broker.handle(request)
+
+    run.capture.inner = httpx.MockTransport(handle)
+    report = run.run([1])
+    assert report["remaining_position_ids"] == report["opened"]
+    assert empty_reads == 4
+    assert len(broker.posts) == 2
+
+
+def test_error_message_sanitizes_embedded_response_fields(tmp_path):
+    run, broker = make_run(tmp_path, close_error="server", reference_missing=True)
+    report = run.run([1])
+    assert report["steps"]["1"]["status"] == "fail"
+    result = json.loads((run.fixture_dir / "step_1.json").read_text())["result"]
+    assert "503 server error" in result["error_message"]
+    assert "fake-response-token" not in result["error_message"]
+    assert experiment.PLACEHOLDER in result["error_message"]
+    assert "fake-response-token" not in (run.fixture_dir / "summary.json").read_text()
+    clean = experiment.error_details(RuntimeError('Authorization: Bearer fake-value; apiKey="fake-key"'))
+    assert "fake-value" not in clean["error_message"] and "fake-key" not in clean["error_message"]
+    escaped = experiment.error_details(RuntimeError(json.dumps({"accessToken": 'fake-"quoted"-value'})))
+    assert "quoted" not in escaped["error_message"] and "value" not in escaped["error_message"]
+
+
+def test_fixture_destination_uses_unique_run_timestamp(tmp_path, monkeypatch):
+    destinations = []
+
+    class FakeExperiment:
+        def __init__(self, config, run_dir, fixture_dir):
+            destinations.append((run_dir, fixture_dir))
+            self.report_path = run_dir / "report.json"
+
+        def run(self, steps):
+            return {"steps": {str(n): {"status": "pass"} for n in steps},
+                    "remaining_position_ids": [], "unresolved_open_requests": []}
+
+    monkeypatch.setattr(experiment, "ROOT", tmp_path)
+    monkeypatch.setattr(experiment, "load_config", lambda **kwargs: config())
+    monkeypatch.setattr(experiment, "Experiment", FakeExperiment)
+    assert experiment.main(["--steps", "1"]) == 0
+    assert experiment.main(["--steps", "1"]) == 0
+    assert destinations[0][1] != destinations[1][1]
+    for run_dir, fixture_dir in destinations:
+        assert run_dir.name == fixture_dir.name
+        assert fixture_dir.name.startswith("close_experiment_" + experiment.datetime.now(experiment.timezone.utc).strftime("%Y-%m-%d"))
 
 
 def test_real_environment_refused_before_any_effect(tmp_path):

@@ -16,14 +16,16 @@ import uuid
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import httpx
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "app" / "src" / "main" / "python"))
 from nightwatch.config import load_config  # noqa: E402
-from nightwatch.etoro.client import EtoroClient  # noqa: E402
+from nightwatch.etoro.client import EtoroClient, PollResult  # noqa: E402
+from nightwatch.etoro.errors import EtoroValidationError  # noqa: E402
+from nightwatch.etoro.models import FILLED_ORDER_STATUSES  # noqa: E402
 
 SENSITIVE = re.compile(r"token|secret|key|auth", re.I)
 PLACEHOLDER = "[REDACTED]"
@@ -86,6 +88,16 @@ class Sanitizer:
         return strings(walk(value))
 
 
+def error_details(exc: Exception) -> dict[str, Any]:
+    message = re.sub(r"(?i)Bearer\s+[^\s\"',;}]+", "Bearer " + PLACEHOLDER, str(exc))
+    message = re.sub(
+        r'''(?i)(["']?[\w-]*(?:token|secret|key|auth)[\w-]*["']?\s*[:=]\s*)("(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|[^\s,;}]+)''',
+        lambda match: match[1] + '"' + PLACEHOLDER + '"', message,
+    )
+    return {"error_type": type(exc).__name__, "error_message": message,
+            "status_code": getattr(exc, "status_code", None)}
+
+
 def write_json(path: Path, value: Any, *, durable: bool = False) -> None:
     with path.open("w", encoding="utf-8") as handle:
         json.dump(value, handle, indent=2, allow_nan=False)
@@ -141,7 +153,7 @@ class CaptureTransport(httpx.BaseTransport):
                 raise httpx.ReadTimeout("experiment discarded completed response", request=request)
             return response
         except Exception as exc:
-            call["error_type"] = type(exc).__name__
+            call.update(error_details(exc))
             raise
         finally:
             call["elapsed_seconds"] = time.time() - call["started"]
@@ -152,12 +164,19 @@ class CaptureTransport(httpx.BaseTransport):
 
 class Experiment:
     def __init__(self, config: Any, run_dir: Path, fixture_dir: Path,
-                 *, transport: httpx.BaseTransport | None = None) -> None:
+                 *, transport: httpx.BaseTransport | None = None,
+                 clock: Callable[[], float] = time.monotonic,
+                 sleep: Callable[[float], None] = time.sleep,
+                 settle_timeout: float = 90.0, poll_interval: float = 2.0) -> None:
         if config.etoro.environment != "demo":
             raise ValueError("experiment refused: etoro.environment must be demo")
         self.minimum = config.strategy.min_order_size
         if not math.isfinite(self.minimum) or self.minimum <= 0:
             raise ValueError("experiment refused: invalid minimum order size")
+        if not all(math.isfinite(v) and v > 0 for v in (settle_timeout, poll_interval)):
+            raise ValueError("experiment refused: invalid polling bounds")
+        self.clock, self.sleep = clock, sleep
+        self.settle_timeout, self.poll_interval = settle_timeout, poll_interval
         self.run_dir, self.fixture_dir = run_dir, fixture_dir
         # Do not overwrite an earlier run, including a partially completed run.
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -168,7 +187,8 @@ class Experiment:
         self.save()
         self.capture = CaptureTransport(transport if transport is not None else httpx.HTTPTransport(),
                                         self.report_path)
-        self.client = EtoroClient(config.etoro, transport=self.capture, max_attempts=1)
+        self.client = EtoroClient(config.etoro, transport=self.capture, max_attempts=1,
+                                  clock=clock, sleep=sleep)
         self.sanitizer = Sanitizer()
         self.owned: dict[str, Any] = {}
         self.full_attempted: set[str] = set()
@@ -187,6 +207,63 @@ class Experiment:
         self.save()
         return rid
 
+    def wait_portfolio(self, pid: str, *, closed: bool = False,
+                       units: float | None = None) -> tuple[list[Any], bool]:
+        deadline = self.clock() + self.settle_timeout
+        while True:
+            portfolio = self.client.get_portfolio_strict()
+            position = next((p for p in portfolio if p.position_id == pid), None)
+            matched = (position is None if closed else position is not None
+                       and (units is None or math.isclose(position.units, units,
+                                                         rel_tol=1e-8, abs_tol=1e-8)))
+            # Absence can be a stale pre-open snapshot: allow the whole settling window.
+            if self.clock() >= deadline or (matched and not closed):
+                return portfolio, matched
+            self.sleep(max(0.0, min(self.poll_interval, deadline - self.clock())))
+
+    def poll_close(self, oid: str) -> dict[str, Any]:
+        deadline = self.clock() + self.settle_timeout
+        lookup, poll, errors = None, None, []
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                order = self.client.lookup_close_order(oid)
+                if lookup is None:
+                    lookup = asdict(order)
+                poll = asdict(PollResult(order, attempts, not order.is_terminal))
+                if order.is_terminal:
+                    break
+            except EtoroValidationError as exc:
+                if exc.status_code != 404:
+                    raise
+                errors.append(error_details(exc))
+            if self.clock() >= deadline:
+                break
+            self.sleep(max(0.0, min(self.poll_interval, deadline - self.clock())))
+        return {"lookup": lookup, "poll": poll, "lookup_errors": errors}
+
+    @staticmethod
+    def close_lookup_matches(evidence: dict[str, Any], pid: str) -> bool:
+        poll = evidence["poll"]
+        # Only an unavailable lookup falls back to portfolio proof, not a rejection.
+        return poll is None or (not poll["timed_out"]
+                                and poll["order"]["status"] in FILLED_ORDER_STATUSES
+                                and poll["order"]["position_id"] == pid)
+
+    def lookup_visible(self, *, order_id: str | None = None,
+                       reference_id: str | None = None, terminal: bool = False) -> Any:
+        deadline = self.clock() + self.settle_timeout
+        while True:
+            try:
+                order = self.client.lookup_order(order_id=order_id, reference_id=reference_id)
+                if not terminal or order.is_terminal or self.clock() >= deadline:
+                    return order
+            except EtoroValidationError as exc:
+                if exc.status_code != 404 or self.clock() >= deadline:
+                    raise
+            self.sleep(max(0.0, min(self.poll_interval, deadline - self.clock())))
+
     def open_position(self, amount: float) -> Any:
         before = {p.position_id for p in self.client.get_portfolio_strict()}
         rid = self.request_id("open")
@@ -194,9 +271,31 @@ class Experiment:
         self.save()
         oid = self.client.place_buy_order(rid, self.instrument_id, amount)
         self.sanitizer.identify("ORDER", oid)
-        poll = self.client.poll_order_to_terminal(order_id=oid)
-        pid = poll.order.position_id
-        if pid and pid not in before and pid not in self.baseline:
+        position = None
+        try:
+            order = self.lookup_visible(order_id=oid, terminal=True)
+        except EtoroValidationError as exc:
+            if exc.status_code != 404:
+                raise
+            order = None
+        if order is None:
+            deadline = self.clock() + self.settle_timeout
+            while True:
+                candidates = [p for p in self.client.get_portfolio_strict()
+                              if p.instrument_id == self.instrument_id
+                              and p.position_id not in before | self.baseline | self.owned.keys()]
+                if len(candidates) > 1:
+                    raise RuntimeError("open refused: ambiguous new portfolio positions")
+                if candidates:
+                    position = candidates[0]
+                    break
+                if self.clock() >= deadline:
+                    raise RuntimeError("open unresolved: lookup unavailable and no new portfolio position")
+                self.sleep(max(0.0, min(self.poll_interval, deadline - self.clock())))
+            pid = position.position_id
+        else:
+            pid = order.position_id
+        if pid and pid not in before and pid not in self.baseline and pid not in self.owned:
             self.sanitizer.identify("POSITION", pid)
             self.report["opened"].append(pid)
             self.report["unresolved_open_requests"].remove(rid)
@@ -204,9 +303,10 @@ class Experiment:
             self.save()
         else:
             raise RuntimeError("open refused: no proven new position identity")
-        positions = {p.position_id: p for p in self.client.get_portfolio_strict()}
-        position = positions.get(pid)
-        if poll.timed_out or not poll.order.is_filled or position is None:
+        if position is None:
+            portfolio, _ = self.wait_portfolio(pid)
+            position = next((p for p in portfolio if p.position_id == pid), None)
+        if (order is not None and not order.is_filled) or position is None:
             raise RuntimeError("open not confirmed filled and present")
         if position.instrument_id != self.instrument_id:
             raise RuntimeError("open position instrument mismatch")
@@ -242,12 +342,11 @@ class Experiment:
 
     def reference_probe(self, rid: str, pid: str, oid: str | None) -> dict[str, Any]:
         try:
-            result = self.client.lookup_order(reference_id=rid)
+            result = self.lookup_visible(reference_id=rid)
             return {"result": asdict(result), "matches": result.position_id == pid
                     and result.order_id is not None and (oid is None or result.order_id == oid)}
         except Exception as exc:
-            return {"error_type": type(exc).__name__,
-                    "status_code": getattr(exc, "status_code", None), "matches": False}
+            return {**error_details(exc), "matches": False}
 
     def step(self, number: int) -> dict[str, Any]:
         if number == 1:
@@ -262,16 +361,13 @@ class Experiment:
         if number == 2:
             if self.full is None:
                 raise RuntimeError("step 2 depends on step 1")
-            lookup = self.client.lookup_close_order(self.full["order_id"])
-            poll = self.client.poll_order_to_terminal(order_id=self.full["order_id"], kind="close")
-            portfolio = self.client.get_portfolio_strict()
+            evidence = self.poll_close(self.full["order_id"])
+            portfolio, gone = self.wait_portfolio(self.full["position_id"], closed=True)
             balance = self.client.get_balance()
-            gone = all(p.position_id != self.full["position_id"] for p in portfolio)
-            return {"lookup": asdict(lookup), "poll": asdict(poll), "position_gone": gone,
+            return {**evidence, "position_gone": gone,
                     "portfolio": [asdict(p) for p in portfolio], "balance": asdict(balance),
                     "cash_change": balance.available_cash - self.full["balance_before"],
-                    "passed": gone and not poll.timed_out and poll.order.is_filled
-                    and poll.order.position_id == self.full["position_id"]}
+                    "passed": gone and self.close_lookup_matches(evidence, self.full["position_id"])}
         if number == 3:
             if self.full is None:
                 raise RuntimeError("step 3 depends on step 1")
@@ -280,21 +376,18 @@ class Experiment:
         if number == 4:
             position = self.open_position(max(2.5 * self.minimum, self.minimum))
             rid, oid = self.close_position(position, units=position.units / 2)
-            poll = self.client.poll_order_to_terminal(order_id=oid, kind="close")
-            portfolio = self.client.get_portfolio_strict()
-            after = next((p for p in portfolio if p.position_id == position.position_id), None)
-            confirmed = (not poll.timed_out and poll.order.is_filled
-                         and poll.order.position_id == position.position_id and after is not None
-                         and math.isclose(after.units, position.units / 2, rel_tol=1e-8, abs_tol=1e-8))
+            evidence = self.poll_close(oid)
+            portfolio, reduced = self.wait_portfolio(position.position_id, units=position.units / 2)
+            confirmed = reduced and self.close_lookup_matches(evidence, position.position_id)
             if confirmed:
                 self.partial_confirmed.add(position.position_id)
-            return {"reference_id": rid, "before": asdict(position), "poll": asdict(poll),
+            return {"reference_id": rid, "before": asdict(position), **evidence,
                     "portfolio": [asdict(p) for p in portfolio], "passed": confirmed}
         position = self.open_position(self.minimum)
         before = self.client.get_portfolio_strict()
         rid, _ = self.close_position(position, discard=True)
         probe = self.reference_probe(rid, position.position_id, None)
-        after = self.client.get_portfolio_strict()
+        after, gone = self.wait_portfolio(position.position_id, closed=True)
         count = self.capture.close_counts.get(position.position_id, 0)
         dropped = any(c.get("response_discarded") and c["headers"].get("x-request-id") == rid
                       for c in self.capture.calls)
@@ -303,24 +396,30 @@ class Experiment:
         return {"reference_id": rid, "probe": probe, "close_post_count": count,
                 "response_discarded": dropped, "portfolio_before": [asdict(p) for p in before],
                 "portfolio_after": [asdict(p) for p in after],
-                "passed": dropped and all(p.position_id != position.position_id for p in after)}
+                "passed": dropped and gone}
 
     def cleanup(self) -> dict[str, Any]:
         errors = []
-        for position in self.client.get_portfolio_strict():
-            pid = position.position_id
-            if pid not in self.owned or pid in self.full_attempted:
-                continue
-            if pid in self.partial_attempted and pid not in self.partial_confirmed:
-                continue
-            if position.instrument_id != self.instrument_id:
-                continue
-            try:
-                _, oid = self.close_position(position)
-                self.client.poll_order_to_terminal(order_id=oid, kind="close")
-            except Exception as exc:
-                errors.append({"position_id": pid, "error_type": type(exc).__name__})
-        remaining = {p.position_id for p in self.client.get_portfolio_strict()} & self.owned.keys()
+        remaining = set(self.owned)
+        for pid in self.owned:
+            if pid not in self.full_attempted:
+                portfolio, present = self.wait_portfolio(pid)
+                position = next((p for p in portfolio if p.position_id == pid), None)
+                if not present or position.instrument_id != self.instrument_id:
+                    continue
+                if pid in self.partial_attempted and pid not in self.partial_confirmed:
+                    continue
+                self.owned[pid] = position
+                try:
+                    _, oid = self.close_position(position)
+                    self.poll_close(oid)
+                except Exception as exc:
+                    errors.append({"position_id": pid, **error_details(exc)})
+            # Never infer closure for an order-identified position not yet seen in portfolio.
+            if self.owned[pid] is not None:
+                _, gone = self.wait_portfolio(pid, closed=True)
+                if gone:
+                    remaining.discard(pid)
         self.report["remaining_position_ids"] = sorted(remaining)
         return {"remaining_position_ids": sorted(remaining), "errors": errors}
 
@@ -334,7 +433,7 @@ class Experiment:
                     result = self.step(number)
                     status = "pass" if result.get("passed", result.get("matches", True)) else "fail"
                 except Exception as exc:
-                    result, status = {"error_type": type(exc).__name__}, "fail"
+                    result, status = error_details(exc), "fail"
                 evidence = {"step": number, "status": status, "result": result,
                             "calls": self.capture.calls[offset:]}
                 self.report["steps"][str(number)] = {"status": status, "elapsed_seconds": time.time() - start}
@@ -350,7 +449,7 @@ class Experiment:
                     cleanup = {"not_started": True}
                 self.report["cleanup"] = cleanup
             except Exception as exc:
-                self.report["cleanup"] = {"error_type": type(exc).__name__}
+                self.report["cleanup"] = error_details(exc)
                 self.report["remaining_position_ids"] = sorted(self.owned)
             finally:
                 self.save()
@@ -393,7 +492,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = load_config(config_path=args.config, secrets_path=args.secrets)
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d_%H%M%S_%f")
     experiment = Experiment(config, ROOT / "data" / f"close_experiment_{stamp}",
-                            ROOT / "tests" / "fixtures" / "etoro_contracts" / "close_experiment_2026-10-26")
+                            ROOT / "tests" / "fixtures" / "etoro_contracts" / f"close_experiment_{stamp}")
     report = experiment.run(steps)
     print(f"Report: {experiment.report_path}")
     return int(len(report["steps"]) != len(steps)

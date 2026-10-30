@@ -1,0 +1,870 @@
+{
+  "step": 3,
+  "status": "fail",
+  "result": {
+    "error_type": "EtoroValidationError",
+    "error_message": "404 from /***REDACTED***:lookup: {\"message\":\"No external operation was found for referenceId ***REDACTED***\"}",
+    "status_code": 404,
+    "matches": false
+  },
+  "calls": [
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_58"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373303.6758559,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.34353065490722656
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_59"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373306.0207324,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3246607780456543
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_60"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373308.3466084,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3515787124633789
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_61"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373310.6990414,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3018922805786133
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_62"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373313.0021517,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.2976820468902588
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_63"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373315.30071,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.30110883712768555
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_64"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373317.6032162,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.30113959312438965
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_65"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373319.9057257,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.28093576431274414
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_66"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373322.1876864,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.29695630073547363
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_67"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373324.4859502,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3626213073730469
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_68"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373326.8495247,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.6768178939819336
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_69"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373329.5274043,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.664726734161377
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_70"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373332.1929035,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.48291516304016113
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_71"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373334.6769207,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.300861120223999
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_72"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373336.9786723,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.40349507331848145
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_73"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373339.3835948,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3065073490142822
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_74"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373341.690998,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3770415782928467
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_75"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373344.069252,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.2892920970916748
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_76"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373346.3596745,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.30612921714782715
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_77"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373348.6669962,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.28540921211242676
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_78"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373350.9535315,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.29839324951171875
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_79"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373353.2528243,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3555176258087158
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_80"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373355.6091046,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.2836344242095947
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_81"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373357.893765,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3044407367706299
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_82"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373360.1995459,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3016974925994873
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_83"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373362.5023413,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3655664920806885
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_84"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373364.8690217,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3170297145843506
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_85"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373367.187198,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3285491466522217
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_86"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373369.5166194,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.2957277297973633
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_87"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373371.8136005,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.7972805500030518
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_88"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373374.6117218,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3523538112640381
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_89"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373376.9650753,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.8120260238647461
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_90"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373379.778093,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.28014564514160156
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_91"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373382.0594954,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3995234966278076
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_92"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373384.4599469,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.30300116539001465
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_93"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373386.763807,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.5051689147949219
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_94"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373389.269961,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.3666067123413086
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_95"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373391.63779,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.2845027446746826
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "referenceId": "REFERENCE_2"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_96"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373393.676453,
+      "status_code": 404,
+      "response": {
+        "message": "No external operation was found for referenceId REFERENCE_2"
+      },
+      "elapsed_seconds": 0.29508399963378906
+    }
+  ]
+}

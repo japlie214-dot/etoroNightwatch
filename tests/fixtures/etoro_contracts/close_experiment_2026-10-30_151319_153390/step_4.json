@@ -1,0 +1,482 @@
+{
+  "step": 4,
+  "status": "fail",
+  "result": {
+    "error_type": "EtoroValidationError",
+    "error_message": "close-orders returned multiple position IDs",
+    "status_code": null
+  },
+  "calls": [
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_99"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373394.1441007,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.3808259963989258
+    },
+    {
+      "method": "POST",
+      "path": "/api/v2/trading/execution/demo/orders",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_97",
+        "content-length": "164",
+        "content-type": "application/json"
+      },
+      "request": {
+        "action": "open",
+        "transaction": "buy",
+        "instrumentId": 1084,
+        "orderType": "mkt",
+        "leverage": 1,
+        "amount": 125.0,
+        "orderCurrency": "usd",
+        "settlementType": "real"
+      },
+      "started": 1793373394.5420394,
+      "status_code": 200,
+      "response": {
+        "orderId": "ORDER_3",
+        "referenceId": "REFERENCE_97"
+      },
+      "elapsed_seconds": 0.42780065536499023
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "orderId": "ORDER_3"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_100"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373394.970441,
+      "status_code": 200,
+      "response": {
+        "accountId": "ACCOUNT",
+        "gcid": "ACCOUNT",
+        "portfolioId": 0,
+        "orderId": "ORDER_3",
+        "action": "open",
+        "transaction": "buy",
+        "type": "mkt",
+        "etoroOrderTypeId": 17,
+        "status": {
+          "id": 2,
+          "name": "Placed",
+          "errorCode": 0
+        },
+        "asset": {
+          "symbol": "SCHG",
+          "instrumentId": 1084,
+          "currency": "USD",
+          "settlementType": "REAL",
+          "leverage": 1,
+          "side": "long"
+        },
+        "orderCurrency": "usd",
+        "requestedAmount": 125.0,
+        "requestedUnits": 3.621089,
+        "requestedContracts": 3.621089,
+        "frozenAmount": 125.0,
+        "openStopLossRate": 0.0001,
+        "openTakeProfitRate": 0.0,
+        "stopLossType": "fixed",
+        "totalCosts": 0.0,
+        "positionsToClose": [],
+        "positionExecutions": [],
+        "requestTime": "2026-10-30T15:16:34.893Z",
+        "lastUpdate": "2026-10-30T15:16:34.893Z",
+        "openActionType": "customer",
+        "requestType": "byAmount"
+      },
+      "elapsed_seconds": 0.7091736793518066
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "orderId": "ORDER_3"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_101"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373397.6808162,
+      "status_code": 200,
+      "response": {
+        "accountId": "ACCOUNT",
+        "gcid": "ACCOUNT",
+        "portfolioId": 0,
+        "orderId": "ORDER_3",
+        "action": "open",
+        "transaction": "buy",
+        "type": "mkt",
+        "etoroOrderTypeId": 17,
+        "status": {
+          "id": 3,
+          "name": "Filled",
+          "errorCode": 0
+        },
+        "asset": {
+          "symbol": "SCHG",
+          "instrumentId": 1084,
+          "currency": "USD",
+          "settlementType": "REAL",
+          "leverage": 1,
+          "side": "long"
+        },
+        "orderCurrency": "usd",
+        "requestedAmount": 125.0,
+        "requestedUnits": 3.621089,
+        "requestedContracts": 3.621089,
+        "frozenAmount": 125.0,
+        "openStopLossRate": 0.0001,
+        "openTakeProfitRate": 0.0,
+        "stopLossType": "fixed",
+        "totalCosts": 0.0,
+        "positionsToClose": [],
+        "positionExecutions": [
+          {
+            "positionId": "POSITION_2",
+            "state": "open",
+            "investedAmountCurrency": 1,
+            "initialExposureAccountCurrency": 124.9275705,
+            "initialExposureAssetCurrency": 124.9275705,
+            "addedFunds": 0.0,
+            "marginAccountCurrency": 124.93,
+            "marginAssetCurrency": 124.93,
+            "remainingUnits": 3.621089,
+            "remainingContracts": 3.621089,
+            "stopLossRate": 0.0001,
+            "takeProfitRate": 0.0,
+            "openingData": {
+              "openTime": "2026-10-30T15:16:34.847Z",
+              "orderId": "ORDER_3",
+              "executionTime": "2026-10-30T15:16:34.94Z",
+              "units": 3.621089,
+              "contracts": 3.621089,
+              "avgPrice": 34.5,
+              "avgConversionRate": 1.0,
+              "marketSpread": 0.04,
+              "markup": 0.0,
+              "priceId": 0,
+              "fees": 0.0,
+              "taxes": 0.0
+            }
+          }
+        ],
+        "requestTime": "2026-10-30T15:16:34.893Z",
+        "lastUpdate": "2026-10-30T15:16:34.987Z",
+        "openActionType": "customer",
+        "requestType": "byAmount"
+      },
+      "elapsed_seconds": 0.7132153511047363
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_102"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373398.4024897,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07900571823120117
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_103"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373400.4827018,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.08090567588806152
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_104"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373402.5646505,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.69,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.14739775657653809
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_105"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373404.713075,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [
+            {
+              "positionID": "POSITION_2",
+              "CID": "ACCOUNT",
+              "openDateTime": "2026-10-30T15:16:34.94Z",
+              "openRate": 34.5,
+              "instrumentID": 1084,
+              "isBuy": true,
+              "takeProfitRate": 0.0,
+              "stopLossRate": 0.0001,
+              "mirrorID": 0,
+              "parentPositionID": 0,
+              "amount": 124.93,
+              "leverage": 1,
+              "orderID": "ORDER_3",
+              "orderType": 17,
+              "units": 3.621089,
+              "totalFees": 0.0,
+              "initialAmountInDollars": 124.93,
+              "isTslEnabled": false,
+              "stopLossVersion": 1,
+              "isSettled": true,
+              "redeemStatusID": 0,
+              "initialUnits": 3.621089,
+              "isPartiallyAltered": false,
+              "unitsBaseValueDollars": 124.93,
+              "isDiscounted": true,
+              "openPositionActionType": 0,
+              "settlementTypeID": 1,
+              "isDetached": false,
+              "openConversionRate": 1.0,
+              "pnlVersion": 1,
+              "totalExternalFees": 0.0,
+              "totalExternalTaxes": 0.0,
+              "isNoTakeProfit": true,
+              "isNoStopLoss": true,
+              "lotCount": 3.621089
+            }
+          ],
+          "mirrors": [],
+          "credit": 99879.76,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.28838253021240234
+    },
+    {
+      "method": "POST",
+      "path": "/api/v1/trading/execution/demo/market-close-orders/positions/POSITION_2",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_98",
+        "content-length": "50",
+        "content-type": "application/json"
+      },
+      "request": {
+        "InstrumentId": 1084,
+        "UnitsToDeduct": 1.8105445
+      },
+      "started": 1793373405.022141,
+      "status_code": 200,
+      "response": {
+        "orderForClose": {
+          "positionID": "POSITION_2",
+          "instrumentID": 1084,
+          "unitsToDeduct": 1.8105445,
+          "orderID": "ORDER_4",
+          "orderType": 19,
+          "statusID": 1,
+          "CID": "ACCOUNT",
+          "openDateTime": "2026-10-30T15:16:45.194627Z",
+          "lastUpdate": "2026-10-30T15:16:45.194627Z"
+        }
+      },
+      "elapsed_seconds": 0.29020071029663086
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/close-orders/ORDER_4",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_106"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373405.3130903,
+      "status_code": 404,
+      "response": "[REDACTED]",
+      "elapsed_seconds": 0.3062591552734375
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/close-orders/ORDER_4",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_107"
+      },
+      "request": "[REDACTED]",
+      "started": 1793373407.620668,
+      "status_code": 200,
+      "response": {
+        "orderID": "ORDER_4",
+        "CID": "ACCOUNT",
+        "statusID": 3,
+        "orderType": 19,
+        "closeActionType": 0,
+        "operationType": 2,
+        "errorCode": 0,
+        "assetCurrencyID": 1,
+        "accountCurrencyID": 1,
+        "instrumentID": 1084,
+        "requestOccurred": "2026-10-30T15:16:45.193Z",
+        "proceeds": 62.56,
+        "externalOperationType": 0,
+        "positions": [
+          {
+            "positionID": "POSITION_3",
+            "occurred": "2026-10-30T15:16:45.303Z",
+            "rate": 34.55,
+            "units": 1.810545,
+            "conversionRate": 1.0,
+            "amount": 62.47
+          },
+          {
+            "positionID": "POSITION_2"
+          }
+        ]
+      },
+      "elapsed_seconds": 0.28594398498535156
+    }
+  ]
+}

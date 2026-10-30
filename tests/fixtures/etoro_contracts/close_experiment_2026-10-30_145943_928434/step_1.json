@@ -1,0 +1,115 @@
+{
+  "step": 1,
+  "status": "fail",
+  "result": {
+    "error_type": "EtoroValidationError",
+    "error_message": "404 from /***REDACTED***: Order was not found for OrderID=ORDER_1 with RefereceID=***REDACTED***",
+    "status_code": 404
+  },
+  "calls": [
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/portfolio",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_2"
+      },
+      "request": "[REDACTED]",
+      "started": 1793372385.5234003,
+      "status_code": 200,
+      "response": {
+        "clientPortfolio": {
+          "positions": [],
+          "mirrors": [],
+          "credit": 100004.58,
+          "orders": [],
+          "stockOrders": [],
+          "entryOrders": [],
+          "exitOrders": [],
+          "ordersForOpen": [],
+          "ordersForClose": [],
+          "ordersForCloseMultiple": [],
+          "bonusCredit": 0.0
+        }
+      },
+      "elapsed_seconds": 0.07203507423400879
+    },
+    {
+      "method": "POST",
+      "path": "/api/v2/trading/execution/demo/orders",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_1",
+        "content-length": "163",
+        "content-type": "application/json"
+      },
+      "request": {
+        "action": "open",
+        "transaction": "buy",
+        "instrumentId": 1084,
+        "orderType": "mkt",
+        "leverage": 1,
+        "amount": 50.0,
+        "orderCurrency": "usd",
+        "settlementType": "real"
+      },
+      "started": 1793372385.6428103,
+      "status_code": 200,
+      "response": {
+        "orderId": "ORDER_1",
+        "referenceId": "REFERENCE_1"
+      },
+      "elapsed_seconds": 0.3685886859893799
+    },
+    {
+      "method": "GET",
+      "path": "/api/v2/trading/info/demo/orders:lookup",
+      "params": {
+        "orderId": "ORDER_1"
+      },
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_3"
+      },
+      "request": "[REDACTED]",
+      "started": 1793372386.0118837,
+      "status_code": 404,
+      "response": {
+        "message": "Order category for ORDER_1 not found"
+      },
+      "elapsed_seconds": 1.270491123199463
+    },
+    {
+      "method": "GET",
+      "path": "/api/v1/trading/info/demo/orders/ORDER_1",
+      "params": {},
+      "headers": {
+        "host": "public-api.etoro.com",
+        "accept": "*/*",
+        "accept-encoding": "gzip, deflate",
+        "connection": "keep-alive",
+        "user-agent": "python-httpx/0.27.2",
+        "x-request-id": "REFERENCE_4"
+      },
+      "request": "[REDACTED]",
+      "started": 1793372387.2852058,
+      "status_code": 404,
+      "response": "[REDACTED]",
+      "elapsed_seconds": 0.2746243476867676
+    }
+  ]
+}

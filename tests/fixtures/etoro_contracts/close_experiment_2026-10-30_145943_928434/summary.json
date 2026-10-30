@@ -1,0 +1,25 @@
+{
+  "requests": [
+    {
+      "request_id": "REFERENCE_1",
+      "purpose": "open",
+      "position_id": null,
+      "time": 1793372385.595731
+    }
+  ],
+  "steps": {
+    "1": {
+      "status": "fail",
+      "elapsed_seconds": 2.037456750869751
+    }
+  },
+  "opened": [],
+  "remaining_position_ids": [],
+  "unresolved_open_requests": [
+    "REFERENCE_1"
+  ],
+  "cleanup": {
+    "remaining_position_ids": [],
+    "errors": []
+  }
+}
