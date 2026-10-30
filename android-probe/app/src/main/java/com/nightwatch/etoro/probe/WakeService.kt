@@ -178,6 +178,14 @@ class WakeService : Service() {
                 store.log("SESSION_SKIPPED_HALT", "latched before Python session call")
                 return
             }
+            val battery = PowerStatus.batteryPercent(this)
+            val charging = PowerStatus.isCharging(this)
+            if (!PowerStatus.shouldRunSession(charging, battery)) {
+                val detail = "battery=$battery charging=$charging"
+                store.log("SESSION_SKIPPED_POWER", detail)
+                NotificationHelper.postFailure(this, "Nightwatch session skipped: low power", detail)
+                return
+            }
             val raw = PyBridge.runSessionDry(this, File(filesDir, "nightwatch_config").absolutePath)
             val parsed = JSONObject(raw)
             require(parsed.get("status") is String && parsed.get("armed") == false)

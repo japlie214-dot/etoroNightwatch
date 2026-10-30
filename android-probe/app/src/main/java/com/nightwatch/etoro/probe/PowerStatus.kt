@@ -37,10 +37,11 @@ object PowerStatus {
 
     fun isCharging(context: Context): Boolean {
         val bm = context.getSystemService(BatteryManager::class.java)
-        val status = bm.getIntProperty(BatteryManager.BATTERY_PROPERTY_STATUS)
-        return status == BatteryManager.BATTERY_STATUS_CHARGING ||
-            status == BatteryManager.BATTERY_STATUS_FULL
+        return bm.isCharging
     }
+
+    fun shouldRunSession(charging: Boolean, capacityPct: Int): Boolean =
+        charging || (capacityPct in 0..100 && capacityPct >= 30)
 
     /**
      * Task requirement 8: getAppStandbyBucket() is the single best early-warning signal for

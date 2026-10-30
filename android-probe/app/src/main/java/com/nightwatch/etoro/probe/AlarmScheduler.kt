@@ -66,87 +66,139 @@ object AlarmScheduler {
         )
     }
 
+    internal interface Effects {
+        val preferences: SharedPreferences
+        fun now(): Long
+        fun calendar(): Calendar
+        fun isHalted(): Boolean
+        fun reconcileHalt()
+        fun canSchedule(): Boolean
+        fun marketWake(): Long
+        fun setAlarm(triggerAtMillis: Long)
+        fun cancelAlarm()
+        fun log(event: String, detail: String)
+        fun failure(title: String, detail: String)
+    }
+
+    private class AndroidEffects(private val context: Context) : Effects {
+        override val preferences: SharedPreferences get() = prefs(context)
+        override fun now() = System.currentTimeMillis()
+        override fun calendar(): Calendar = Calendar.getInstance()
+        override fun isHalted() = HaltFlag.isHalted(context)
+        override fun reconcileHalt() = HaltFlag.reconcile(context)
+        override fun canSchedule() = PowerStatus.canScheduleExactAlarms(context)
+        override fun marketWake() = PyBridge.nextSessionWakeEpochMs(context)
+        override fun setAlarm(triggerAtMillis: Long) {
+            val am = context.getSystemService(AlarmManager::class.java)
+            am.setAlarmClock(AlarmManager.AlarmClockInfo(triggerAtMillis, showIntent(context)), pendingIntent(context))
+        }
+        override fun cancelAlarm() {
+            context.getSystemService(AlarmManager::class.java).cancel(pendingIntent(context))
+        }
+        override fun log(event: String, detail: String) = EventStore.get(context).log(event, detail)
+        override fun failure(title: String, detail: String) = NotificationHelper.postFailure(context, title, detail)
+    }
+
+    fun scheduleInMinutes(context: Context, minutes: Int): Long? =
+        scheduleInMinutes(AndroidEffects(context), minutes)
+
+    fun scheduleNightly(
+        context: Context, hour: Int, minute: Int, days: Set<Int> = DEFAULT_DAYS,
+        allowed: () -> Boolean = { true }
+    ): Long? = scheduleNightly(AndroidEffects(context), hour, minute, days, allowed)
+
+    fun scheduleAbsolute(context: Context, epochMillis: Long): Long? =
+        scheduleAbsolute(AndroidEffects(context), epochMillis)
+
+    fun scheduleMarket(context: Context, allowed: () -> Boolean = { true }): Long? =
+        scheduleMarket(AndroidEffects(context), allowed)
+
+    fun rescheduleFromSavedState(context: Context, allowed: () -> Boolean = { true }): Long? =
+        rescheduleFromSavedState(AndroidEffects(context), allowed)
+
+    fun cancel(context: Context) = cancel(AndroidEffects(context))
+
     /** Schedules a one-off test alarm N minutes from now. */
     @Synchronized
-    fun scheduleInMinutes(context: Context, minutes: Int): Long? {
-        cancel(context)
-        prefs(context).edit().putString(KEY_MODE, "minutes").apply()
-        val triggerAt = System.currentTimeMillis() + minutes * 60_000L
-        return schedule(context, triggerAt)
+    internal fun scheduleInMinutes(effects: Effects, minutes: Int): Long? {
+        cancel(effects)
+        effects.preferences.edit().putString(KEY_MODE, "minutes").apply()
+        val triggerAt = effects.now() + minutes * 60_000L
+        return schedule(effects, triggerAt)
     }
 
     /** Schedules (or reschedules) the next occurrence of a device-local HH:mm on the given
      * weekdays (Calendar.MONDAY..SUNDAY). */
     @Synchronized
-    fun scheduleNightly(
-        context: Context, hour: Int, minute: Int, days: Set<Int> = DEFAULT_DAYS,
+    internal fun scheduleNightly(
+        effects: Effects, hour: Int, minute: Int, days: Set<Int> = DEFAULT_DAYS,
         allowed: () -> Boolean = { true }
     ): Long? {
         if (!allowed()) return null
-        cancel(context)
+        cancel(effects)
         val effectiveDays = if (days.isEmpty()) DEFAULT_DAYS else days
-        prefs(context).edit()
+        effects.preferences.edit()
             .putString(KEY_MODE, "nightly")
             .putInt(KEY_NIGHTLY_HOUR, hour)
             .putInt(KEY_NIGHTLY_MINUTE, minute)
             .putString(KEY_NIGHTLY_DAYS, effectiveDays.joinToString(","))
             .apply()
-        val triggerAt = nextOccurrence(hour, minute, effectiveDays)
-        return schedule(context, triggerAt, allowed)
+        val triggerAt = nextOccurrence(effects, hour, minute, effectiveDays)
+        return schedule(effects, triggerAt, allowed)
     }
 
     /** Remote `schedule <iso8601>` command (Problem 3): sets the very next alarm to an explicit
      * instant, independent of the nightly HH:mm/day pattern. The nightly pattern (if any) resumes
      * on the following reschedule. */
     @Synchronized
-    fun scheduleAbsolute(context: Context, epochMillis: Long): Long? {
-        cancel(context)
-        prefs(context).edit().putString(KEY_MODE, "absolute").apply()
-        return schedule(context, epochMillis)
+    internal fun scheduleAbsolute(effects: Effects, epochMillis: Long): Long? {
+        cancel(effects)
+        effects.preferences.edit().putString(KEY_MODE, "absolute").apply()
+        return schedule(effects, epochMillis)
     }
 
     /** Background callers only. The 55-minute lead is a margin, not a delivery/network guarantee. */
-    fun scheduleMarket(context: Context, allowed: () -> Boolean = { true }): Long? {
+    internal fun scheduleMarket(effects: Effects, allowed: () -> Boolean = { true }): Long? {
         try {
             val request = synchronized(this) {
                 if (!allowed()) return null
-                cancel(context)
-                prefs(context).edit().putString(KEY_MODE, "market").apply()
-                if (suppressedByHalt(context)) return null
+                cancel(effects)
+                effects.preferences.edit().putString(KEY_MODE, "market").apply()
+                if (suppressedByHalt(effects)) return null
                 generation
             }
             val triggerAt = try {
-                PyBridge.nextSessionWakeEpochMs(context)
+                effects.marketWake()
             } catch (e: Exception) {
-                EventStore.get(context).log("ALARM_MARKET_COMPUTE_FAILED", "error=${e.javaClass.simpleName}")
-                NotificationHelper.postFailure(context, "Market alarm not scheduled", e.javaClass.simpleName)
+                effects.log("ALARM_MARKET_COMPUTE_FAILED", "error=${e.javaClass.simpleName}")
+                effects.failure("Market alarm not scheduled", e.javaClass.simpleName)
                 return null
             }
             return synchronized(this) {
                 // Chaquopy is synchronous: an expired receiver must never register its late result.
                 if (!allowed() || request != generation) return null
-                schedule(context, triggerAt, allowed)
+                schedule(effects, triggerAt, allowed)
             }
         } catch (e: Exception) {
-            EventStore.get(context).log("ALARM_MARKET_SCHEDULE_FAILED", "error=${e.javaClass.simpleName}")
-            NotificationHelper.postFailure(context, "Market alarm not scheduled", e.javaClass.simpleName)
+            effects.log("ALARM_MARKET_SCHEDULE_FAILED", "error=${e.javaClass.simpleName}")
+            effects.failure("Market alarm not scheduled", e.javaClass.simpleName)
             return null
         }
     }
 
     /** Called on an IO worker after every alarm fire and on receiver recovery. */
-    fun rescheduleFromSavedState(context: Context, allowed: () -> Boolean = { true }): Long? {
+    internal fun rescheduleFromSavedState(effects: Effects, allowed: () -> Boolean = { true }): Long? {
         if (!allowed()) return null
-        if (suppressedByHalt(context)) return null
-        val p = prefs(context)
+        if (suppressedByHalt(effects)) return null
+        val p = effects.preferences
         return when (p.getString(KEY_MODE, null)) {
-            "market" -> scheduleMarket(context, allowed)
+            "market" -> scheduleMarket(effects, allowed)
             "nightly" -> synchronized(this) {
                 if (!allowed()) return null
                 val h = p.getInt(KEY_NIGHTLY_HOUR, 2)
                 val m = p.getInt(KEY_NIGHTLY_MINUTE, 30)
                 val days = parseDays(p.getString(KEY_NIGHTLY_DAYS, null))
-                scheduleNightly(context, h, m, days, allowed)
+                scheduleNightly(effects, h, m, days, allowed)
             }
             "minutes", "absolute" -> {
                 // No sensible "repeat" semantics for a one-off alarm after a reboot; the real
@@ -178,13 +230,13 @@ object AlarmScheduler {
         return raw.split(",").mapNotNull { it.trim().toIntOrNull() }.toSet().ifEmpty { DEFAULT_DAYS }
     }
 
-    private fun nextOccurrence(hour: Int, minute: Int, days: Set<Int>): Long {
-        val cal = Calendar.getInstance()
+    private fun nextOccurrence(effects: Effects, hour: Int, minute: Int, days: Set<Int>): Long {
+        val cal = effects.calendar()
         cal.set(Calendar.HOUR_OF_DAY, hour)
         cal.set(Calendar.MINUTE, minute)
         cal.set(Calendar.SECOND, 0)
         cal.set(Calendar.MILLISECOND, 0)
-        if (cal.timeInMillis <= System.currentTimeMillis()) {
+        if (cal.timeInMillis <= effects.now()) {
             cal.add(Calendar.DAY_OF_YEAR, 1)
         }
         // Walk forward at most 7 days to find a matching weekday.
@@ -196,11 +248,16 @@ object AlarmScheduler {
     }
 
     @Synchronized
-    private fun suppressedByHalt(context: Context): Boolean {
-        if (!HaltFlag.isHalted(context)) return false
-        cancel(context)
-        EventStore.get(context).log("ALARM_SUPPRESSED_HALT", "sessions stopped until resume")
+    private fun suppressedByHalt(effects: Effects): Boolean {
+        if (!effects.isHalted()) return false
+        cancel(effects)
+        effects.log("ALARM_SUPPRESSED_HALT", "sessions stopped until resume")
         return true
+    }
+
+    internal fun recover(effects: Effects, allowed: () -> Boolean = { true }): Long? {
+        effects.reconcileHalt()
+        return rescheduleFromSavedState(effects, allowed)
     }
 
     /** Finish receivers within eight seconds even if the synchronous Python worker is stuck. */
@@ -210,8 +267,7 @@ object AlarmScheduler {
         val finished = AtomicBoolean(false)
         CoroutineScope(Dispatchers.Default).launch {
             val worker = CoroutineScope(Dispatchers.IO).async {
-                HaltFlag.reconcile(app)
-                rescheduleFromSavedState(app) {
+                recover(AndroidEffects(app)) {
                     !finished.get() && SystemClock.elapsedRealtime() < deadline
                 }
             }
@@ -234,39 +290,35 @@ object AlarmScheduler {
         }
     }
 
-    private fun schedule(context: Context, triggerAtMillis: Long, allowed: () -> Boolean = { true }): Long? {
-        if (suppressedByHalt(context)) return null
-        prefs(context).edit().remove(KEY_MARKET_NEXT).remove(KEY_NEXT).apply()
-        val am = context.getSystemService(AlarmManager::class.java)
-        if (!PowerStatus.canScheduleExactAlarms(context)) {
+    private fun schedule(effects: Effects, triggerAtMillis: Long, allowed: () -> Boolean = { true }): Long? {
+        if (suppressedByHalt(effects)) return null
+        effects.preferences.edit().remove(KEY_MARKET_NEXT).remove(KEY_NEXT).apply()
+        if (!effects.canSchedule()) {
             // Never silently downgrade to an inexact alarm (DESIGN §7.2) — log loudly instead.
-            EventStore.get(context).log(
+            effects.log(
                 "ALARM_SCHEDULE_DENIED",
                 "canScheduleExactAlarms()=false; requested trigger at $triggerAtMillis was NOT set"
             )
-            NotificationHelper.postFailure(
-                context,
+            effects.failure(
                 "Cannot schedule alarm",
                 "SCHEDULE_EXACT_ALARM permission is not granted"
             )
             return null
         }
         try {
-            val info = AlarmManager.AlarmClockInfo(triggerAtMillis, showIntent(context))
-            val alarm = pendingIntent(context)
             if (!allowed()) return null
-            am.setAlarmClock(info, alarm)
+            effects.setAlarm(triggerAtMillis)
         } catch (e: SecurityException) {
-            EventStore.get(context).log("ALARM_SCHEDULE_DENIED", "error=${e.javaClass.simpleName}")
-            NotificationHelper.postFailure(context, "Alarm not scheduled", "Exact-alarm permission denied")
+            effects.log("ALARM_SCHEDULE_DENIED", "error=${e.javaClass.simpleName}")
+            effects.failure("Alarm not scheduled", "Exact-alarm permission denied")
             return null
         }
-        val editor = prefs(context).edit().putLong(KEY_NEXT, triggerAtMillis)
-        if (prefs(context).getString(KEY_MODE, null) == "market") {
+        val editor = effects.preferences.edit().putLong(KEY_NEXT, triggerAtMillis)
+        if (effects.preferences.getString(KEY_MODE, null) == "market") {
             editor.putLong(KEY_MARKET_NEXT, triggerAtMillis)
         }
         editor.apply()
-        EventStore.get(context).log(
+        effects.log(
             "ALARM_SCHEDULED",
             "next fire at epoch $triggerAtMillis (${java.util.Date(triggerAtMillis)})"
         )
@@ -274,10 +326,9 @@ object AlarmScheduler {
     }
 
     @Synchronized
-    fun cancel(context: Context) {
+    internal fun cancel(effects: Effects) {
         generation++
-        prefs(context).edit().remove(KEY_MARKET_NEXT).remove(KEY_NEXT).apply()
-        val am = context.getSystemService(AlarmManager::class.java)
-        am.cancel(pendingIntent(context))
+        effects.preferences.edit().remove(KEY_MARKET_NEXT).remove(KEY_NEXT).apply()
+        effects.cancelAlarm()
     }
 }

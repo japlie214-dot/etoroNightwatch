@@ -112,53 +112,10 @@ object CommandHandler {
                 NotificationHelper.post(context, "Nightwatch: run_session", "Redundant cron trigger handled")
             }
 
-            "halt" -> {
-                synchronized(AlarmScheduler) {
-                    HaltFlag.set(context, true)
-                    try {
-                        val file = HaltFlag.file(context)
-                        file.parentFile?.mkdirs()
-                        file.writeText("kotlin halt command ${Instant.now()}")
-                        store.log("COMMAND_HALT", "HALT file created; latch set")
-                    } catch (e: Exception) {
-                        store.log("COMMAND_HALT_FAILED", "file error=${e.javaClass.simpleName}; latch remains set")
-                        NotificationHelper.postFailure(context, "HALT file sync failed", e.javaClass.simpleName)
-                    } finally {
-                        try {
-                            AlarmScheduler.cancel(context)
-                        } catch (e: Exception) {
-                            store.log("COMMAND_HALT_CANCEL_FAILED", "error=${e.javaClass.simpleName}")
-                            NotificationHelper.postFailure(context, "HALT alarm cancellation failed", e.javaClass.simpleName)
-                        } finally {
-                            NotificationHelper.postOngoingHalt(context)
-                        }
-                    }
-                }
-            }
+            "halt" -> halt(HaltFlag.AndroidEffects(context))
 
             "resume" -> {
-                val resumed = synchronized(AlarmScheduler) {
-                    try {
-                        val file = HaltFlag.file(context)
-                        check(!file.exists() || file.delete()) { "HALT delete failed" }
-                        check(!file.exists()) { "HALT still present" }
-                        HaltFlag.set(context, false)
-                        NotificationHelper.clearOngoingHalt(context)
-                        store.log("COMMAND_RESUME", "HALT file absent; latch and notification cleared")
-                        true
-                    } catch (e: Exception) {
-                        HaltFlag.set(context, true)
-                        store.log("COMMAND_RESUME_FAILED", "error=${e.javaClass.simpleName}; latch remains set")
-                        try {
-                            AlarmScheduler.cancel(context)
-                        } catch (cancelError: Exception) {
-                            store.log("COMMAND_RESUME_CANCEL_FAILED", "error=${cancelError.javaClass.simpleName}")
-                        }
-                        NotificationHelper.postOngoingHalt(context)
-                        NotificationHelper.postFailure(context, "resume failed", e.javaClass.simpleName)
-                        false
-                    }
-                }
+                val resumed = resume(HaltFlag.AndroidEffects(context))
                 if (resumed) {
                     try {
                         val next = runBlocking(Dispatchers.IO) { AlarmScheduler.rescheduleFromSavedState(context) }
@@ -184,6 +141,50 @@ object CommandHandler {
             }
         }
     }
+
+    internal fun halt(effects: HaltFlag.Effects) {
+        synchronized(AlarmScheduler) {
+            effects.setHalted(true)
+            try {
+                effects.createFile()
+                effects.log("COMMAND_HALT", "HALT file created; latch set")
+            } catch (e: Exception) {
+                effects.log("COMMAND_HALT_FAILED", "file error=${e.javaClass.simpleName}; latch remains set")
+                effects.failure("HALT file sync failed", e.javaClass.simpleName)
+            } finally {
+                try {
+                    effects.cancelAlarm()
+                } catch (e: Exception) {
+                    effects.log("COMMAND_HALT_CANCEL_FAILED", "error=${e.javaClass.simpleName}")
+                    effects.failure("HALT alarm cancellation failed", e.javaClass.simpleName)
+                } finally {
+                    effects.postHalt()
+                }
+            }
+        }
+    }
+
+    internal fun resume(effects: HaltFlag.Effects): Boolean = synchronized(AlarmScheduler) {
+        try {
+            check(!effects.fileExists() || effects.deleteFile()) { "HALT delete failed" }
+            check(!effects.fileExists()) { "HALT still present" }
+            effects.setHalted(false)
+            effects.clearHalt()
+            effects.log("COMMAND_RESUME", "HALT file absent; latch and notification cleared")
+            true
+        } catch (e: Exception) {
+            effects.setHalted(true)
+            effects.log("COMMAND_RESUME_FAILED", "error=${e.javaClass.simpleName}; latch remains set")
+            try {
+                effects.cancelAlarm()
+            } catch (cancelError: Exception) {
+                effects.log("COMMAND_RESUME_CANCEL_FAILED", "error=${cancelError.javaClass.simpleName}")
+            }
+            effects.postHalt()
+            effects.failure("resume failed", e.javaClass.simpleName)
+            false
+        }
+    }
 }
 
 /** Resume-only latch; a missing Python HALT file never clears it. */
@@ -193,20 +194,52 @@ object HaltFlag {
 
     fun file(context: Context): File = File(context.filesDir, "nightwatch_config/HALT")
 
-    fun reconcile(context: Context) {
+    internal interface Effects {
+        fun fileExists(): Boolean
+        fun createFile()
+        fun deleteFile(): Boolean
+        fun setHalted(halted: Boolean)
+        fun isHalted(): Boolean
+        fun cancelAlarm()
+        fun postHalt()
+        fun clearHalt()
+        fun log(event: String, detail: String)
+        fun failure(title: String, detail: String)
+    }
+
+    internal class AndroidEffects(private val context: Context) : Effects {
+        override fun fileExists() = file(context).exists()
+        override fun createFile() {
+            val file = file(context)
+            file.parentFile?.mkdirs()
+            file.writeText("kotlin halt command ${Instant.now()}")
+        }
+        override fun deleteFile() = file(context).delete()
+        override fun setHalted(halted: Boolean) = set(context, halted)
+        override fun isHalted() = HaltFlag.isHalted(context)
+        override fun cancelAlarm() = AlarmScheduler.cancel(context)
+        override fun postHalt() = NotificationHelper.postOngoingHalt(context)
+        override fun clearHalt() = NotificationHelper.clearOngoingHalt(context)
+        override fun log(event: String, detail: String) = EventStore.get(context).log(event, detail)
+        override fun failure(title: String, detail: String) = NotificationHelper.postFailure(context, title, detail)
+    }
+
+    fun reconcile(context: Context) = reconcile(AndroidEffects(context))
+
+    internal fun reconcile(effects: Effects) {
         synchronized(AlarmScheduler) {
             try {
-                if (file(context).exists()) set(context, true)
+                if (effects.fileExists()) effects.setHalted(true)
             } catch (e: Exception) {
-                set(context, true)
-                EventStore.get(context).log("HALT_RECONCILE_FAILED", "error=${e.javaClass.simpleName}")
-                NotificationHelper.postFailure(context, "HALT check failed", e.javaClass.simpleName)
+                effects.setHalted(true)
+                effects.log("HALT_RECONCILE_FAILED", "error=${e.javaClass.simpleName}")
+                effects.failure("HALT check failed", e.javaClass.simpleName)
             }
-            if (isHalted(context)) {
+            if (effects.isHalted()) {
                 try {
-                    AlarmScheduler.cancel(context)
+                    effects.cancelAlarm()
                 } finally {
-                    NotificationHelper.postOngoingHalt(context)
+                    effects.postHalt()
                 }
             }
         }
