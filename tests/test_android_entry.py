@@ -7,6 +7,7 @@ from pathlib import Path
 import subprocess
 import sys
 import threading
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -185,8 +186,14 @@ with _session_lock(Path(sys.argv[1])) as acquired:
             assert not acquired
         child.kill()
         child.wait(timeout=10)
-        with entry._session_lock(path) as acquired:
-            assert acquired
+        # Windows signals process exit slightly before it tears down the dead process's handles.
+        deadline = time.monotonic() + 10
+        while True:
+            with entry._session_lock(path) as acquired:
+                if acquired or time.monotonic() > deadline:
+                    break
+            time.sleep(0.05)
+        assert acquired
         assert path.is_file()
     finally:
         if child.poll() is None:

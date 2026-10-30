@@ -271,7 +271,7 @@ def test_close_position_accepts_units_to_deduct_for_a_partial_close() -> None:
 
 
 # ===========================================================================
-# clear_take_profit: demo-only, asynchronous, never retried (T012)
+# clear_take_profit: asynchronous, never retried (T012)
 # ===========================================================================
 
 
