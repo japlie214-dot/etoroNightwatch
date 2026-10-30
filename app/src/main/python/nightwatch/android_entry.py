@@ -59,6 +59,7 @@ def _session_lock(path: Path):
 _STATUSES = frozenset({
     "would_have_done", "already_ran", "preflight_failed", "rerun_failed",
     "signal_failed", "decide_failed", "refused_armed",
+    "market_data_failed", "aborted_before_orders",
 })
 
 

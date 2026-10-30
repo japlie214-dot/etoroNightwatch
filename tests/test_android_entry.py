@@ -452,3 +452,41 @@ def test_halt_existence_error_falls_back_false(wired, monkeypatch):
     result = json.loads(entry.run_session_dry(str(host.root), now_utc=NOW))
     assert result["halt"] is False and result["armed"] is False
     assert MARKER not in json.dumps(result)
+
+
+@pytest.mark.parametrize("status", ["market_data_failed", "aborted_before_orders"])
+def test_real_engine_preorder_abort_then_previous_unfinished(config_path, host, monkeypatch, status):
+    from nightwatch.etoro.errors import EtoroNetworkError
+    from nightwatch.notify import poll
+
+    client = MarketClient()
+    client.close = lambda: None
+    monkeypatch.setattr(entry, "EtoroClient", lambda *a, **k: client)
+    monkeypatch.setattr(entry, "TiingoClient", lambda c: FakeTiingo())
+    monkeypatch.setattr(DesktopHost, "now", lambda self: NOW)
+    monkeypatch.setattr(session, "build_preflight_gates", lambda **k: [
+        GateSpec(n, f"gate_{n}", lambda n=n: GateResult(n, f"gate_{n}", True, "ok"))
+        for n in range(1, 13)
+    ])
+    monkeypatch.setattr(session, "gate_10_price_data", lambda **k: GateResult(10, "price_data", True, "ok"))
+    monkeypatch.setattr(session, "assemble_spy_signal", lambda *a, **k: assembled_signal())
+    monkeypatch.setattr(poll, "process_pending", lambda *a: None)
+    if status == "market_data_failed":
+        def fail(*a, **k):
+            raise EtoroNetworkError("offline")
+        monkeypatch.setattr(session, "fetch_market_inputs", fail)
+        monkeypatch.setattr(entry, "run_session", lambda **kw: session.run_session(**kw, sleep_until=lambda _: None))
+    else:
+        def fail(*a, **k):
+            raise RuntimeError("offline persistence failure")
+        monkeypatch.setattr(Repo, "record_price_window_fingerprint", fail)
+    first = invoke(host)
+    assert first["status"] == first["reason_code"] == status
+    assert first["failed_gate"] == (10 if status == "market_data_failed" else None)
+    assert first["error_type"] is None
+    with Repo.open(default_db_path(host), host=host) as repo:
+        row = repo.get_session(first["session_id"])
+        assert row.state == "aborted" and row.finished_at is not None
+        assert repo.get_intents(row.id) == []
+    second = invoke(host)
+    assert second["status"] == "previous_unfinished" and second["session_id"] == first["session_id"]

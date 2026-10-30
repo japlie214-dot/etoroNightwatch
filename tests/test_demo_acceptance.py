@@ -429,7 +429,8 @@ def test_failures_are_nonzero_cleaned_and_minimal_after_possible_sends(harness, 
     text = (evidence / "result.json").read_text()
     assert "private-error" not in text and "secret" not in text and "bot123" not in text
     result = json.loads(text)
-    assert result["orders_may_have_been_sent"] == (failure in ("session", "export", "sanitizer", "write", "cleanup"))
+    assert result["orders_may_have_been_sent"] == (failure in ("export", "sanitizer", "write", "cleanup"))
+    assert result["exception_type"] == "RuntimeError"
     if failure in ("export", "sanitizer", "write", "cleanup"):
         assert len(calls) == 1  # Never retry a possibly completed session.
         assert result["status"] == "executed"
@@ -590,3 +591,112 @@ def test_qa_encoded_identifier_label_discovers_unlabelled_earlier_value(depth):
     clean = sanitizer.sanitize(bundle)
     assert clean["first"]["reason"] == "[REDACTED]"
     assert "synthetic-user-5678" not in json.dumps(clean)
+
+
+@pytest.mark.parametrize("status", ["market_data_failed", "aborted_before_orders"])
+@pytest.mark.parametrize("sent", [False, True])
+def test_returned_abort_status_has_db_derived_send_risk(harness, monkeypatch, status, sent):
+    fake_session(harness, monkeypatch, status=status, snapshot=False, intents=sent)
+    assert acceptance.main(harness.args) == 1
+    result = read_result(harness)
+    assert result["status"] == status
+    assert result["orders_may_have_been_sent"] is sent
+    assert "exception_type" not in result and "exception_message" not in result
+
+
+@pytest.mark.parametrize("sent", [False, True])
+@pytest.mark.parametrize("sanitize_failure", [None, "construct", "discover", "sanitize"])
+def test_exception_evidence_config_discovery_or_message_omission(harness, monkeypatch, sent, sanitize_failure):
+    planted = "short-runtime-secret"
+    cfg = replace(harness.config, etoro=replace(harness.config.etoro,
+                                                secrets={"ETORO_PUBLIC_KEY": planted}))
+    monkeypatch.setattr(acceptance, "load_config", lambda **kw: cfg)
+    def run(**kwargs):
+        session_rows(kwargs["repo"], snapshot=False, intents=sent)
+        raise RuntimeError("offline " + planted)
+    monkeypatch.setattr(acceptance, "run_session", run)
+    if sanitize_failure:
+        def fail(*a, **k):
+            raise ValueError("sanitizer failed")
+        if sanitize_failure == "construct":
+            monkeypatch.setattr(acceptance, "Sanitizer", fail)
+        else:
+            monkeypatch.setattr(acceptance.Sanitizer, sanitize_failure, fail)
+    assert acceptance.main(harness.args) == 1
+    result = read_result(harness)
+    assert result["exception_type"] == "RuntimeError"
+    assert result["orders_may_have_been_sent"] is sent
+    if sanitize_failure:
+        assert "exception_message" not in result
+    else:
+        assert result["exception_message"] == "offline [REDACTED]"
+    assert planted not in json.dumps(result)
+
+
+@pytest.mark.parametrize("case,expected", [("missing", True), ("malformed", True),
+                                         ("no_tables", True), ("locked", True), ("empty", False),
+                                         ("intents", True), ("orders", True), ("tp_clears", True)])
+def test_send_risk_reads_only_raw_sqlite_and_closes(tmp_path, monkeypatch, case, expected):
+    import sqlite3
+
+    run_dir = tmp_path / "run"
+    db = run_dir / "home" / "data" / "nightwatch.db"
+    db.parent.mkdir(parents=True)
+    lock = None
+    if case == "malformed":
+        db.write_bytes(b"not a database")
+    elif case != "missing":
+        conn = sqlite3.connect(db)
+        try:
+            if case != "no_tables":
+                for table in ("intents", "orders", "tp_clears"):
+                    conn.execute(f"CREATE TABLE {table} (id INTEGER)")
+                if case in ("intents", "orders", "tp_clears"):
+                    conn.execute(f"INSERT INTO {case} VALUES (1)")
+            conn.commit()
+        finally:
+            conn.close()
+        if case == "locked":
+            lock = sqlite3.connect(db)
+            lock.execute("BEGIN EXCLUSIVE")
+    original = sqlite3.connect
+    opened = []
+    def connect(database, **kwargs):
+        assert database == db.resolve().as_uri() + "?mode=ro"
+        assert kwargs == {"uri": True}
+        conn = original(database, timeout=0.01, **kwargs)
+        opened.append(conn)
+        return conn
+    monkeypatch.setattr(acceptance.sqlite3, "connect", connect)
+    monkeypatch.setattr(acceptance.Repo, "open", forbidden)
+    try:
+        assert acceptance.orders_may_have_been_sent(run_dir, started=True) is expected
+    finally:
+        if lock is not None:
+            lock.close()
+    assert len(opened) == (0 if case == "missing" else 1)
+    for conn in opened:
+        with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+            conn.execute("SELECT 1")
+    if case == "missing":
+        assert not db.exists()
+    if case == "malformed":
+        assert db.read_bytes() == b"not a database"
+
+
+def test_not_started_does_not_open_db(monkeypatch):
+    monkeypatch.setattr(acceptance.sqlite3, "connect", forbidden)
+    assert acceptance.orders_may_have_been_sent(None, started=False) is False
+
+
+def test_send_risk_reads_committed_wal(tmp_path):
+    from nightwatch.db.repo import Intent
+
+    run_dir = tmp_path / "run"
+    host = DesktopHost(run_dir / "home")
+    with Repo.open(host.data_dir() / "nightwatch.db", host=host) as repo:
+        assert acceptance.orders_may_have_been_sent(run_dir, started=True) is False
+        row = repo.create_session("2026-10-26", "live", "demo", True)
+        repo.insert_intent(Intent(row.id, "synthetic-request", 1, "SCHG", "buy"))
+        assert Path(str(host.data_dir() / "nightwatch.db") + "-wal").is_file()
+        assert acceptance.orders_may_have_been_sent(run_dir, started=True) is True

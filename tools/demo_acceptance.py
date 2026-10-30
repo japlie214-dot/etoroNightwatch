@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from dataclasses import asdict, is_dataclass
 from datetime import date, datetime, timezone
 import json
@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import sqlite3
 import sys
 import tomllib
 from urllib.parse import unquote
@@ -282,11 +283,33 @@ def write_bundle(run_dir, bundle, config):
         raise
 
 
-def minimal_failure(run_dir, *, code, status, started, reason):
-    # Never rely on the failed sanitizer, exception text, config or DB for this record.
+def orders_may_have_been_sent(run_dir, *, started):
+    if not started:
+        return False
+    try:
+        db = fresh_home_for(run_dir) / "data" / "nightwatch.db"
+        with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True)) as conn:
+            counts = [conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+                      for table in ("intents", "orders", "tp_clears")]
+        return any(count > 0 for count in counts)
+    except Exception:
+        return True
+
+
+def minimal_failure(run_dir, *, code, status, started, reason, exc, config):
     record = {"status": status if status in ("executed", "would_have_done", "executed_partial") else None,
               "session_id": None, "failed_gate": None, "reason": reason, "exit_code": code,
-              "orders_may_have_been_sent": started, "warning": WARNING}
+              "orders_may_have_been_sent": orders_may_have_been_sent(run_dir, started=started),
+              "exception_type": type(exc).__name__, "warning": WARNING}
+    try:
+        if config is not None:
+            sanitizer = Sanitizer()
+            sanitizer.discover(sanitizer.decode(config))
+            message = str(exc)
+            sanitizer.discover(message)
+            record["exception_message"] = sanitizer.sanitize(message)
+    except Exception:
+        pass  # Never let arbitrary text escape when discovery or sanitization fails.
     text = json.dumps(record, indent=2) + "\n"
     print(text, end="")
     if run_dir is not None:
@@ -356,6 +379,7 @@ def main(argv=None):
     created = None
     started = False
     status = None
+    config = None
     try:
         if run_dir.exists():
             raise Refusal("acceptance refused: run dir exists")
@@ -422,6 +446,8 @@ def main(argv=None):
                                  "snapshot": bool(tables["portfolio_snapshots"])},
                              "working_home_is_not_evidence": True, "inbound_commands_excluded": True},
             }
+        if code:
+            bundle["result"]["orders_may_have_been_sent"] = orders_may_have_been_sent(created, started=started)
         write_bundle(run_dir, bundle, config)
         print(f"Acceptance exit code: {code}; evidence: {run_dir / 'evidence'}")
         return code
@@ -430,7 +456,8 @@ def main(argv=None):
         # Refusal messages are fixed local literals; arbitrary exception details never escape.
         reason = str(exc) if isinstance(exc, Refusal) else "acceptance failed; inspect working DB locally before any rerun"
         try:
-            minimal_failure(created, code=code, status=status, started=started, reason=reason)
+            minimal_failure(created, code=code, status=status, started=started, reason=reason,
+                            exc=exc, config=config)
         except Exception:
             print("acceptance failed: minimal evidence write failed", file=sys.stderr)
         return code
