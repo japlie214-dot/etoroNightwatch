@@ -265,7 +265,7 @@ def test_non_executable_intents_refused(armed, repo, intent):
     armed.decision.intents = [BUY, intent]
     result = armed.run()
     assert result.status == "armed_refused_intents"
-    assert "armed: unsupported intents (SCHG sells unsupported in S7-3b):" in result.reason
+    assert "armed: unsupported intents:" in result.reason
     armed.execute.assert_not_called()
     armed.save.assert_not_called()
     assert repo.latest_snapshot().raw["phase"] == "post_execution"

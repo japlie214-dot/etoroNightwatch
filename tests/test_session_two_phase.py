@@ -560,3 +560,249 @@ def test_confirmed_position_is_applied_before_decide_and_retry_halts_without_sen
     two.client.open_position.assert_not_called()
     assert repo.get_strategy_state().recyclable_cash == 123.45
     two.save.assert_not_called()
+
+
+SELL = LadderIntent("SCHG", "close", amount=100, reason="fund ladder buy")
+
+
+@pytest.fixture
+def schg(two, repo, host, monkeypatch):
+    from nightwatch.engine.close_executor import execute_schg_sell
+    from nightwatch.etoro.models import OrderResult, OrderStatus
+
+    e = two
+    e.positions.append(position("s", "SCHG", units=4))
+    repo.insert_lot_annotation(replace(annotation("s"), symbol="SCHG"))
+    e.decision.intents = [CLOSE, SELL, BUY]
+    e.clock = host.now()
+    monkeypatch.setattr(host, "now", lambda: e.clock)
+    e.schg_status = OrderStatus.FILLED
+
+    def sleep(seconds):
+        assert seconds > 0
+        e.clock += timedelta(seconds=seconds)
+
+    def close(request, pid, iid, deducted=None):
+        e.calls.append("schg_send")
+        p = next(p for p in e.positions if p.position_id == pid)
+        e.positions = [p for p in e.positions if p.position_id != pid]
+        if deducted is not None:
+            e.positions.append(replace(p, units=p.units - deducted))
+        e.last_schg = (pid, p.units if deducted is None else deducted, deducted is not None)
+        return "schg-order"
+
+    def lookup(order_id, **kwargs):
+        pid, units, partial = e.last_schg
+        return OrderResult(order_id, None, e.schg_status, position_id=pid, fill_units=units,
+                           raw={"positions": ([{"positionID": "slice"}, {"positionID": pid}]
+                                              if partial else [{"positionID": pid}])})
+
+    e.client.close_position.side_effect = close
+    e.client.lookup_close_order = Mock(side_effect=lookup)
+
+    def execute(**kwargs):
+        e.calls.append("schg")
+        return execute_schg_sell(**kwargs, sleep=sleep)
+
+    e.schg = Mock(side_effect=execute)
+    monkeypatch.setattr(session, "execute_schg_sell", e.schg)
+    return e
+
+
+@pytest.mark.parametrize("upro", [False, True])
+@pytest.mark.parametrize("price", [None, 80])
+def test_schg_real_executor_sequence_cash_and_saves(schg, repo, monkeypatch, upro, price):
+    if not upro:
+        schg.decision.intents = [SELL, BUY]
+        schg.decision.new_state = replace(schg.decision.new_state, recyclable_cash=0)
+    build = session.build_ladder_inputs
+
+    def inputs(**kwargs):
+        value, notes = build(**kwargs)
+        return replace(value, schg_price=price), notes
+
+    monkeypatch.setattr(session, "build_ladder_inputs", inputs)
+    limits = Mock(wraps=session.apply_submission_limits)
+    monkeypatch.setattr(session, "apply_submission_limits", limits)
+    result = schg.run()
+    assert result.status == "executed"
+    assert schg.closes.call_count == int(upro)
+    if upro:
+        assert schg.calls.index("closes") < schg.calls.index("save") < schg.calls.index("schg")
+        assert schg.schg.call_args.kwargs["positions"] == [position("s", "SCHG", units=4)]
+        assert schg.calls.index("closes") < schg.calls.index("strict", schg.calls.index("closes")) < schg.calls.index("schg")
+    tail = schg.calls[schg.calls.index("schg"):]
+    assert tail.index("schg_send") < tail.index("balance") < tail.index("execute") < tail.index("save")
+    assert schg.schg.call_args.kwargs["price"] == (100 if price is None else price)
+    assert schg.schg.call_args.kwargs["allow_partial"] is True
+    assert schg.schg.call_args.kwargs["deadline"] == session.session_close_datetime(DAY) - timedelta(minutes=5)
+    assert limits.call_args.kwargs["cash_usd"] == 900
+    assert schg.save.call_count == 1 + int(upro)
+    assert repo.get_strategy_state().bars == 1
+    assert repo.get_strategy_state().recyclable_cash == (200 if upro else 0)
+    assert repo.conn.execute("SELECT COUNT(*) FROM sale_effects").fetchone()[0] == int(upro)
+    evidence, = repo.confirmed_partial_closes(["s"])
+    assert evidence["status"] == "confirmed" and evidence["slice_position_id"] == "slice"
+    assert schg.run().status == "already_ran"
+    assert schg.schg.call_count == 1
+    assert schg.client.close_position.call_count == 1 + int(upro)
+
+
+@pytest.mark.parametrize("bad", [replace(SELL, amount=float("inf")), replace(SELL, amount=float("nan")),
+                                  replace(SELL, amount=0), replace(SELL, amount=-1),
+                                  replace(SELL, amount=None), replace(SELL, position_ref="s")])
+def test_bad_schg_refused_before_upro_or_broker_write(schg, bad):
+    schg.decision.intents = [CLOSE, bad, BUY]
+    assert schg.run().status == "armed_refused_intents"
+    schg.closes.assert_not_called()
+    schg.schg.assert_not_called()
+    schg.execute.assert_not_called()
+    schg.client.close_position.assert_not_called()
+    schg.save.assert_not_called()
+
+
+def test_duplicate_schg_refused_before_upro(schg):
+    schg.decision.intents = [CLOSE, SELL, SELL, BUY]
+    result = schg.run()
+    assert result.status == "armed_refused_intents" and "multiple SCHG sells" in result.reason
+    schg.closes.assert_not_called()
+    schg.schg.assert_not_called()
+    schg.execute.assert_not_called()
+    schg.client.close_position.assert_not_called()
+    schg.save.assert_not_called()
+
+
+@pytest.mark.parametrize("upro", [False, True])
+def test_schg_fresh_portfolio_failure_blocks_without_schg_send(schg, repo, upro):
+    if not upro:
+        schg.decision.intents = [SELL, BUY]
+    original = schg.strict.side_effect
+    reads = 0
+
+    def strict():
+        nonlocal reads
+        reads += 1
+        if reads == 1 + int(upro):
+            raise RuntimeError("fresh unavailable")
+        return original()
+
+    schg.strict.side_effect = strict
+    result = schg.run()
+    assert result.status == "executed_partial"
+    assert "SCHG sell portfolio read failed: RuntimeError: fresh unavailable" in result.reason
+    schg.schg.assert_not_called()
+    schg.execute.assert_not_called()
+    assert schg.save.call_count == int(upro) and repo.get_strategy_state().bars == 0
+    assert schg.client.close_position.call_count == int(upro)
+
+
+@pytest.mark.parametrize("case,stopped,sends", [("prefix", "shortfall", 1),
+                                                ("empty", "no candidates", 0),
+                                                ("disabled", "partials disabled; shortfall", 1)])
+def test_schg_shortfall_always_blocks_final_save(schg, repo, case, stopped, sends):
+    schg.decision.intents = [SELL, BUY]
+    if case == "prefix":
+        schg.decision.intents[0] = replace(SELL, amount=500)
+    elif case == "empty":
+        schg.strict.side_effect = lambda: []
+    else:
+        schg.positions = [p for p in schg.positions if p.instrument_id != IDS["SCHG"]]
+        schg.positions += [position("s", "SCHG", units=0.5), position("t", "SCHG", units=4)]
+        repo.insert_lot_annotation(replace(annotation("t"), symbol="SCHG"))
+        repo.upsert_instrument(Instrument("SCHG", IDS["SCHG"], allow_partial_close=False))
+    result = schg.run()
+    assert result.status == "executed_partial" and f"SCHG stopped={stopped}" in result.reason
+    if sends:
+        assert "SCHG close s: confirmed full close confirmed" in result.reason
+    assert schg.client.close_position.call_count == sends
+    schg.execute.assert_not_called()
+    schg.save.assert_not_called()
+    assert repo.get_strategy_state().bars == 0
+    assert repo.get_strategy_state().recyclable_cash == 0
+
+
+@pytest.mark.parametrize("upro", [False, True])
+@pytest.mark.parametrize("failure", ["exception", "unresolved", "unverified"])
+def test_schg_uncertainty_never_resends_or_saves_final(schg, repo, host, monkeypatch, upro, failure):
+    from nightwatch.engine.close_executor import recover_unfinished_closes
+    from nightwatch.etoro.models import OrderStatus
+
+    if not upro:
+        schg.decision.intents = [SELL, BUY]
+    send = schg.client.close_position.side_effect
+
+    def close(*args):
+        if len(args) == 3:
+            return "upro-order"
+        result = send(*args)
+        if failure == "unresolved":
+            raise RuntimeError("lost response")
+        return result
+
+    schg.client.close_position.side_effect = close
+    if failure == "exception":
+        monkeypatch.setattr(repo, "set_partial_close_order", Mock(side_effect=RuntimeError("after send")))
+    elif failure == "unverified":
+        schg.schg_status = OrderStatus.PARTIALLY_FILLED
+    result = schg.run()
+    assert result.status == "executed_partial" and "strategy state not saved" in result.reason
+    if failure == "exception":
+        assert "SCHG close executor error: RuntimeError: after send" in result.reason
+    else:
+        assert f"SCHG close s: {failure}" in result.reason
+    assert schg.calls.count("balance") == 2
+    assert "snapshot" in schg.calls
+    assert schg.save.call_count == int(upro) and repo.get_strategy_state().bars == 0
+    schg.execute.assert_not_called()
+    sends = schg.client.close_position.call_count
+    assert sends == 1 + int(upro)
+    assert schg.run().status == "already_ran"
+    assert schg.client.close_position.call_count == sends
+    schg.recover_closes.side_effect = lambda **kwargs: recover_unfinished_closes(**kwargs)
+    next_day = DAY + timedelta(days=3)
+    monkeypatch.setattr(session, "gate_10_price_data", lambda **kwargs: session.GateResult(10, "price", True, "ok"))
+    schg.clock = session.session_close_datetime(next_day) - timedelta(minutes=30)
+    result2 = session._run_session_core(host=host, config=schg.config, repo=repo, client=schg.client,
+                                        tiingo=FakeTiingo(), trading_date=next_day, wait=False)
+    assert result2.status == "halted_before_execution"
+    assert "unresolved close at recovery" in result2.reason
+    assert schg.client.close_position.call_count == sends and schg.schg.call_count == 1
+    assert schg.save.call_count == int(upro) and repo.get_strategy_state().bars == 0
+    schg.execute.assert_not_called()
+
+
+@pytest.mark.parametrize("orphan", [False, True])
+def test_schg_pending_recovery_blocks_before_either_executor(schg, repo, orphan):
+    from nightwatch.engine.close_executor import recover_unfinished_closes
+
+    old = repo.create_session("2026-10-01", "live", "demo", True)
+    intent = Intent(old.id, "old-schg", 1, "SCHG", "close", instrument_id=IDS["SCHG"],
+                    position_id="s", units=1, status="sent")
+    if orphan:
+        repo.insert_intent(intent)
+    else:
+        repo.begin_schg_close_leg(intent, position_id="s", units_before=4, units_deducted=1)
+    schg.recover_closes.side_effect = lambda **kwargs: recover_unfinished_closes(**kwargs)
+    result = schg.run()
+    assert result.status == "halted_before_execution" and "unresolved close at recovery" in result.reason
+    schg.closes.assert_not_called()
+    schg.schg.assert_not_called()
+    schg.execute.assert_not_called()
+    schg.save.assert_not_called()
+    schg.client.close_position.assert_not_called()
+
+
+def test_upro_block_prevents_schg(schg):
+    schg.outcomes = ["unresolved"]
+    assert schg.run().status == "executed_partial"
+    schg.schg.assert_not_called()
+    schg.execute.assert_not_called()
+
+
+def test_dry_schg_never_executes_or_saves(schg):
+    schg.config = replace(schg.config, mode=TradingMode.DRY_RUN, arm_flag_present=False)
+    assert schg.run().status == "would_have_done"
+    schg.closes.assert_not_called()
+    schg.schg.assert_not_called()
+    schg.execute.assert_not_called()
+    schg.save.assert_not_called()

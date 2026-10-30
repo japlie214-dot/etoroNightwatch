@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from datetime import date, datetime, timedelta, timezone
 import logging
+import math
 import time
 from typing import Callable, Mapping, Sequence
 
@@ -25,7 +26,7 @@ from ..notify.telegram import TelegramNotifier
 from ..strategy.ladder import decide, _floor_cents, LadderConfig, LadderLot, ReentryBucket, LadderInputs, LadderIntent
 from ..strategy.state import load, save
 from .executor import ExecutionReport, RecoveryReport, execute_buys, recover_unfinished
-from .close_executor import execute_closes, recover_unfinished_closes
+from .close_executor import execute_closes, execute_schg_sell, recover_unfinished_closes
 from .limits import apply_submission_limits
 from .halt import write_halt
 from .interval_pnl import ClosedLot, IntervalResult, PartialCloseEvidence, _utc, compute_interval, observe
@@ -362,7 +363,10 @@ def reconcile_effects(repo: Repo) -> None:
 
 def _supported_intent(i: LadderIntent) -> bool:
     if i.side == "close":
-        return i.symbol == "UPRO" and i.amount is None and bool(i.position_ref)
+        return (i.symbol == "UPRO" and i.amount is None and bool(i.position_ref)) or (
+            i.symbol == "SCHG" and i.amount is not None and math.isfinite(i.amount)
+            and i.amount > 0 and not i.position_ref
+        )
     if i.side != "open" or i.amount is None or not i.amount > 0:
         return False
     return (i.symbol == "SCHG" and i.book in (None, "catapult")) or (
@@ -561,10 +565,14 @@ def _run_session_core(
             reason += "; " + persistence_error + "; strategy state not saved: persistence failure"
         elif any(not _supported_intent(i) for i in d.intents):
             status = "armed_refused_intents"
-            reason = "armed: unsupported intents (SCHG sells unsupported in S7-3b): " + summary
+            reason = "armed: unsupported intents: " + summary
             reason += "; strategy state not saved: unsupported intents"
+        elif sum(i.side == "close" and i.symbol == "SCHG" for i in d.intents) > 1:
+            status = "armed_refused_intents"
+            reason += "; multiple SCHG sells; strategy state not saved: multiple SCHG sells"
         else:
-            closes = [i for i in d.intents if i.side == "close"]
+            closes = [i for i in d.intents if i.side == "close" and i.symbol == "UPRO"]
+            schg_sells = [i for i in d.intents if i.side == "close" and i.symbol == "SCHG"]
             buys = [i for i in d.intents if i.side == "open"]
             new_buckets = [b for b in d.updated_buckets
                            if b.bucket_id not in {x.bucket_id for x in inputs.buckets}]
@@ -635,13 +643,43 @@ def _run_session_core(
                             close_error = "closes not all confirmed"
                     if close_error is not None:
                         status = "executed_partial"
-                if close_error is None:
+            if close_error is None and schg_sells:
+                try:
+                    positions = client.get_portfolio_strict()
+                except Exception as exc:
+                    close_error = f"SCHG sell portfolio read failed: {type(exc).__name__}: {exc}"
+                else:
+                    # An executor raise cannot tell us whether the broker accepted a send.
+                    orders_sent = True
                     try:
-                        balance = client.get_balance()
-                        cash = max(0, balance.available_cash - config.strategy.cash_reserve_usd)
+                        instrument = repo.get_instrument("SCHG")
+                        schg_report = execute_schg_sell(
+                            repo=repo, client=client, session_id=s.id, intent=schg_sells[0],
+                            instrument_id=mi.instrument_ids["SCHG"], positions=positions,
+                            price=inputs.schg_price if inputs.schg_price is not None
+                            else mi.provisional_closes["SCHG"].value,
+                            allow_partial=instrument is None or instrument.allow_partial_close is not False,
+                            deadline=session_close_datetime(trading_date) - timedelta(minutes=5),
+                            now=host.now,
+                        )
                     except Exception as exc:
-                        close_error = f"between-phase balance failed: {type(exc).__name__}: {exc}"
-                        status = "executed_partial"
+                        close_error = f"SCHG close executor error: {type(exc).__name__}: {exc}"
+                        halt(close_error)
+                    else:
+                        for r in schg_report.results:
+                            reason += f"; SCHG close {r.position_id}: {r.outcome} {r.detail}"
+                        reason += f"; SCHG stopped={schg_report.stopped}"
+                        if schg_report.blocks_buys:
+                            close_error = "SCHG sell blocked buys"
+                if close_error is not None:
+                    status = "executed_partial"
+            if close_error is None and (closes or schg_sells):
+                try:
+                    balance = client.get_balance()
+                    cash = max(0, balance.available_cash - config.strategy.cash_reserve_usd)
+                except Exception as exc:
+                    close_error = f"between-phase balance failed: {type(exc).__name__}: {exc}"
+                    status = "executed_partial"
             if close_error is not None:
                 reason += "; " + close_error + "; strategy state not saved: " + close_error
             else:

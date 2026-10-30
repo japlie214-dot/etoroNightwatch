@@ -251,6 +251,33 @@ def test_confirmed_partial_close_keeps_other_loss_halt(repo, host, config, monke
         assert not any(meta["event"] == "alert_c" for meta, _, _ in notifier.calls)
 
 
+def test_confirmed_schg_partial_does_not_hide_unexplained_upro_units(repo, host, config, monkeypatch):
+    prev = seed(repo)
+    schg = replace(prev.positions[0], position_id="schg", instrument_id=IDS["SCHG"],
+                   symbol="SCHG", units=4)
+    prev.raw["pnl"]["clientPortfolio"]["positions"].append({
+        **envelope()["clientPortfolio"]["positions"][0], "positionID": "schg",
+        "instrumentID": IDS["SCHG"], "units": 4,
+    })
+    repo.insert_snapshot(replace(prev, positions=[*prev.positions, schg]))
+    old = repo.create_session("2026-10-03", "live", "demo", True)
+    intent = Intent(old.id, "partial", 1, "SCHG", "close", instrument_id=IDS["SCHG"],
+                    units=1, position_id="schg")
+    _, ledger_id = repo.begin_schg_close_leg(intent, position_id="schg", units_before=4,
+                                            units_deducted=1)
+    repo.finish_schg_close_leg(ledger_id, status="confirmed", intent_status="filled", resolved=True,
+                               units_after=3, slice_position_id="slice")
+    current = envelope(units=11)
+    current["clientPortfolio"]["positions"].append({
+        **envelope()["clientPortfolio"]["positions"][0], "positionID": "schg",
+        "instrumentID": IDS["SCHG"], "units": 3,
+    })
+    result = run(repo, host, config, monkeypatch, current=current, baseline=False)
+    assert result.interval.state == "integrity"
+    assert result.interval.excluded_positions == ("schg",)
+    assert "units changed" in read_halt(host)["reason"]
+
+
 def test_unmodelled_profit_cannot_cancel_modelled_loss_in_session(repo, host, config, monkeypatch):
     history = SimpleNamespace(position_id="roundtrip", instrument_id=IDS["SCHG"], units=1,
                               profit=100, fees=0, open_date="2026-10-02T14:00:00Z",
