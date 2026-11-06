@@ -86,7 +86,8 @@ def _p(msg: str) -> None:
 
 
 def _fmt_exc(e: BaseException) -> str:
-    return f"{type(e).__name__}: {e}"
+    status = getattr(e, "status_code", None)
+    return f"{type(e).__name__} status={status if type(status) is int else 'unknown'}"
 
 
 #: Known live instrument ids (DESIGN_market_data.md §2.9, resolved
@@ -164,8 +165,6 @@ def run_section(
         return False
     except Exception as e:
         _p(f"=== SECTION {name} -- END (EXCEPTION {_fmt_exc(e)}) ===")
-        import traceback
-        _p(traceback.format_exc())
         return False
     finally:
         # Do not wait for an abandoned/hung thread; shutdown(wait=False) lets
@@ -258,14 +257,22 @@ def section_a_chaquopy_imports(output_dir: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def _resolve_instrument_ids(client: Any, symbols: Sequence[str]) -> dict[str, int]:
+def _resolve_instrument_ids(
+    client: Any, symbols: Sequence[str], *, call_timeout_s: float | None = None
+) -> dict[str, int]:
     """Resolve symbols to instrument ids, falling back to
     ``KNOWN_INSTRUMENT_IDS`` (with a loud note) if a live search fails.
     """
     out: dict[str, int] = {}
     for symbol in symbols:
         try:
-            iid = client.resolve_instrument_id(symbol)
+            if call_timeout_s is None:
+                iid = client.resolve_instrument_id(symbol)
+            else:
+                iid = _c_call(
+                    f"resolve_instrument_id({symbol})", client.resolve_instrument_id,
+                    symbol, timeout_s=call_timeout_s,
+                )
             out[symbol] = iid
             _p(f"resolved {symbol} -> instrument_id={iid} (live search)")
         except Exception as e:
@@ -411,6 +418,35 @@ def _check_truthiness(section_label: str, row: Mapping[str, Any], keys: Sequence
             )
 
 
+# Seven calls at 30s each leave headroom under the default 300s section limit.
+C_CALL_TIMEOUT_S = 30.0
+
+
+def _c_call(
+    label: str, fn: Callable[..., Any], *args: Any,
+    timeout_s: float = C_CALL_TIMEOUT_S, **kwargs: Any,
+) -> Any:
+    """Bound a C call including retries/capacity waits, not just HTTP I/O."""
+    _p(f"C: {label} -- BEGIN (timeout={timeout_s}s)")
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, *args, **kwargs)
+    try:
+        result = future.result(timeout=timeout_s)
+    except concurrent.futures.TimeoutError:
+        _p(f"C: {label} -- TIMEOUT after {timeout_s}s")
+        raise TimeoutError(f"C: {label} exceeded per-call timeout {timeout_s}s") from None
+    except Exception as e:
+        _p(f"C: {label} -- FAILED ({_fmt_exc(e)})")
+        raise
+    else:
+        _p(f"C: {label} -- END (ok)")
+        return result
+    finally:
+        # shortcut: a timed-out read may finish in the background, as in run_section;
+        # use cancellable transport if this becomes a long-lived probe service.
+        executor.shutdown(wait=False, cancel_futures=False)
+
+
 def section_c_parser_audit(client: Any, output_dir: Path) -> None:
     """board nightwatch/handoff-2026-09-05.md §6/§8: audit the six parsers never independently
     re-verified against a live payload this week: ``_parse_candle``,
@@ -435,13 +471,14 @@ def section_c_parser_audit(client: Any, output_dir: Path) -> None:
     """
     from nightwatch.probes.live_window import diff_keys, PARSER_TRUTHINESS_KEYS
 
-    ids = _resolve_instrument_ids(client, ["SCHG", "UPRO"])
+    ids = _resolve_instrument_ids(client, ["SCHG", "UPRO"], call_timeout_s=C_CALL_TIMEOUT_S)
     schg_id, upro_id = ids.get("SCHG"), ids.get("UPRO")
 
     # --- _parse_candle ---
     if schg_id is not None:
         try:
-            resp = client._request(
+            resp = _c_call(
+                "_parse_candle", client._request,
                 "GET",
                 f"/api/v1/market-data/instruments/{schg_id}/history/candles/desc/OneDay/5",
                 request_class="market_data",
@@ -468,7 +505,8 @@ def section_c_parser_audit(client: Any, output_dir: Path) -> None:
     id_list = [i for i in (schg_id, upro_id) if i is not None]
     if id_list:
         try:
-            resp = client._request(
+            resp = _c_call(
+                "get_rates", client._request,
                 "GET",
                 "/api/v1/market-data/instruments/rates",
                 request_class="market_data",
@@ -495,7 +533,8 @@ def section_c_parser_audit(client: Any, output_dir: Path) -> None:
     # --- get_eligibility ---
     if id_list:
         try:
-            resp = client._request(
+            resp = _c_call(
+                "get_eligibility", client._request,
                 "POST",
                 f"/api/v2/trading/info/{client._demo()}eligibility",
                 request_class="eligibility",
@@ -524,7 +563,8 @@ def section_c_parser_audit(client: Any, output_dir: Path) -> None:
     # --- get_instruments ---
     if id_list:
         try:
-            resp = client._request(
+            resp = _c_call(
+                "get_instruments", client._request,
                 "GET",
                 "/api/v1/market-data/instruments",
                 request_class="market_data",
@@ -551,7 +591,8 @@ def section_c_parser_audit(client: Any, output_dir: Path) -> None:
     # --- get_costs ---
     if schg_id is not None:
         try:
-            resp = client._request(
+            resp = _c_call(
+                "get_costs", client._request,
                 "POST",
                 f"/api/v2/trading/info/{client._demo()}costs",
                 request_class="read",
@@ -1104,6 +1145,7 @@ def section_f_window_assembly(client: Any, config: Any, output_dir: Path) -> Non
                 iex_quote=iex_quote,
                 etoro_daily_candle=etoro_daily_candle,
                 enforce_completeness=False,
+                open_lot_entry_spy_ath=(),  # Standalone diagnostic; no lot sidecar is loaded.
             )
             _p(
                 f"F: assemble_spy_signal -- cone_5_z={signal.cone_5_z} "
