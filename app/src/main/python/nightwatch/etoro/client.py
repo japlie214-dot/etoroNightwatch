@@ -30,6 +30,7 @@ import logging
 import math
 import time
 from dataclasses import dataclass
+from functools import wraps
 from typing import TYPE_CHECKING, Any, Callable, Final, Iterable, Literal, Mapping, Sequence
 
 import httpx
@@ -138,6 +139,24 @@ class PollResult:
     order: OrderResult
     attempts: int
     timed_out: bool
+
+
+def _body_errors(method):
+    """Keep parser/conversion failures and their chains free of broker values."""
+    @wraps(method)
+    def checked(*args, **kwargs):
+        error = None
+        try:
+            return method(*args, **kwargs)
+        except EtoroError as exc:
+            error = exc
+        except (ValueError, TypeError, OverflowError, KeyError, AttributeError, IndexError):
+            error = EtoroValidationError(f"{method.__name__}: invalid response fields")
+        # Raising outside the handler also removes the implicit __context__.
+        error.__cause__ = None
+        error.__context__ = None
+        raise error
+    return checked
 
 
 class EtoroClient:
@@ -326,25 +345,29 @@ class EtoroClient:
             self.last_write_request_body = json_body
             self.last_write_response_body = None
         attempt_limit = 1 if request_class == "write" else self._max_attempts
+        # The generic redactor can mask the full path; keep a fixed public label.
+        endpoint = next((part for part in reversed(path.split("/")) if part in (
+            "balances", "portfolio", "pnl", "history", "search", "instruments",
+            "rates", "candles", "eligibility", "costs", "orders", "orders:lookup",
+            "close-orders", "market-close-orders", "positions",
+        )), "unknown")
         last_error: Exception | str = "unknown error"
         for attempt in range(1, attempt_limit + 1):
             self._wait_for_capacity(request_class)
             headers = auth.build_headers(self._credentials, request_id)
             self._check_deadline()
+            response = None
             try:
                 response = self._http.request(
                     method, path, params=params, json=json_body, headers=headers
                 )
-            except httpx.TimeoutException as exc:
-                last_error = exc
+            except httpx.TimeoutException:
+                last_error = EtoroTimeoutError(f"timed out calling {path} endpoint={endpoint}")
+            except httpx.RequestError:
+                last_error = EtoroNetworkError(f"network error calling {path} endpoint={endpoint}")
+            if response is None:
                 if attempt == attempt_limit:
-                    raise EtoroTimeoutError(f"timed out calling {path}: {exc}") from exc
-                self._sleep_with_deadline(self._backoff(attempt))
-                continue
-            except httpx.RequestError as exc:
-                last_error = exc
-                if attempt == attempt_limit:
-                    raise EtoroNetworkError(f"network error calling {path}: {exc}") from exc
+                    raise last_error
                 self._sleep_with_deadline(self._backoff(attempt))
                 continue
 
@@ -367,19 +390,19 @@ class EtoroClient:
 
             if response.status_code in (401, 403):
                 raise EtoroAuthError(
-                    f"{response.status_code} from {path}: {self._safe_body(response)}"
+                    f"{response.status_code} from {path}: {self._safe_body(response)} endpoint={endpoint}"
                 )
 
             if response.status_code == 429:
                 retry_after = RateLimiter.retry_after_from_headers(response.headers) or 1.0
-                last_error = f"429 rate limited (retry_after={retry_after}s)"
+                last_error = f"429 from {path}: {self._safe_body(response)} endpoint={endpoint}"
                 if attempt == attempt_limit:
                     raise EtoroRateLimitError(str(last_error), retry_after=retry_after)
                 self._sleep_with_deadline(retry_after)
                 continue
 
             if 500 <= response.status_code < 600:
-                last_error = f"{response.status_code} server error: {self._safe_body(response)}"
+                last_error = f"{response.status_code} from {path}: {self._safe_body(response)} endpoint={endpoint}"
                 if attempt == attempt_limit:
                     raise EtoroServerError(str(last_error), status_code=response.status_code)
                 self._sleep_with_deadline(self._backoff(attempt))
@@ -387,7 +410,7 @@ class EtoroClient:
 
             # Any other 4xx: permanent, never retried.
             raise EtoroValidationError(
-                f"{response.status_code} from {path}: {self._safe_body(response)}",
+                f"{response.status_code} from {path}: {self._safe_body(response)} endpoint={endpoint}",
                 status_code=response.status_code,
             )
 
@@ -397,10 +420,7 @@ class EtoroClient:
 
     @staticmethod
     def _safe_body(response: httpx.Response) -> str:
-        try:
-            return response.text[:500]
-        except Exception:  # pragma: no cover - defensive
-            return "<unreadable body>"
+        return f"body=[REDACTED] bytes={len(response.content)}"
 
     def _backoff(self, attempt: int) -> float:
         return min(_DEFAULT_BASE_DELAY * (2 ** (attempt - 1)), _DEFAULT_MAX_DELAY)
@@ -417,6 +437,7 @@ class EtoroClient:
 
     # -- gate 6/9: auth probe + balances --------------------------------------
 
+    @_body_errors
     def get_balance(self) -> Balance:
         """Compute available cash from the **portfolio** endpoint, not
         ``/balances`` (DESIGN §4.5, §9; corrected 2026-09-05 against a
@@ -471,7 +492,7 @@ class EtoroClient:
         if missing:
             raise EtoroValidationError(
                 "portfolio response missing required available-cash fields "
-                f"{sorted(missing)!r}; body keys seen: {sorted(data.keys())!r}"
+                f"{sorted(missing)!r}"
             )
         try:
             available = compute_available_cash(
@@ -482,7 +503,7 @@ class EtoroClient:
             credit = float(data["credit"])
         except (TypeError, ValueError, OverflowError) as exc:
             raise EtoroValidationError(
-                f"portfolio response has invalid available-cash fields: {exc}"
+                "portfolio response has invalid available-cash fields"
             ) from exc
         return Balance(
             credit=credit,
@@ -491,6 +512,7 @@ class EtoroClient:
             raw=data,
         )
 
+    @_body_errors
     def verify_environment(self) -> None:
         """Probe that the credential's bound environment matches config.
 
@@ -689,6 +711,7 @@ class EtoroClient:
 
     # -- gate 8, portfolio, pnl ------------------------------------------------
 
+    @_body_errors
     def _fetch_portfolio_envelope(self) -> dict[str, Any]:
         """One ``GET`` to ``.../portfolio``, unwrapped from ``clientPortfolio``.
 
@@ -714,6 +737,7 @@ class EtoroClient:
             data = data["clientPortfolio"]
         return data if isinstance(data, dict) else {}
 
+    @_body_errors
     def get_portfolio(self) -> list[Position]:
         """``GET /trading/info/portfolio`` (or the `/demo/` variant).
 
@@ -729,6 +753,7 @@ class EtoroClient:
         positions_raw = data.get("positions", [])
         return [self._parse_position(p) for p in positions_raw]
 
+    @_body_errors
     def get_portfolio_strict(self) -> list[Position]:
         """Read positions without treating an invalid envelope as an empty account."""
         data = self._fetch_portfolio_envelope()
@@ -736,6 +761,7 @@ class EtoroClient:
             raise EtoroValidationError("portfolio response must contain a positions list")
         return [self._parse_position(p) for p in data["positions"]]
 
+    @_body_errors
     def get_pnl(self) -> dict[str, Any]:
         """``GET /trading/info/real/pnl`` (or the `/demo/` variant)."""
         segment = "demo" if self.is_demo else "real"
@@ -745,6 +771,7 @@ class EtoroClient:
         return dict(response.json())
 
     @staticmethod
+    @_body_errors
     def _parse_position(raw: Mapping[str, Any]) -> Position:
         """Parse one broker position (DESIGN_market_data.md §4.2, §4.5, §10.7).
 
@@ -779,7 +806,7 @@ class EtoroClient:
             None,
         )
         if position_id is None:
-            raise EtoroValidationError(f"position missing positionID: {dict(raw)!r}"[:500])
+            raise EtoroValidationError("position missing positionID")
         instrument_id = raw.get("instrumentID", raw.get("instrumentId"))
         if instrument_id is None:
             # Not merely "one more required field". Since there is no symbol
@@ -787,13 +814,12 @@ class EtoroClient:
             # a symbol -- defaulting it to 0 would resurrect exactly the silent
             # null this correction exists to remove, one level down.
             raise EtoroValidationError(
-                f"position {position_id} missing instrumentID: {dict(raw)!r}"[:500]
+                "position missing instrumentID"
             )
         for required in ("units", "openRate", "amount"):
             if raw.get(required) is None:
                 raise EtoroValidationError(
-                    f"position {position_id} missing required field {required!r}: "
-                    f"{dict(raw)!r}"[:500]
+                    f"position missing required field {required!r}"
                 )
         return Position(
             position_id=str(position_id),
@@ -817,6 +843,7 @@ class EtoroClient:
 
     # -- trade history, paged, <1yr window ------------------------------------
 
+    @_body_errors
     def get_trade_history(
         self,
         *,
@@ -933,6 +960,7 @@ class EtoroClient:
         return str(close_date)[:10] <= end_date
 
     @staticmethod
+    @_body_errors
     def _parse_trade_history_entry(raw: Mapping[str, Any]) -> TradeHistoryEntry:
         """Parse one closed-trade row (DESIGN_market_data.md §10.5).
 
@@ -954,19 +982,17 @@ class EtoroClient:
         )
         if position_id is None:
             raise EtoroValidationError(
-                f"trade history row missing positionId: {dict(raw)!r}"[:500]
+                "trade history row missing positionId"
             )
         instrument_id = raw.get("instrumentId", raw.get("instrumentID"))
         if instrument_id is None:
             raise EtoroValidationError(
-                f"trade history row {position_id} missing instrumentId: "
-                f"{dict(raw)!r}"[:500]
+                "trade history row missing instrumentId"
             )
         for required in ("units", "openRate"):
             if raw.get(required) is None:
                 raise EtoroValidationError(
-                    f"trade history row {position_id} missing required field "
-                    f"{required!r}: {dict(raw)!r}"[:500]
+                    f"trade history row missing required field {required!r}"
                 )
         return TradeHistoryEntry(
             position_id=str(position_id),
@@ -988,6 +1014,7 @@ class EtoroClient:
 
     # -- instrument resolution + caching (immutable ids, cache via DB) --------
 
+    @_body_errors
     def search_instrument(self, symbol: str) -> InstrumentSearchResult:
         """``GET /market-data/search`` for one ticker (uncached).
 
@@ -1094,6 +1121,7 @@ class EtoroClient:
             )
         return result.instrument_id
 
+    @_body_errors
     def get_instruments(self, instrument_ids: Sequence[int]) -> list[dict[str, Any]]:
         """``GET /market-data/instruments`` metadata for a set of ids.
 
@@ -1115,6 +1143,7 @@ class EtoroClient:
 
     # -- rates + candles ---------------------------------------------------
 
+    @_body_errors
     def get_rates(self, instrument_ids: Sequence[int]) -> dict[int, Rate]:
         """``GET /market-data/instruments/rates`` -- live quotes, no market-open flag.
 
@@ -1161,6 +1190,7 @@ class EtoroClient:
     #: sites (``market/bars.py``) need no edit -- and translated here.
     _CANDLE_DIRECTION_WIRE: Final[dict[str, str]] = {"backward": "desc", "forward": "asc"}
 
+    @_body_errors
     def get_candles(
         self, instrument_id: int, *, direction: str = "backward", interval: str = "OneDay",
         count: int = 400,
@@ -1202,6 +1232,7 @@ class EtoroClient:
         return [self._parse_candle(row, interval) for row in rows]
 
     @staticmethod
+    @_body_errors
     def _parse_candle(row: Mapping[str, Any], interval: str) -> Candle:
         """Parse one candle row, preserving the bar's own timestamp and interval.
 
@@ -1233,6 +1264,7 @@ class EtoroClient:
 
     # -- eligibility, batched ≤100 ---------------------------------------------
 
+    @_body_errors
     def get_eligibility(self, instrument_ids: Sequence[int]) -> EligibilityBatchResult:
         """``POST /trading/info/eligibility`` (or ``/demo/eligibility``), batched
         at ≤100 ids per call.
@@ -1294,6 +1326,7 @@ class EtoroClient:
         return EligibilityBatchResult(results=results)
 
     @staticmethod
+    @_body_errors
     def _min_position_amount_for_real_long(row: Mapping[str, Any]) -> float | None:
         """Pick ``minPositionAmount`` for this app's one possible order shape.
 
@@ -1349,6 +1382,7 @@ class EtoroClient:
 
     # -- costs -----------------------------------------------------------------
 
+    @_body_errors
     def get_costs(self, instrument_id: int, amount: float) -> dict[str, Any]:
         """``POST /trading/info/costs`` (or ``/demo/costs``).
 
@@ -1406,6 +1440,7 @@ class EtoroClient:
             response, request_id=request_id, what="place_buy_order"
         )
 
+    @_body_errors
     def _order_id_from_write_response(
         self, response: httpx.Response, *, request_id: str, what: str
     ) -> str:
@@ -1476,10 +1511,7 @@ class EtoroClient:
                 f"bytes={len(response.content)}"
             ) from None
         if recovered.order_id:
-            _logger.warning(
-                "%s: order id recovered via referenceId=%s -> %s",
-                what, request_id, recovered.order_id,
-            )
+            _logger.warning("%s: order id recovered via referenceId", what)
             return str(recovered.order_id)
         raise EtoroValidationError(
             f"{what}: submitted successfully but no order id could be found "
@@ -1583,7 +1615,7 @@ class EtoroClient:
         )
         if ack.position_id is not None and ack.position_id != position_id:
             raise EtoroValidationError(
-                f"clear_take_profit: tool refused positionId {ack.position_id}, expected {position_id}"
+                f"clear_take_profit: tool refused different positionId, expected {position_id}"
             )
         return ack
 
@@ -1628,13 +1660,15 @@ class EtoroClient:
             # Keep it as a read-only, ID-only fallback; never retry a write.
             if not self.is_demo or order_id is None or exc.status_code != 404:
                 raise
+            response = None
+        if response is None:
             response = self._request(
                 "GET",
                 f"/api/v1/trading/info/{self._demo()}orders/{order_id}",
                 request_class="read",
                 response_capture=response_capture,
             )
-        data = response.json()
+        data = _body_errors(response.json)()
         legacy_shape = isinstance(data, Mapping) and "statusID" in data and "status" not in data
         self._check_response_contract(
             "legacy-order-lookup" if legacy_shape else "order-lookup",
@@ -1644,7 +1678,7 @@ class EtoroClient:
         result = self._parse_order_result(data)
         if order_id is not None and result.order_id != str(order_id):
             raise EtoroValidationError(
-                f"orders:lookup returned orderId {result.order_id}, expected {order_id}"
+                f"orders:lookup returned different orderId, expected {order_id}"
             )
         if reference_id is not None and result.reference_id not in (None, reference_id):
             raise EtoroValidationError(
@@ -1652,6 +1686,7 @@ class EtoroClient:
             )
         return result
 
+    @_body_errors
     def lookup_close_order(
         self, order_id: str | int, *, expected_position_id: str | None = None,
     ) -> OrderResult:
@@ -1681,6 +1716,7 @@ class EtoroClient:
             self.last_close_lookup_responses.extend(captured)
 
     @classmethod
+    @_body_errors
     def _parse_close_order_result(
         cls, data: Any, *, expected_order_id: str,
         expected_position_id: str | None = None,
@@ -1691,7 +1727,7 @@ class EtoroClient:
         order_id = cls._id_string(data.get("orderID"), "orderID")
         if order_id != expected_order_id:
             raise EtoroValidationError(
-                f"close-orders returned orderID={order_id!r}, expected {expected_order_id!r}"
+                f"close-orders returned different orderID, expected {expected_order_id!r}"
             )
         status_raw = data.get("statusID")
         if isinstance(status_raw, bool) or not isinstance(status_raw, int):
@@ -1700,9 +1736,15 @@ class EtoroClient:
             status = OrderStatus(status_raw)
         except ValueError as exc:
             raise EtoroValidationError(
-                f"close-orders has unknown statusID={status_raw}"
+                "close-orders has unknown statusID"
             ) from exc
 
+        error_code = data.get("errorCode")
+        reject_reason = (
+            f"errorCode={error_code}" if type(error_code) is int and error_code != 0
+            else "broker rejection (body=REDACTED)" if data.get("errorMessage") is not None
+            else None
+        )
         raw_positions = data.get("positions")
         if not isinstance(raw_positions, list):
             raise EtoroValidationError("close-orders positions must be a list")
@@ -1738,12 +1780,12 @@ class EtoroClient:
                 status=status, position_id=expected_position_id, fill_units=float(units),
                 fill_price=optional_number(slice_row.get("rate")),
                 fill_amount_usd=optional_number(data.get("proceeds")),
-                reject_reason=data.get("errorMessage"), raw=dict(data),
+                reject_reason=reject_reason, raw=dict(data),
             )
         position_id = next(iter(position_ids), None)
         if status in FILLED_ORDER_STATUSES and position_id is None:
             raise EtoroValidationError(
-                f"filled close order {order_id} has no affected position ID"
+                "filled close order has no affected position ID"
             )
         reference_id = cls._id_string(data.get("referenceID"), "referenceID")
         return OrderResult(
@@ -1751,7 +1793,7 @@ class EtoroClient:
             reference_id=reference_id,
             status=status,
             position_id=position_id,
-            reject_reason=data.get("errorMessage"),
+            reject_reason=reject_reason,
             raw=dict(data),
         )
 
@@ -1780,6 +1822,7 @@ class EtoroClient:
             return None
 
     @staticmethod
+    @_body_errors
     def _execution_rows(row: Mapping[str, Any]) -> list[Mapping[str, Any]]:
         """``positionExecutions``, validated -- never silently treated as empty.
 
@@ -1794,13 +1837,12 @@ class EtoroClient:
             return []
         if not isinstance(raw, (list, tuple)):
             raise EtoroValidationError(
-                f"orders:lookup positionExecutions is not a list: {raw!r}"[:500]
+                "orders:lookup positionExecutions is not a list"
             )
         for entry in raw:
             if not isinstance(entry, Mapping):
                 raise EtoroValidationError(
-                    f"orders:lookup positionExecutions entry is not an object: "
-                    f"{entry!r}"[:500]
+                    "orders:lookup positionExecutions entry is not an object"
                 )
         return list(raw)
 
@@ -1820,6 +1862,7 @@ class EtoroClient:
         return str(value)
 
     @staticmethod
+    @_body_errors
     def _first_float(
         sources: Sequence[tuple[str, Any]], *, field_name: str, order_id: Any
     ) -> float | None:
@@ -1839,12 +1882,12 @@ class EtoroClient:
                 return float(value)
             except (TypeError, ValueError) as exc:
                 raise EtoroValidationError(
-                    f"order {order_id} has a non-numeric {field_name} at "
-                    f"{path}: {value!r}"[:500]
+                    f"order has a non-numeric {field_name} at {path}"
                 ) from exc
         return None
 
     @classmethod
+    @_body_errors
     def _parse_order_result(cls, data: Mapping[str, Any]) -> OrderResult:
         """Parse one ``orders:lookup`` payload (DESIGN §1.1, §6.H).
 
@@ -1913,7 +1956,7 @@ class EtoroClient:
         row = data.get("order", data)
         if not isinstance(row, Mapping):
             raise EtoroValidationError(
-                f"orders:lookup payload is not an object: {row!r}"[:500]
+                "orders:lookup payload is not an object"
             )
         order_ids = [
             cls._id_string(row[key], key)
@@ -1935,11 +1978,11 @@ class EtoroClient:
             status_label = status_raw.get("name")
             status_code = status_raw.get("id", status_raw.get("statusId"))
             if status_code is None:
-                raise EtoroValidationError(f"order {order_id} status object has no 'id'")
+                raise EtoroValidationError("order status object has no 'id'")
         else:
             status_code = status_raw
         if status_code is None:
-            raise EtoroValidationError(f"order {order_id} response is missing its status")
+            raise EtoroValidationError("order response is missing its status")
         try:
             if isinstance(status_code, bool):
                 raise ValueError("boolean status")
@@ -1949,12 +1992,11 @@ class EtoroClient:
             status = OrderStatus(int(numeric_status))
         except (TypeError, ValueError, OverflowError) as exc:
             raise EtoroValidationError(
-                f"order {order_id} has an unparseable/unknown status "
-                f"(label={status_label!r}); refusing to default it to RECEIVED"
+                "order has an unparseable/unknown status; refusing to default it to RECEIVED"
             ) from exc
         if status_label is not None and not isinstance(status_label, str):
             raise EtoroValidationError(
-                f"order {order_id} status name is not a string: {status_label!r}"[:500]
+                "order status name is not a string"
             )
 
         executions = cls._execution_rows(row)
@@ -1975,8 +2017,7 @@ class EtoroClient:
             closing = {}
         if not isinstance(opening, Mapping) or not isinstance(closing, Mapping):
             raise EtoroValidationError(
-                f"order {order_id} positionExecutions[0] opening/closingData is "
-                f"not an object: {dict(execution)!r}"[:500]
+                "order positionExecutions[0] opening/closingData is not an object"
             )
 
         # -- position id: required once the order has actually filled -------
@@ -1994,12 +2035,12 @@ class EtoroClient:
         distinct_position_ids = set(position_ids)
         if len(distinct_position_ids) > 1:
             raise EtoroValidationError(
-                f"order {order_id} has multiple position ids in positionExecutions"
+                "order has multiple position ids in positionExecutions"
             )
         position_id = position_ids[0] if position_ids else None
         if position_id is None and status in FILLED_ORDER_STATUSES:
             raise EtoroValidationError(
-                f"order {order_id} reports {status.name} but carries no "
+                f"order reports {status.name} but carries no "
                 "positionId in the response"
             )
 
@@ -2038,13 +2079,14 @@ class EtoroClient:
             order_id=order_id,
         )
 
-        reject_reason = row.get("rejectReason")
-        if reject_reason is None and row.get("errorCode") not in (None, 0):
-            reject_reason = f"errorCode={row['errorCode']}"
-        if reject_reason is None and isinstance(status_raw, Mapping):
+        error_code = row.get("errorCode")
+        if error_code is None and isinstance(status_raw, Mapping):
             error_code = status_raw.get("errorCode")
-            if error_code:  # a real, non-zero broker error code
-                reject_reason = f"errorCode={error_code}"
+        reject_reason = (
+            f"errorCode={error_code}" if type(error_code) is int and error_code != 0
+            else "broker rejection (body=REDACTED)" if row.get("rejectReason") is not None
+            else None
+        )
 
         return OrderResult(
             order_id=order_id,
@@ -2115,7 +2157,7 @@ class EtoroClient:
             attempts += 1
         if result.status in (OrderStatus.REJECTED, OrderStatus.REJECTED_PARTIALLY_FILLED):
             _logger.warning(
-                "order rejected: order_id=%s reference_id=%s reason=%s",
-                order_id, reference_id, result.reject_reason,
+                "order rejected: status=%s",
+                result.status.name,
             )
         return PollResult(order=result, attempts=attempts, timed_out=False)

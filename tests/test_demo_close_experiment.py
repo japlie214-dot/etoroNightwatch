@@ -293,7 +293,9 @@ def test_lagging_open_close_partial_and_lookup_settle_without_resends(tmp_path):
         result = json.loads((run.fixture_dir / f"step_{step}.json").read_text())["result"]
         assert len(result["lookup_errors"]) == 2
         assert result["lookup_errors"][0]["status_code"] == 404
-        assert "ORDER_" in result["lookup_errors"][0]["error_message"]
+        assert result["lookup_errors"][0]["error_message"].startswith("404 from /")
+        assert ": body=[REDACTED] bytes=" in result["lookup_errors"][0]["error_message"]
+        assert "Order was not found" not in result["lookup_errors"][0]["error_message"]
     assert run.clock.now >= 6
 
 
@@ -390,7 +392,9 @@ def test_non_404_close_lookup_error_is_not_retried(tmp_path):
     assert report["remaining_position_ids"] == []
     result = json.loads((run.fixture_dir / "step_2.json").read_text())["result"]
     assert result["status_code"] == 400
-    assert "invalid lookup" in result["error_message"]
+    assert result["error_message"].startswith("400 from /")
+    assert ": body=[REDACTED] bytes=" in result["error_message"]
+    assert "invalid lookup" not in result["error_message"]
 
 
 def test_cleanup_does_not_call_a_temporary_empty_snapshot_closed(tmp_path):
@@ -417,7 +421,8 @@ def test_error_message_sanitizes_embedded_response_fields(tmp_path):
     report = run.run([1])
     assert report["steps"]["1"]["status"] == "fail"
     result = json.loads((run.fixture_dir / "step_1.json").read_text())["result"]
-    assert "503 server error" in result["error_message"]
+    assert result["error_message"].startswith("503 from /")
+    assert ": body=[REDACTED] bytes=" in result["error_message"]
     assert "fake-response-token" not in result["error_message"]
     assert experiment.PLACEHOLDER in result["error_message"]
     assert "fake-response-token" not in (run.fixture_dir / "summary.json").read_text()

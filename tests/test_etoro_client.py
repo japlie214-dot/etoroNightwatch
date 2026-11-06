@@ -625,7 +625,7 @@ def test_rejected_status_is_terminal_and_never_a_fill() -> None:
     assert result.timed_out is False
     assert result.order.status is OrderStatus.REJECTED
     assert result.order.is_filled is False
-    assert result.order.reject_reason == "insufficient funds"
+    assert result.order.reject_reason == "broker rejection (body=REDACTED)"
 
 
 # ===========================================================================
