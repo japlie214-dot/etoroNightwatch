@@ -336,19 +336,25 @@ def test_abort_redacts_recovered_buy_annotation_failure(harness, repo, monkeypat
     h.client.get_portfolio = lambda: [Position("old-position", 2, 1, 100, 100, 1, True,
                                               is_no_take_profit=True)]
     h.client.clear_take_profit = Mock(side_effect=AssertionError("TP already absent"))
-    monkeypatch.setattr(repo, "insert_lot_annotation", Mock(side_effect=RuntimeError("annotation " + planted)))
+    monkeypatch.setattr(repo, "finalize_filled_buy", Mock(side_effect=RuntimeError("annotation " + planted)))
     if status == "market_data_failed":
         h.failures = [EtoroNetworkError("offline") for _ in range(3)]
     else:
         monkeypatch.setattr(repo, "record_price_window_fingerprint", Mock(side_effect=RuntimeError("fingerprint failure")))
     redact = Mock(side_effect=ValueError("sanitizer failure")) if sanitizer_fails else Mock(wraps=RedactionFilter.redact)
     monkeypatch.setattr(RedactionFilter, "redact", redact)
+    save = Mock(wraps=session.save)
+    monkeypatch.setattr(session, "save", save)
     result = h.run()
+    save.assert_not_called()
     row = repo.get_session(result.session_id)
     assert result.status == status and row.state == "aborted" and row.finished_at is not None
     assert repo.get_intents(row.id) == []
-    assert repo.get_intent_by_request_id("old-pending-buy").status == "recovered"
-    assert repo.list_tp_clears("old-position")[0]["detail"] == "already no TP at open"
+    saved = repo.get_intent_by_request_id("old-pending-buy")
+    assert saved.status == "filled_unannotated" and saved.resolved_at is None
+    assert result.tp_failed and result.halt_set and result.halt_failure is None
+    assert repo.get_lot_annotation("old-position") is None
+    assert repo.list_tp_clears("old-position") == []
     h.client.clear_take_profit.assert_not_called()
     assert row.outcome == result.reason
     assert planted not in row.outcome

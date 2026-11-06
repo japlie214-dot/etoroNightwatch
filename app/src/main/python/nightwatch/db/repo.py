@@ -1025,7 +1025,7 @@ class Repo:
             SELECT SUM(intents.amount_usd)
               FROM intents JOIN sessions ON intents.session_id = sessions.id
              WHERE sessions.trading_date = ? AND intents.side = 'buy'
-               AND intents.status IN ('pending', 'sent', 'filled', 'recovered', 'abandoned')
+               AND intents.status IN ('pending', 'sent', 'filled_unannotated', 'filled', 'recovered', 'abandoned')
             """,
             (trading_date,),
         ).fetchone()
@@ -1034,7 +1034,7 @@ class Repo:
     def unresolved_intents(self, session_id: int | None = None) -> list[Intent]:
         """Orders without a definitive outcome, including abandoned uncertainty."""
         rows = self.conn.execute(
-            "SELECT * FROM intents WHERE status IN ('pending', 'sent', 'unknown', 'abandoned') "
+            "SELECT * FROM intents WHERE status IN ('pending', 'sent', 'filled_unannotated', 'unknown', 'abandoned') "
             + ("AND session_id = ? " if session_id is not None else "")
             + "ORDER BY session_id, sequence",
             (session_id,) if session_id is not None else (),
@@ -1050,12 +1050,12 @@ class Repo:
         return [self._intent(r) for r in rows]
 
     def unresolved_buy_intents(self) -> list[tuple[Intent, str]]:
-        """Buy intents still pending or sent, each with its session's trading date."""
+        """Unresolved buys, including fills awaiting their durable annotation."""
         rows = self.conn.execute(
             """
             SELECT i.*, s.trading_date AS trading_date
               FROM intents i JOIN sessions s ON i.session_id = s.id
-             WHERE i.side = 'buy' AND i.status IN ('pending', 'sent')
+             WHERE i.side = 'buy' AND i.status IN ('pending', 'sent', 'filled_unannotated')
              ORDER BY i.id
             """
         ).fetchall()
@@ -1836,6 +1836,27 @@ class Repo:
         which is idempotent by construction. Raises ``ValueError`` on an
         invalid ``book``/``origin`` (see :meth:`_validate_lot_annotation`).
         """
+        with self.conn:
+            self._insert_lot_annotation(annotation)
+
+    def finalize_filled_buy(
+        self, intent_id: int, annotation: LotAnnotation, *, status: str = "filled"
+    ) -> None:
+        """Commit the verified annotation and resolved intent together or neither."""
+        if status not in ("filled", "recovered"):
+            raise ValueError("invalid filled buy final status")
+        with self.conn:
+            self.conn.execute("BEGIN")
+            self._insert_lot_annotation(annotation)
+            cur = self.conn.execute(
+                "UPDATE intents SET status = ?, resolved_at = ? "
+                "WHERE id = ? AND side = 'buy' AND status = 'filled_unannotated'",
+                (status, utcnow(), intent_id),
+            )
+            if cur.rowcount != 1:
+                raise ValueError("filled buy is not awaiting annotation")
+
+    def _insert_lot_annotation(self, annotation: LotAnnotation) -> None:
         self._validate_lot_annotation(annotation)
         now = utcnow()
         self.conn.execute(
@@ -1860,7 +1881,6 @@ class Repo:
                 annotation.created_at or now, annotation.updated_at or now,
             ),
         )
-        self.conn.commit()
 
     def insert_lot_annotations(self, annotations: Iterable[LotAnnotation]) -> int:
         """Insert many sidecar rows in one all-or-nothing transaction.

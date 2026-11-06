@@ -37,8 +37,6 @@ def recovered(harness, repo, monkeypatch):
     h.client.get_portfolio = lambda: [Position("old-position", 2, 1, 100, 100, 1, True,
                                               is_no_take_profit=True)]
     h.client.clear_take_profit = Mock(side_effect=AssertionError("TP already absent"))
-    monkeypatch.setattr(repo, "insert_lot_annotation", Mock(
-        side_effect=RuntimeError("annotation foreign-text " + PLANTED)))
     monkeypatch.setattr(session, "decide", lambda *a: SimpleNamespace(
         intents=[], new_state=session.load(repo), reason="offline", warnings=[], updated_buckets=[]))
     h.save = Mock(wraps=session.save)
@@ -50,6 +48,8 @@ def recovered(harness, repo, monkeypatch):
 @pytest.mark.parametrize("sanitizer_fails", [False, True])
 def test_recovery_reason_and_halt_error_are_redacted(recovered, repo, monkeypatch, status, sanitizer_fails):
     h = recovered
+    monkeypatch.setattr(repo, "finalize_filled_buy", Mock(
+        side_effect=RuntimeError("annotation foreign-text " + PLANTED)))
     if status == "executed_partial":
         monkeypatch.setattr(session, "reconcile_effects", Mock(
             side_effect=RuntimeError("reconcile foreign-text " + PLANTED)))
@@ -65,13 +65,19 @@ def test_recovery_reason_and_halt_error_are_redacted(recovered, repo, monkeypatc
         monkeypatch.setattr(RedactionFilter, "redact", Mock(side_effect=ValueError("sanitize failed")))
     result = h.run()
     row = repo.get_session(result.session_id)
-    assert result.status == status
+    expected_status = "preflight_failed" if status == "preflight_failed" else "halted_before_execution"
+    assert result.status == expected_status
     assert row.state == ("aborted" if status == "preflight_failed" else "finished")
     assert row.finished_at is not None and row.outcome == result.reason
     assert row.preflight_failed_gate == (12 if status == "preflight_failed" else None)
-    assert h.save.call_count == (1 if status == "executed" else 0)
+    h.save.assert_not_called()
     assert repo.get_intents(row.id) == []
-    assert repo.get_intent_by_request_id("old-pending-buy").status == "recovered"
+    saved = repo.get_intent_by_request_id("old-pending-buy")
+    assert saved.status == "filled_unannotated" and saved.resolved_at is None
+    assert result.tp_failed
+    assert result.halt_set == (status != "executed_partial")
+    assert repo.get_lot_annotation("old-position") is None
+    assert repo.list_tp_clears("old-position") == []
     h.client.clear_take_profit.assert_not_called()
     texts = [row.outcome, row.error or "", result.reason,
              *(call.args[0] for call in h.notifier.send.call_args_list)]
@@ -80,7 +86,7 @@ def test_recovery_reason_and_halt_error_are_redacted(recovered, repo, monkeypatc
     assert "recovery followups 1" in result.reason
     if sanitizer_fails:
         assert all("foreign-text" not in text and "old-position" not in text for text in texts)
-        assert status in result.reason
+        assert expected_status in result.reason
         if status == "executed_partial":
             assert "; HALT details omitted" in result.reason
             assert row.error == "OSError"

@@ -868,7 +868,7 @@ def _run_session_core(
                         not_saved = "persistence failure"
                     elif report.tp_failed or unconfirmed:
                         not_saved = ("filled order without a confirmed position: " + ", ".join(unconfirmed)
-                                     if unconfirmed else "take-profit not cleared: position verification failed")
+                                     if unconfirmed else "take-profit not cleared: position verification or annotation failed")
                     elif execution_error is not None:
                         not_saved = "execution exception"
                     elif dropped:

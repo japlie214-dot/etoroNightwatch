@@ -186,11 +186,12 @@ def finish_filled_buy(
     followups: list[str],
     tp_failed: list[str],
     tp_uncleared: list[str],
+    resolved_status: str = "filled",
 ) -> ExecutedBuy:
     """Steps after a confirmed fill: position read, annotation, TP clear.
 
     ``order_id`` is the effective id (``res.order_id or order_id``). The caller
-    has already written the order row and set the intent to ``filled``. Appends
+    has written the order and set the intent to ``filled_unannotated``. Appends
     to ``followups``, ``tp_failed`` and ``tp_uncleared`` in place.
     """
     partial = res.status in _PARTIAL_STATUSES
@@ -205,6 +206,7 @@ def finish_filled_buy(
     position_id = res.position_id
     if position_id is None:
         followups.append(f"order {order_id} filled but no position id")
+        tp_failed.append(f"order {order_id}: no position id")
         return filled
 
     position = _read_position(client, position_id, sleep)
@@ -222,7 +224,8 @@ def finish_filled_buy(
         return filled
 
     try:
-        repo.insert_lot_annotation(
+        repo.finalize_filled_buy(
+            intent_id,
             LotAnnotation(
                 position_id=position_id,
                 symbol=intent.symbol,
@@ -239,10 +242,13 @@ def finish_filled_buy(
                 bucket_id=intent.bucket_id,
                 entry_order_id=order_row_id,
                 is_open=True,
-            )
+            ),
+            status=resolved_status,
         )
     except Exception as exc:
         followups.append(f"annotation for position {position_id} failed: {exc}")
+        tp_failed.append(position_id)
+        return filled
 
     if not _clear_take_profit(
         repo=repo, client=client, order_row_id=order_row_id,
@@ -384,7 +390,7 @@ def _buy_one(
             detail=f"order ended {res.status.name}: {res.reject_reason}",
         )
 
-    repo.set_intent_status(intent_id, "filled", resolved=True)
+    repo.set_intent_status(intent_id, "filled_unannotated")
     return finish_filled_buy(
         repo=repo, client=client, intent=intent, intent_id=intent_id,
         request_id=request_id, res=res, order_id=effective_order_id,
@@ -454,8 +460,8 @@ def execute_buys(
             tp_failed=tp_failed, tp_uncleared=tp_uncleared, followups=followups,
         )
         results.append(result)
-        if result.outcome != "filled":
-            stopped = result.detail
+        if result.outcome != "filled" or tp_failed:
+            stopped = followups[-1] if tp_failed else result.detail
             deferred = tuple(intents[index + 1:])
             break
 
@@ -551,16 +557,28 @@ def _recover_intent(
             still_unresolved=still_unresolved, abandoned=abandoned,
         )
 
-    try:
-        res = client.recover_by_reference_id(request_id)
-    except Exception as exc:
-        followups.append(f"{label}: broker lookup failed ({type(exc).__name__}); cannot tell")
-        res = None
+    order_row = repo.get_order_by_reference_id(request_id)
+    if intent.status == "filled_unannotated" and order_row is not None:
+        res = OrderResult(
+            order_id=order_row.order_id, reference_id=request_id,
+            status=OrderStatus(order_row.terminal_status),
+            position_id=order_row.position_id, fill_price=order_row.fill_price,
+            fill_units=order_row.fill_units, fill_amount_usd=order_row.fill_amount_usd,
+        )
+    else:
+        try:
+            res = client.recover_by_reference_id(request_id)
+        except Exception as exc:
+            followups.append(f"{label}: broker lookup failed ({type(exc).__name__}); cannot tell")
+            res = None
     if res is None:
-        age_rule()
+        if intent.status == "filled_unannotated":
+            still_unresolved.append(f"{label}: filled, order evidence unavailable")
+            tp_failed.append(label)
+        else:
+            age_rule()
         return
 
-    order_row = repo.get_order_by_reference_id(request_id)
     if order_row is None:
         order_row_id = repo.insert_order(
             Order(
@@ -619,28 +637,30 @@ def _recover_intent(
         resolved.append(f"{label}: recovered rejection ({final.status.name})")
         return
 
+    repo.set_intent_status(intent_id, "filled_unannotated")
     spy = _decision_spy(repo, intent.session_id)
     if spy is None:
         followups.append(f"no SPY context for intent {intent_id}; annotation skipped")
         still_unresolved.append(f"{label}: filled, no SPY context")
+        tp_failed.append(final.position_id or label)
         return
 
     ladder_intent = LadderIntent(
         intent.symbol, "open", amount=intent.amount_usd,
         reason=intent.reason or "", book=intent.book, bucket_id=intent.bucket_id,
     )
-    before = len(followups)
+    before = len(tp_failed)
     finish_filled_buy(
         repo=repo, client=client, intent=ladder_intent, intent_id=intent_id,
         request_id=request_id, res=final, order_id=effective_order_id,
         order_row_id=order_row_id, instrument_id=intent.instrument_id,
         trading_date=date.fromisoformat(trading_date),
         spy=spy, sleep=sleep, followups=followups, tp_failed=tp_failed, tp_uncleared=tp_uncleared,
+        resolved_status="recovered",
     )
-    if any("not visible in portfolio" in line for line in followups[before:]):
-        still_unresolved.append(f"{label}: filled, position not visible yet")
+    if len(tp_failed) > before:
+        still_unresolved.append(f"{label}: filled, finalization failed")
         return
-    repo.set_intent_status(intent_id, "recovered", resolved=True)
     resolved.append(f"{label}: recovered fill")
 
 

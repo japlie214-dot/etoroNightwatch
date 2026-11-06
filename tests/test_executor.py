@@ -21,6 +21,8 @@ from nightwatch.etoro.errors import (
 )
 from nightwatch.etoro.models import EditPositionAck, OrderResult, OrderStatus, Position
 from nightwatch.strategy.ladder import LadderIntent, SpyContext
+from .test_session_armed import armed
+from .test_session_decide import config, no_network
 
 NOW = datetime(2026, 10, 16, 15, 0, tzinfo=timezone.utc)
 FUTURE = NOW + timedelta(hours=1)
@@ -371,11 +373,16 @@ def test_missing_tp_rate_is_not_confirmed_absent(repo, session_id, fake, sleeps)
     assert report.tp_failed == ()
 
 
-def test_no_position_id_on_fill_is_followup_only(repo, session_id, fake, sleeps) -> None:
+def test_no_position_id_on_fill_stays_unresolved_and_stops(repo, session_id, fake, sleeps) -> None:
     fake.poll_queue = [_poll(_filled(position_id=None))]
-    report = _run(repo, fake, session_id, sleeps, [_intent()])
+    report = _run(repo, fake, session_id, sleeps, [_intent(), _intent(10)], max_orders=2)
     assert report.results[0].outcome == "filled"
     assert any("no position id" in line for line in report.followups)
+    assert report.tp_failed == ("order O1: no position id",)
+    assert report.stopped and report.deferred == (_intent(10),)
+    assert len(fake.buy_calls) == 1
+    saved, = repo.get_intents(session_id)
+    assert saved.status == "filled_unannotated" and saved.resolved_at is None
     assert fake.calls.count("get_portfolio") == 0
     assert repo.list_tp_clears() == []
 
@@ -420,3 +427,68 @@ def test_stop_after_rejection_defers_the_next_intent(repo, session_id, fake, sle
     assert fake.calls.count("place_buy_order") == 1
     assert report.deferred == (intents[1],)
     assert report.stopped is not None
+
+
+@pytest.mark.parametrize("failure", ["missing", "mismatch", "annotation", "resolve"])
+def test_finalization_failure_stops_next_buy_and_reserves_cap(
+    repo, session_id, fake, sleeps, failure,
+):
+    from dataclasses import replace
+
+    if failure == "missing":
+        fake.portfolio_queue = [[]]
+    elif failure == "mismatch":
+        fake.portfolio_queue = [[replace(_position(), instrument_id=-1)]]
+    else:
+        event = "INSERT ON lot_annotations" if failure == "annotation" else "UPDATE ON intents WHEN NEW.status = 'filled'"
+        repo.conn.execute(f"CREATE TRIGGER fail_finalize BEFORE {event} "
+                          "BEGIN SELECT RAISE(ABORT, 'injected finalization failure'); END")
+        repo.conn.commit()
+    report = _run(repo, fake, session_id, sleeps, [_intent(), _intent(10)], max_orders=2)
+
+    assert len(fake.buy_calls) == 1
+    assert report.tp_failed == ("P1",)
+    assert report.stopped and report.deferred == (_intent(10),)
+    saved, = repo.get_intents(session_id)
+    assert saved.status == "filled_unannotated" and saved.resolved_at is None
+    assert repo.unresolved_intents(session_id) == [saved]
+    assert repo.reserved_buy_usd(TRADING_DATE.isoformat()) == pytest.approx(633.33)
+    assert repo.get_lot_annotation("P1") is None
+    assert fake.patch_calls == []
+    assert not repo.conn.in_transaction
+
+
+@pytest.mark.parametrize("failure", ["annotation", "identity"])
+def test_run_session_finalization_failure_halts_and_vetoes_final_save(
+    armed, repo, host, monkeypatch, failure,
+):
+    from dataclasses import replace
+    from nightwatch.engine import executor, session
+    from .test_session_market import DAY, IDS, FakeTiingo
+
+    armed.config = replace(armed.config, risk=replace(armed.config.risk, max_orders_per_session=2))
+    armed.decision.intents *= 2
+    fake = FakeExecClient(repo)
+    fake.portfolio_queue = [[replace(_position(), instrument_id=IDS["SCHG"])]]
+    if failure == "annotation":
+        repo.conn.execute("CREATE TRIGGER fail_annotation BEFORE INSERT ON lot_annotations "
+                          "BEGIN SELECT RAISE(ABORT, 'annotation insert failed'); END")
+        repo.conn.commit()
+    else:
+        fake.poll_queue = [_poll(_filled(position_id=None))]
+    armed.execute.side_effect = lambda **kw: executor.execute_buys(
+        **{**kw, "client": fake, "sleep": lambda _: None})
+    before = repo.get_strategy_state()
+    result = session.run_session(host=host, config=armed.config, repo=repo,
+                                 client=armed.client, tiingo=FakeTiingo(),
+                                 trading_date=DAY, wait=False)
+
+    assert len(fake.buy_calls) == 1 and fake.violations == []
+    assert result.halt_set and result.tp_failed and host.halt_flag_path().exists()
+    assert "strategy state not saved" in result.reason
+    assert ("annotation insert failed" if failure == "annotation" else "no position id") in result.reason
+    armed.save.assert_not_called()
+    assert repo.get_strategy_state() == before
+    saved, = repo.get_intents(result.session_id)
+    assert saved.status == "filled_unannotated" and saved.resolved_at is None
+    assert repo.get_lot_annotation("P1") is None

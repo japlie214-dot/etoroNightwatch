@@ -13,6 +13,8 @@ from nightwatch.engine.executor import recover_unfinished
 from nightwatch.etoro.client import PollResult
 from nightwatch.etoro.errors import EtoroTimeoutError
 from nightwatch.etoro.models import EditPositionAck, OrderResult, OrderStatus, Position
+from .test_session_armed import armed
+from .test_session_decide import config, no_network
 
 DAY = "2026-10-15"
 TODAY = "2026-10-16"
@@ -290,7 +292,7 @@ def test_filled_position_not_visible_then_visible_on_second_call(repo, fake, sle
 
     first = _recover(repo, fake, sleeps)
 
-    assert _status(repo, "rid-7") == "sent"
+    assert _status(repo, "rid-7") == "filled_unannotated"
     assert any("not visible in portfolio" in line for line in first.followups)
     assert len(first.still_unresolved) == 1
     assert repo.get_lot_annotation("P1") is None
@@ -313,7 +315,7 @@ def test_filled_without_decision_row_skips_annotation(repo, fake, sleeps) -> Non
 
     report = _recover(repo, fake, sleeps)
 
-    assert _status(repo, "rid-8") == "sent"
+    assert _status(repo, "rid-8") == "filled_unannotated"
     assert any("no SPY context" in line for line in report.followups)
     assert len(report.still_unresolved) == 1
     assert repo.get_lot_annotation("P1") is None
@@ -326,7 +328,7 @@ def test_filled_with_null_spy_close_skips_annotation(repo, fake, sleeps) -> None
 
     report = _recover(repo, fake, sleeps)
 
-    assert _status(repo, "rid-8b") == "sent"
+    assert _status(repo, "rid-8b") == "filled_unannotated"
     assert any("no SPY context" in line for line in report.followups)
     assert repo.get_lot_annotation("P1") is None
 
@@ -513,3 +515,84 @@ def test_two_intents_are_handled_independently(repo, fake, sleeps) -> None:
     assert _status(repo, "rid-16b") == "sent"
     assert len(report.still_unresolved) == 1
     assert fake.calls.count("place_buy_order") == 0
+
+
+@pytest.mark.parametrize("failure", ["identity", "mismatch", "annotation", "resolve"])
+def test_recovery_finalization_failure_remains_unresolved(repo, fake, sleeps, failure):
+    from dataclasses import replace
+
+    _seed_intent(repo, rid="unfinished-fill")
+    fake.recover_by_rid["unfinished-fill"] = [_filled(None if failure == "identity" else "P1")]
+    if failure == "mismatch":
+        fake.portfolio_queue = [[replace(_position(), instrument_id=-1)]]
+    elif failure in ("annotation", "resolve"):
+        event = "INSERT ON lot_annotations" if failure == "annotation" else "UPDATE ON intents WHEN NEW.status = 'recovered'"
+        repo.conn.execute(f"CREATE TRIGGER fail_recovery BEFORE {event} "
+                          "BEGIN SELECT RAISE(ABORT, 'recovery annotation failed'); END")
+        repo.conn.commit()
+    report = _recover(repo, fake, sleeps)
+
+    saved = repo.get_intent_by_request_id("unfinished-fill")
+    assert saved.status == "filled_unannotated" and saved.resolved_at is None
+    assert report.tp_failed and report.still_unresolved and not report.resolved
+    assert repo.get_lot_annotation("P1") is None
+    assert not fake.patch_calls and not repo.conn.in_transaction
+
+
+def test_crash_after_durable_fill_recovers_annotation_without_lookup_or_resend(repo, fake, sleeps, monkeypatch):
+    from nightwatch.engine import executor
+    from .test_executor import FakeExecClient, _intent, _run, SPY
+
+    _seed_intent(repo, rid="old-rejected", status="rejected", spy_close=SPY.close)
+    sid = _session(repo, DAY).id
+    buying = FakeExecClient(repo)
+    finalize = repo.finalize_filled_buy
+    def crash(*args, **kwargs):
+        raise KeyboardInterrupt("crash before annotation")
+    monkeypatch.setattr(repo, "finalize_filled_buy", crash)
+    with pytest.raises(KeyboardInterrupt, match="crash before annotation"):
+        _run(repo, buying, sid, [], [_intent()])
+    saved = repo.get_intents(sid)[-1]
+    assert saved.status == "filled_unannotated" and saved.resolved_at is None
+    assert repo.get_lot_annotation("P1") is None
+    monkeypatch.setattr(repo, "finalize_filled_buy", finalize)
+    # A new connection observes the committed fill after the interrupted run.
+    restarted = Repo.open(repo.conn.execute("PRAGMA database_list").fetchone()[2])
+    try:
+        report = executor.recover_unfinished(repo=restarted, client=fake,
+                                             abandon_after_sessions=3, sleep=sleeps.append)
+        assert restarted.get_intent_by_request_id(saved.request_id).status == "recovered"
+        assert restarted.get_lot_annotation("P1").entry_spy_close == SPY.close
+        assert report.resolved and not report.tp_failed and not report.still_unresolved
+        assert "recover_by_reference_id" not in fake.calls
+        assert fake.buy_calls == fake.violations == []
+        again = executor.recover_unfinished(repo=restarted, client=fake,
+                                            abandon_after_sessions=3, sleep=sleeps.append)
+        assert not again.resolved and not again.still_unresolved
+    finally:
+        restarted.close()
+
+
+def test_recovered_fill_without_identity_halts_session_before_new_buys(armed, repo, host):
+    from nightwatch.engine import executor, session
+    from .test_session_market import DAY as RUN_DAY, IDS, FakeTiingo
+
+    _seed_intent(repo, rid="missing-identity")
+    old = _session(repo, DAY)
+    repo.finish_session(old.id, "finished", "interrupted bookkeeping")
+    fake = FakeRecoveryClient(repo)
+    fake.recover_by_rid["missing-identity"] = [_filled(None)]
+    armed.recover.side_effect = lambda **kw: executor.recover_unfinished(
+        repo=repo, client=fake, abandon_after_sessions=3, sleep=lambda _: None)
+    result = session.run_session(host=host, config=armed.config, repo=repo,
+                                 client=armed.client, tiingo=FakeTiingo(),
+                                 trading_date=RUN_DAY, wait=False)
+
+    assert result.status == "halted_before_execution"
+    assert result.tp_failed and result.halt_set and host.halt_flag_path().exists()
+    armed.execute.assert_not_called()
+    armed.save.assert_not_called()
+    saved = repo.get_intent_by_request_id("missing-identity")
+    assert saved.status == "filled_unannotated" and saved.resolved_at is None
+    assert "no position id" in result.reason
+    assert fake.buy_calls == []

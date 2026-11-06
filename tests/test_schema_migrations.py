@@ -119,9 +119,79 @@ def test_migration_011_upgrades_version_10(tmp_path, monkeypatch):
         with monkeypatch.context() as patch:
             patch.setattr(migrations, "discover", lambda: [m for m in all_migrations if m.version <= 10])
             assert migrations.migrate(conn) == 10
-        assert migrations.migrate(conn) == 11
+        assert migrations.migrate(conn) == migrations.discover()[-1].version
         assert "partial_close_effects" in Repo(conn).table_names()
         assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_migration_012_accepts_unannotated_fill_and_preserves_references(tmp_path, monkeypatch, upgrade):
+    from nightwatch.db.repo import Order
+
+    all_migrations = migrations.discover()
+    conn = connect(tmp_path / "fills.db")
+    try:
+        if upgrade:
+            with monkeypatch.context() as patch:
+                patch.setattr(migrations, "discover", lambda: [m for m in all_migrations if m.version <= 11])
+                assert migrations.migrate(conn) == 11
+            repo = Repo(conn)
+            intent = schg_leg(repo)
+            iid, lid = repo.begin_schg_close_leg(intent, position_id="100", units_before=4, units_deducted=2)
+            oid = repo.insert_order(Order(iid, intent.session_id, intent.request_id, "SCHG", "close"))
+            repo.record_close_observation(intent_id=iid, order_row_id=oid, order_id="broker-order",
+                                          position_id="100", observed_status="unresolved")
+            repo.conn.execute("UPDATE sqlite_sequence SET seq = 99 WHERE name = 'intents'")
+            repo.conn.commit()
+            original = dict(conn.execute("SELECT * FROM intents WHERE id = ?", (iid,)).fetchone())
+            with pytest.raises(sqlite3.IntegrityError):
+                repo.set_intent_status(iid, "filled_unannotated")
+            conn.rollback()
+        assert migrations.migrate(conn) == 12
+        repo = Repo(conn)
+        if upgrade:
+            assert dict(conn.execute("SELECT * FROM intents WHERE id = ?", (iid,)).fetchone()) == original
+            assert repo.get_order(oid).intent_id == iid
+            assert repo.pending_partial_closes()[0]["id"] == lid
+            assert repo.list_close_observations()[0]["intent_id"] == iid
+            sid = intent.session_id
+        else:
+            sid = repo.create_session("2026-10-30", "live", "demo", True).id
+        new = repo.insert_intent(Intent(sid, "unannotated", 2, "SCHG", "buy",
+                                        amount_usd=100, status="filled_unannotated"))
+        assert new == (100 if upgrade else 1)
+        assert repo.reserved_buy_usd("2026-10-30") == 100
+        assert repo.unresolved_intents(sid)[-1].id == new
+        assert repo.unresolved_buy_intents()[0][0].id == new
+        with pytest.raises(sqlite3.IntegrityError):
+            repo.set_intent_status(new, "invalid")
+        conn.rollback()
+        assert conn.execute("PRAGMA foreign_key_check").fetchall() == []
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_migration_012_failure_rolls_back_and_can_retry(tmp_path, monkeypatch):
+    all_migrations = migrations.discover()
+    conn = connect(tmp_path / "rollback-fill.db")
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(migrations, "discover", lambda: [m for m in all_migrations if m.version <= 11])
+            assert migrations.migrate(conn) == 11
+        conn.execute("CREATE TRIGGER reject_v12 BEFORE INSERT ON schema_version "
+                     "WHEN NEW.version = 12 BEGIN SELECT RAISE(ABORT, 'reject 012'); END")
+        conn.commit()
+        with pytest.raises(sqlite3.IntegrityError, match="reject 012"):
+            migrations.migrate(conn)
+        assert migrations.current_version(conn) == 11
+        assert conn.execute("SELECT name FROM sqlite_master WHERE name = 'intents_new'").fetchall() == []
+        assert "filled_unannotated" not in conn.execute("SELECT sql FROM sqlite_master WHERE name = 'intents'").fetchone()[0]
+        conn.execute("DROP TRIGGER reject_v12")
+        conn.commit()
+        assert migrations.migrate(conn) == 12
     finally:
         conn.close()
 
