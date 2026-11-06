@@ -42,7 +42,7 @@ MESSAGE_LIMIT: int = 4096
 _API_ROOT = "https://api.telegram.org"
 
 #: Bounded exponential backoff for transient failures (network error, 5xx).
-#: 429 instead honours the server's own ``retry_after``.
+#: 429 honours the server's ``retry_after`` up to the same delay cap.
 _MAX_ATTEMPTS = 5
 _BASE_DELAY_SECONDS = 1.0
 _MAX_DELAY_SECONDS = 30.0
@@ -237,7 +237,7 @@ class TelegramNotifier:
                 last_error = f"429 rate limited (retry_after={retry_after}s)"
                 if attempt == _MAX_ATTEMPTS:
                     break
-                self._sleep(retry_after)
+                self._sleep(min(retry_after, _MAX_DELAY_SECONDS))
                 continue
 
             if 500 <= response.status_code < 600:

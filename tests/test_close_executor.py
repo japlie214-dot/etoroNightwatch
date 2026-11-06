@@ -26,6 +26,12 @@ class FakeClient:
         self.read_count = 0
         self.send_error = None
 
+    def deadline_expired(self):
+        return False
+
+    def deadline_remaining(self):
+        return float("inf")
+
     def close_position(self, *args, **kwargs):
         assert len(args) == 3 and not kwargs  # never units_to_deduct
         self.calls.append(args)

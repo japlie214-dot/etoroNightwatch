@@ -87,6 +87,12 @@ class FakeRecoveryClient:
             raise item
         return item
 
+    def deadline_expired(self) -> bool:
+        return False
+
+    def deadline_remaining(self) -> float:
+        return float("inf")
+
     def place_buy_order(self, request_id: str, instrument_id: int, amount_usd: float) -> str:
         self.calls.append("place_buy_order")
         self.buy_calls.append(request_id)
@@ -243,15 +249,16 @@ def test_none_with_age_one_stays_sent_and_unresolved(repo, fake, sleeps) -> None
     assert fake.calls.count("place_buy_order") == 0
 
 
-def test_none_with_age_three_abandons_and_still_reserves_its_own_date(repo, fake, sleeps) -> None:
+def test_sent_with_age_three_stays_unresolved_and_reserves_its_own_date(repo, fake, sleeps) -> None:
     _seed_intent(repo, rid="rid-4")
     _later_sessions(repo, [TODAY, "2026-10-17", "2026-10-18"])
     fake.recover_by_rid["rid-4"] = [None]
 
     report = _recover(repo, fake, sleeps, abandon_after=3)
 
-    assert _status(repo, "rid-4") == "abandoned"
-    assert len(report.abandoned) == 1
+    assert _status(repo, "rid-4") == "sent"
+    assert report.abandoned == ()
+    assert len(report.still_unresolved) == 1
     assert repo.reserved_buy_usd(DAY) == pytest.approx(633.33)
     assert fake.calls.count("place_buy_order") == 0
 

@@ -27,6 +27,12 @@ class FakeClient:
         self.closed = False
         self.order_sizes = []
 
+    def deadline_expired(self):
+        return False
+
+    def deadline_remaining(self):
+        return float("inf")
+
     def get_balance(self):
         return 1000.0
 

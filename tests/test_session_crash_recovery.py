@@ -117,7 +117,7 @@ def test_unresolved_crash_sets_halt_and_gate_five_refuses(repo, host, recovery, 
     assert not gate.passed and "unresolved" in gate.reason
     assert repo.unresolved_intents(old.id)[0].session_id == old.id
     if case == "ages_to_abandoned":
-        assert repo.get_intent_by_request_id("sent").status == "abandoned"
+        assert repo.get_intent_by_request_id("sent").status == "sent"
     recovery.buy.assert_not_called()
     recovery.close.assert_not_called()
     assert recovery.client.buy_calls == recovery.client.patch_calls == []

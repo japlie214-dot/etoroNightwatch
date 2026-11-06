@@ -114,11 +114,17 @@ def _portfolio_position(client: EtoroClient, position_id: str) -> Position | Non
 def _read_position(
     client: EtoroClient, position_id: str, sleep: Callable[[float], None]
 ) -> Position | None:
-    for _ in range(READ_TRIES):
+    for attempt in range(READ_TRIES):
+        if client.deadline_expired():
+            return None
         found = _portfolio_position(client, position_id)
         if found is not None:
             return found
-        sleep(READ_SLEEP)
+        if attempt < READ_TRIES - 1:
+            remaining = client.deadline_remaining()
+            if remaining <= 0:
+                return None
+            sleep(min(READ_SLEEP, remaining))
     return None
 
 
@@ -140,6 +146,9 @@ def _clear_take_profit(
     for attempt in range(1, TP_ATTEMPTS + 1):
         request_id = new_request_id()
         tp_id = repo.insert_tp_clear(order_row_id, position_id, request_id, attempt)
+        if client.deadline_expired():
+            repo.set_tp_clear_status(tp_id, "failed", "deadline: attempt not started")
+            return False
         try:
             ack = client.clear_take_profit(request_id, position_id)
         except (EtoroValidationError, ValueError) as exc:
@@ -157,7 +166,14 @@ def _clear_take_profit(
         )
         confirmed = False
         for _ in range(TP_READBACK_TRIES):
-            sleep(TP_READBACK_SLEEP)
+            remaining = client.deadline_remaining()
+            if remaining <= 0:
+                repo.set_tp_clear_status(tp_id, "failed", "deadline: read-back not attempted")
+                return False
+            sleep(min(TP_READBACK_SLEEP, remaining))
+            if client.deadline_expired():
+                repo.set_tp_clear_status(tp_id, "failed", "deadline: read-back not attempted")
+                return False
             current = _portfolio_position(client, position_id)
             if current is not None and _tp_absent(current):
                 confirmed = True
@@ -531,7 +547,8 @@ def _age_or_abandon(
 ) -> None:
     """Escalate visibility by session age. Never frees cap, never resubmits."""
     age = repo.sessions_since(trading_date)
-    if age >= abandon_after_sessions:
+    # A sent order may fill after this run's clamped polling window.
+    if age >= abandon_after_sessions and intent.sent_at is None:
         repo.set_intent_status(intent.id, "abandoned", resolved=True)
         abandoned.append(f"{label}: abandoned after {age} later sessions")
     else:

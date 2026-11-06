@@ -101,6 +101,12 @@ class FakeExecClient:
             raise item
         return item
 
+    def deadline_expired(self) -> bool:
+        return False
+
+    def deadline_remaining(self) -> float:
+        return float("inf")
+
     def place_buy_order(self, request_id: str, instrument_id: int, amount_usd: float) -> str:
         self.calls.append("place_buy_order")
         self.buy_calls.append((request_id, instrument_id, amount_usd))
@@ -323,7 +329,8 @@ def test_position_never_visible_skips_annotation_and_patch(repo, session_id, fak
     assert fake.calls.count("clear_take_profit") == 0
     assert repo.get_lot_annotation("P1") is None
     assert report.tp_uncleared == ()
-    assert sleeps == [3.0] * 10
+    assert fake.calls.count("get_portfolio") == 10
+    assert sleeps == [3.0] * 9
 
 
 def test_tp_never_clears_makes_three_attempts(repo, session_id, fake, sleeps) -> None:

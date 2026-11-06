@@ -54,6 +54,12 @@ class MarketClient:
     def set_deadline_in(self, seconds):
         self.deadline_in = seconds
 
+    def deadline_expired(self):
+        return False
+
+    def deadline_remaining(self):
+        return float("inf")
+
     def resolve_instrument_id(self, symbol):
         return IDS[symbol]
 

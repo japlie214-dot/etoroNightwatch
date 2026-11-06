@@ -245,6 +245,26 @@ def test_429_exhausting_retries_is_recorded_failed(repo: Repo) -> None:
     assert "429" in notification.error
 
 
+@pytest.mark.parametrize("exhausted", [False, True])
+@pytest.mark.parametrize("source", ["body", "header"])
+def test_429_long_retry_after_is_capped(repo, exhausted, source) -> None:
+    from nightwatch.notify.telegram import _MAX_ATTEMPTS, _MAX_DELAY_SECONDS
+
+    limited = (FakeResponse(429, {"parameters": {"retry_after": 600}})
+               if source == "body" else FakeResponse(429, headers={"Retry-After": "600"}))
+    responses = ([limited] * _MAX_ATTEMPTS if exhausted else
+                 [limited, FakeResponse(200, {"result": {"message_id": 9}})])
+    client = FakeClient(responses)
+    sleeps = []
+    notifier = TelegramNotifier(
+        _configured_telegram(), repo, client=client, sleep=sleeps.append,
+    )
+    result = notifier.send("bounded rate limit", event="fill")
+    assert result.status == ("failed" if exhausted else "sent")
+    assert len(client.post_calls) == (_MAX_ATTEMPTS if exhausted else 2)
+    assert sleeps == [_MAX_DELAY_SECONDS] * (_MAX_ATTEMPTS - 1 if exhausted else 1)
+
+
 # -- permanent 400-class is never retried --------------------------------------
 
 

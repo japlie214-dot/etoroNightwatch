@@ -47,6 +47,12 @@ class Client:
         self.default_read = [replace(POSITION, units=2.0)]
         self.send_error = None
 
+    def deadline_expired(self):
+        return False
+
+    def deadline_remaining(self):
+        return float("inf")
+
     def close_position(self, request_id, pid, instrument_id, deducted):
         saved = self.repo.get_intent_by_request_id(request_id)
         rows = self.repo.pending_partial_closes()

@@ -239,6 +239,12 @@ class EtoroClient:
     def set_deadline_in(self, seconds: float | None) -> None:
         self._deadline = None if seconds is None else self._clock() + seconds
 
+    def deadline_expired(self) -> bool:
+        return self._deadline is not None and self._clock() >= self._deadline
+
+    def deadline_remaining(self) -> float:
+        return math.inf if self._deadline is None else max(0.0, self._deadline - self._clock())
+
     def _check_deadline(self, wait: float = 0.0) -> None:
         if self._deadline is not None:
             now = self._clock()
@@ -2094,9 +2100,12 @@ class EtoroClient:
         )
         attempts += 1
         while not result.is_terminal:
-            if self._clock() >= deadline:
+            remaining = deadline - self._clock()
+            if remaining <= 0:
                 return PollResult(order=result, attempts=attempts, timed_out=True)
-            self._sleep(interval)
+            wait = min(interval, remaining, self.deadline_remaining())
+            if wait > 0:
+                self._sleep(wait)
             result = (
                 self.lookup_close_order(order_id, expected_position_id=expected_position_id) if kind == "close"
                 else self.lookup_order(

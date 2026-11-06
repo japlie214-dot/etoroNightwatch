@@ -109,6 +109,8 @@ def _finish_close(
 
     successful = 0
     for attempt in range(10):
+        if client.deadline_expired():
+            return uncertain("deadline: confirmation paused")
         if now() >= deadline:
             return uncertain("past deadline")
         try:
@@ -117,6 +119,8 @@ def _finish_close(
             pass
         else:
             successful += 1
+            if client.deadline_expired():
+                return uncertain("deadline: confirmation paused")
             if now() >= deadline:
                 return uncertain("past deadline")
             if not any(p.position_id == pid for p in positions):
@@ -135,11 +139,14 @@ def _finish_close(
                     )
                 repo.set_intent_status(intent_id, "filled", resolved=True)
                 return outcome("confirmed", "full close confirmed and applied")
+        client_remaining = client.deadline_remaining()
+        if client_remaining <= 0:
+            return uncertain("deadline: confirmation paused")
         if attempt < 9:
             remaining = (deadline - now()).total_seconds()
             if remaining <= 0:
                 return uncertain("past deadline")
-            sleep(min(3.0, remaining))
+            sleep(min(3.0, remaining, client_remaining))
     return uncertain(
         "position still open after confirmation" if successful else "no successful portfolio read",
         status="still_open" if successful else "unresolved",
@@ -356,7 +363,7 @@ def _finish_schg_close(
                         return finish("unresolved", "slice units mismatch")
                     slice_id = str(slices[0]["positionID"])
                 break
-        remaining = (lookup_end - now()).total_seconds()
+        remaining = min((lookup_end - now()).total_seconds(), client.deadline_remaining())
         if remaining > 0:
             sleep(min(2.0, remaining))
     if now() >= deadline:
@@ -365,11 +372,15 @@ def _finish_schg_close(
     portfolio_end = min(deadline, now() + timedelta(seconds=90))
     absent_at = None
     while now() < portfolio_end:
+        if client.deadline_expired():
+            return finish("unresolved", "deadline: confirmation paused")
         try:
             positions = client.get_portfolio_strict()
         except Exception:
             absent_at = None
         else:
+            if client.deadline_expired():
+                return finish("unresolved", "deadline: confirmation paused")
             if now() >= deadline:
                 return finish("unresolved", "past deadline")
             position = next((p for p in positions if p.position_id == pid), None)
@@ -394,9 +405,12 @@ def _finish_schg_close(
                 absent_at = now()
             else:
                 absent_at = None
+        client_remaining = client.deadline_remaining()
+        if client_remaining <= 0:
+            return finish("unresolved", "deadline: confirmation paused")
         remaining = (portfolio_end - now()).total_seconds()
         if remaining > 0:
-            sleep(min(3.0, remaining))
+            sleep(min(3.0, remaining, client_remaining))
     if now() >= deadline:
         return finish("unresolved", "past deadline")
     return finish("unresolved" if filled else "unverified",
