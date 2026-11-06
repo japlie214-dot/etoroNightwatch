@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -33,16 +34,37 @@ _ETORO_TRADER = Path(__file__).resolve().parents[2] / "etoro_trader"
 if not _ETORO_TRADER.is_dir():
     pytest.skip(f"etoro_trader not found at {_ETORO_TRADER}", allow_module_level=True)
 
-sys.path.insert(0, str(_ETORO_TRADER))
+# Load the unmodified pure modules without package initializers: common's
+# initializer imports common.config, which reads the sibling's real .env.
+_SOURCE_ROOTS = ("common", "harness", "indicators")
+_saved_modules = {
+    name: module for name, module in sys.modules.copy().items()
+    if name.split(".")[0] in _SOURCE_ROOTS
+}
+try:
+    for name in _saved_modules:
+        del sys.modules[name]
+    for name in (*_SOURCE_ROOTS, "harness.strategies", "indicators.volatility"):
+        package = ModuleType(name)
+        package.__path__ = [str(_ETORO_TRADER.joinpath(*name.split(".")))]
+        sys.modules[name] = package
 
-from common.contracts.account import AccountState  # noqa: E402
-from common.contracts.decision import Hold, OrderIntents  # noqa: E402
-from common.contracts.etoro_schema import EtoroAction, EtoroPosition  # noqa: E402
-from harness.context import HarnessContext  # noqa: E402
-from harness.strategies.std_band_ladder_cash_recycle import (  # noqa: E402
-    StdBandLadderCashRecycleConfig, StdBandLadderCashRecycleHarness,
-)
-from indicators.base import IndicatorSnapshot  # noqa: E402
+    from common.contracts.account import AccountState
+    from common.contracts.decision import Hold, OrderIntents
+    from common.contracts.etoro_schema import EtoroAction, EtoroPosition
+    from harness.context import HarnessContext
+    from harness.strategies.std_band_ladder_cash_recycle import (
+        StdBandLadderCashRecycleConfig, StdBandLadderCashRecycleHarness,
+    )
+    from harness.strategies.std_band_ladder_martingale import (
+        MARTINGALE_RATIO, _N_TIERS, _TIER_BOUNDARIES, _martingale_tier_caps,
+    )
+    from indicators.base import IndicatorSnapshot
+finally:
+    for name in tuple(sys.modules):
+        if name.split(".")[0] in _SOURCE_ROOTS:
+            del sys.modules[name]
+    sys.modules.update(_saved_modules)
 
 from nightwatch.config import TIER_CAPS, TIER_DRAWDOWN_BOUNDS  # noqa: E402
 from nightwatch.strategy import ladder  # noqa: E402
@@ -58,10 +80,6 @@ def test_tier_caps_match_source_martingale_derivation():
     ``_martingale_tier_caps(MARTINGALE_RATIO, 6)`` -- imported and computed
     from the real ``std_band_ladder_martingale`` module, not retyped.
     """
-    from harness.strategies.std_band_ladder_martingale import (
-        MARTINGALE_RATIO, _N_TIERS, _TIER_BOUNDARIES, _martingale_tier_caps,
-    )
-
     source_caps = _martingale_tier_caps(MARTINGALE_RATIO, _N_TIERS)
     assert len(source_caps) == len(TIER_CAPS)
     for expected, actual in zip(source_caps, TIER_CAPS):

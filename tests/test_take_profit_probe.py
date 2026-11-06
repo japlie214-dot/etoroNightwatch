@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import sys
+import io
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,22 +22,18 @@ from probe.take_profit_probe import (  # noqa: E402
 )
 
 
-@pytest.fixture
-def scratch_path(request):
-    # The managed Windows test sandbox blocks writes in dynamically named temp
-    # directories. Use one stable, ignored workspace folder per test instead.
-    directory = Path(__file__).parents[1] / ".tp_probe_test_data" / request.node.name
-    directory.mkdir(parents=True, exist_ok=True)
-    try:
-        yield directory
-    finally:
-        for child in sorted(directory.rglob("*"), key=lambda path: len(path.parts), reverse=True):
-            if child.is_file() or child.is_symlink():
-                child.unlink()
-            else:
-                child.rmdir()
-        directory.rmdir()
-        directory.parent.rmdir()
+@pytest.mark.parametrize("open_file", [open, io.open, Path.open, os.open])
+@pytest.mark.parametrize("name", [".env", ".secrets.env"])
+@pytest.mark.parametrize("mode", ["r", "w"])
+def test_env_guard_blocks_opens_outside_tmp_path(tmp_path, open_file, name, mode):
+    synthetic_env = tmp_path / name
+    synthetic_env.write_text("SYNTHETIC=value\n", encoding="utf-8")
+    assert synthetic_env.read_text(encoding="utf-8") == "SYNTHETIC=value\n"
+    # This nonexistent sibling path cannot contain real credentials.
+    outside = tmp_path.with_name(tmp_path.name + "_outside") / name
+    argument = (os.O_RDONLY if mode == "r" else os.O_WRONLY | os.O_CREAT) if open_file is os.open else mode
+    with pytest.raises(pytest.fail.Exception, match="refused env-file open outside tmp_path"):
+        open_file(outside, argument)
 
 
 def test_real_write_gate_requires_every_exact_signal():
@@ -61,8 +59,8 @@ def test_order_must_be_filled_and_name_a_position():
             require_filled_position_id(status, position_id)
 
 
-def test_private_approval_token_is_consumed_once(scratch_path: Path):
-    token_file = scratch_path / "approval.token"
+def test_private_approval_token_is_consumed_once(tmp_path: Path):
+    token_file = tmp_path / "approval.token"
     token_file.write_text("one-use-random-token\n", encoding="utf-8")
     consume_approval_token(token_file, "one-use-random-token")
     assert not token_file.exists()
@@ -70,8 +68,8 @@ def test_private_approval_token_is_consumed_once(scratch_path: Path):
         consume_approval_token(token_file, "one-use-random-token")
 
 
-def test_wrong_private_token_cannot_authorize_or_log_token(scratch_path: Path):
-    token_file = scratch_path / "approval.token"
+def test_wrong_private_token_cannot_authorize_or_log_token(tmp_path: Path):
+    token_file = tmp_path / "approval.token"
     token_file.write_text("never-log-this-token", encoding="utf-8")
     with pytest.raises(ValueError) as error:
         consume_approval_token(token_file, "wrong")
@@ -84,13 +82,13 @@ def test_wrong_private_token_cannot_authorize_or_log_token(scratch_path: Path):
     [(3, "Filled"), (9, "CanceledPartiallyFilled"), (10, "RejectedPartiallyFilled")],
 )
 def test_run_verifies_full_and_terminal_partial_fills_then_blocks_replay(
-    scratch_path: Path, monkeypatch, capsys, status_id: int, status_label: str
+    tmp_path: Path, monkeypatch, capsys, status_id: int, status_label: str
 ):
     from nightwatch.etoro import client as client_module
     from nightwatch.etoro.models import OrderStatus
     status = OrderStatus(status_id)
 
-    config_dir = scratch_path / "device"
+    config_dir = tmp_path / "device"
     config_dir.joinpath("config").mkdir(parents=True, exist_ok=True)
     config_dir.joinpath("config", "config.toml").write_text(
         '[trading]\nmode="dry_run"\n[etoro]\nenvironment="real"\n', encoding="utf-8"
@@ -98,17 +96,9 @@ def test_run_verifies_full_and_terminal_partial_fills_then_blocks_replay(
     config_dir.joinpath("config", ".secrets.env").write_text(
         "ETORO_PUBLIC_KEY=test-public\nETORO_PRIVATE_KEY=test-write\n", encoding="utf-8"
     )
-    output_dir = scratch_path / "output"
+    output_dir = tmp_path / "output"
     token_file = output_dir / "approval.token"
     output_dir.mkdir(exist_ok=True)
-    for name in (
-        "authorization_gate.json", "eligibility_raw.json", "order_lookup_001.json",
-        "order_submit_raw.json", "portfolio_before.json", "portfolio_after.json",
-        "probe_report.json", "submit_attempt.json", "take_profit_verdict.json",
-    ):
-        artifact = output_dir / name
-        if artifact.exists():
-            artifact.unlink()
     token_file.write_text("one-use-random-token", encoding="utf-8")
     position_raw = {
         "positionID": "position-1",

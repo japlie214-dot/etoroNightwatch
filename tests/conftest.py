@@ -7,9 +7,54 @@ the real ``config/``, ``data/`` or ``logs/`` of the working tree.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 from pathlib import Path
 
 import pytest
+
+_env_guard_enabled = True
+_env_test_root: Path | None = None
+
+
+def _guard_env_open(event, args):
+    if not _env_guard_enabled or event != "open":
+        return
+    path = args[0]
+    if isinstance(path, int):
+        return
+    path = Path(os.fsdecode(path))
+    if path.name.lower() not in {".secrets.env", ".env"}:
+        return
+    path = path.resolve()
+    if _env_test_root is None or not path.is_relative_to(_env_test_root):
+        pytest.fail(f"Test suite refused env-file open outside tmp_path: {path}")
+
+
+# Audit hooks cover builtins.open, io.open/Path.open and os.open, including
+# collection-time imports before any fixture can protect real credentials.
+sys.addaudithook(_guard_env_open)
+
+
+def pytest_configure(config):
+    global _env_guard_enabled
+    _env_guard_enabled = True
+
+
+def pytest_unconfigure(config):
+    global _env_guard_enabled
+    _env_guard_enabled = False
+
+
+@pytest.fixture(autouse=True)
+def _allow_env_files_only_in_tmp_path(tmp_path):
+    global _env_test_root
+    _env_test_root = tmp_path.resolve()
+    try:
+        yield
+    finally:
+        _env_test_root = None
+
 
 from nightwatch.host import DesktopHost
 from nightwatch.db.repo import Repo
