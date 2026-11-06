@@ -105,7 +105,7 @@ class FakeExecClient:
         self.calls.append("place_buy_order")
         self.buy_calls.append((request_id, instrument_id, amount_usd))
         row = self.repo.get_intent_by_request_id(request_id)
-        if row is None or row.status != "sent":
+        if row is None or row.status != "sent" or row.sent_at is None or self.repo.conn.in_transaction:
             self.violations.append(f"buy sent before intent persisted as sent: {request_id}")
         return self._pop(self.buy_queue)
 
@@ -211,7 +211,7 @@ def test_ceiling_defers_the_rest(repo, session_id, fake, sleeps) -> None:
     assert len(report.results) == 1
     assert fake.calls.count("place_buy_order") == 1
     assert report.deferred == tuple(intents[1:])
-    assert report.stopped is None
+    assert report.stopped == "session order ceiling reached"
 
 
 # -- buy outcomes -------------------------------------------------------------
@@ -414,9 +414,16 @@ def test_guard_rejects_non_schg_open_before_any_call(repo, session_id, fake, sle
     assert fake.calls == []
 
 
-def test_guard_rejects_zero_max_orders(repo, session_id, fake, sleeps) -> None:
-    with pytest.raises(ValueError):
-        _run(repo, fake, session_id, sleeps, [_intent()], max_orders=0)
+def test_zero_max_orders_defers_without_writes(repo, session_id, fake, sleeps) -> None:
+    report = _run(repo, fake, session_id, sleeps, [_intent()], max_orders=0)
+    assert report.results == () and report.deferred == (_intent(),)
+    assert report.stopped == "session order ceiling reached"
+    assert fake.calls == [] and repo.get_intents(session_id) == []
+
+
+def test_guard_rejects_negative_max_orders(repo, session_id, fake, sleeps) -> None:
+    with pytest.raises(ValueError, match="non-negative"):
+        _run(repo, fake, session_id, sleeps, [_intent()], max_orders=-1)
     assert fake.calls == []
 
 

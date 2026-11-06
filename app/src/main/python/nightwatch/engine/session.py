@@ -750,6 +750,7 @@ def _run_session_core(
                             close_report = execute_closes(
                                 repo=repo, client=client, session_id=s.id, intents=closes,
                                 instrument_ids=mi.instrument_ids, positions_by_id=positions_by_id,
+                                max_orders=config.risk.max_orders_per_session,
                                 deadline=session_close_datetime(trading_date) - timedelta(minutes=5),
                                 now=host.now,
                             )
@@ -759,6 +760,7 @@ def _run_session_core(
                         else:
                             for r in close_report.results:
                                 reason += f"; close {r.position_id}: {r.outcome} {r.detail}"
+                            reason += f"; closes stopped={close_report.stopped}; deferred {len(close_report.deferred)}"
                             unverified = [r.position_id for r in close_report.results if r.outcome == "unverified"]
                             if unverified:
                                 halt("close not verified for position(s) " + ", ".join(unverified), execution=True)
@@ -799,6 +801,7 @@ def _run_session_core(
                                 price=inputs.schg_price if inputs.schg_price is not None
                                 else mi.provisional_closes["SCHG"].value,
                                 allow_partial=instrument is None or instrument.allow_partial_close is not False,
+                                max_orders=config.risk.max_orders_per_session,
                                 deadline=session_close_datetime(trading_date) - timedelta(minutes=5),
                                 now=host.now,
                             )

@@ -416,7 +416,7 @@ def test_intent_is_durable_and_sent_before_close_call(setup):
     send = client.close_position
     def close(request_id, pid, instrument_id):
         intent = repo.get_intent_by_request_id(request_id)
-        assert intent.status == "sent" and intent.position_id == pid
+        assert intent.status == "sent" and intent.sent_at is not None and intent.position_id == pid
         assert intent.instrument_id == instrument_id and not repo.conn.in_transaction
         return send(request_id, pid, instrument_id)
     client.close_position = close
@@ -470,3 +470,41 @@ def test_recovery_ignores_pending_buys(setup):
     report = recover(setup)
     assert not report.blocks_buys and not report.resolved
     assert client.calls == [] and client.poll_calls == []
+
+
+@pytest.mark.parametrize("rejected", [False, True])
+def test_session_ceiling_defers_second_close_without_persisting_it(setup, rejected):
+    repo, sid, client = setup
+    client.polls = [poll(OrderStatus.REJECTED if rejected else OrderStatus.FILLED)]
+    second = replace(CLOSE, position_ref="p2")
+    report = run(setup, intents=(CLOSE, second), max_orders=1)
+    assert len(client.calls) == len(report.results) == 1
+    assert report.stopped == "session order ceiling reached"
+    assert report.deferred == (second,) and report.blocks_buys
+    saved_intent, = repo.get_intents(sid)
+    assert saved_intent.sent_at is not None
+    assert saved_intent.status == ("rejected" if rejected else "filled")
+    assert repo.get_lot_annotation("p2").is_open
+
+
+def test_restart_sent_intent_without_order_row_exhausts_close_budget(setup):
+    from nightwatch.db.repo import Repo
+
+    repo, sid, client = setup
+    iid, _ = saved(setup, order=False)
+    repo.set_intent_status(iid, "sent")
+    path = repo.conn.execute("PRAGMA database_list").fetchone()[2]
+    with Repo.open(path) as restarted:
+        report = run(setup, repo=restarted, max_orders=1)
+    assert report.stopped == "session order ceiling reached"
+    assert report.deferred == (CLOSE,) and report.blocks_buys
+    assert report.results == () and client.calls == [] and client.poll_calls == []
+    assert len(repo.get_intents(sid)) == 1
+
+
+def test_zero_close_budget_has_no_writes(setup):
+    repo, sid, client = setup
+    report = run(setup, max_orders=0)
+    assert report.stopped == "session order ceiling reached"
+    assert report.deferred == (CLOSE,) and report.blocks_buys
+    assert repo.get_intents(sid) == [] and client.calls == []

@@ -63,7 +63,8 @@ def two(armed, repo, monkeypatch):
             sid = kwargs["session_id"]
             seq = repo.next_intent_sequence(sid)
             iid = repo.insert_intent(Intent(sid, f"close-{sid}-{seq}", seq, "UPRO", "close",
-                                            position_id=intent.position_ref, status="sent"))
+                                            position_id=intent.position_ref))
+            repo.set_intent_status(iid, "sent")
             e.client.close_position(f"close-{sid}-{seq}", intent.position_ref, IDS["UPRO"])
             if outcome == "confirmed":
                 confirm(repo, iid, intent.position_ref)
@@ -892,3 +893,112 @@ def test_dry_schg_never_executes_or_saves(schg):
     schg.schg.assert_not_called()
     schg.execute.assert_not_called()
     schg.save.assert_not_called()
+
+
+@pytest.mark.parametrize("second_close", [False, True])
+def test_real_upro_close_uses_ceiling_before_buys_and_vetoes_final_save(two, repo, monkeypatch, second_close):
+    from nightwatch.engine.close_executor import execute_closes
+    from nightwatch.engine.executor import execute_buys
+    from nightwatch.etoro.client import PollResult
+    from nightwatch.etoro.models import OrderResult, OrderStatus
+
+    two.config = replace(two.config, risk=replace(two.config.risk, max_orders_per_session=1))
+    two.decision.intents = [CLOSE, BUY]
+    if second_close:
+        two.positions.append(position("v"))
+        repo.insert_lot_annotation(annotation("v"))
+        two.decision.intents.insert(1, replace(CLOSE, position_ref="v"))
+    monkeypatch.setattr(session, "execute_closes", execute_closes)
+    two.execute.side_effect = execute_buys
+    two.client.place_buy_order = Mock(side_effect=AssertionError("budget exhausted"))
+
+    def close(request, pid, iid):
+        saved = repo.get_intent_by_request_id(request)
+        assert saved.status == "sent" and saved.sent_at is not None
+        two.positions = [p for p in two.positions if p.position_id != pid]
+        return pid
+
+    two.client.close_position.side_effect = close
+    two.client.poll_order_to_terminal = lambda **kw: PollResult(
+        OrderResult(kw["order_id"], None, OrderStatus.FILLED, position_id=kw["order_id"]), 1, False)
+    result = two.run()
+    assert "session order ceiling reached" in result.reason
+    assert "deferred 1" in result.reason and "strategy state not saved" in result.reason
+    assert result.status == ("executed_partial" if second_close else "executed")
+    two.client.close_position.assert_called_once()
+    two.client.place_buy_order.assert_not_called()
+    assert two.save.call_count == 1  # confirmed-sale checkpoint only
+    assert repo.get_strategy_state().bars == 0
+    assert repo.get_strategy_state().recyclable_cash == 200
+    sent, = repo.get_intents(result.session_id)
+    assert sent.side == "close" and sent.sent_at is not None
+    if second_close:
+        two.execute.assert_not_called()
+        assert repo.get_lot_annotation("v").is_open
+
+
+def test_upro_exhausted_budget_defers_schg_without_saving_final(schg, repo):
+    schg.config = replace(schg.config, risk=replace(schg.config.risk, max_orders_per_session=1))
+    result = schg.run()
+    assert result.status == "executed_partial"
+    assert "SCHG stopped=session order ceiling reached" in result.reason
+    assert "strategy state not saved" in result.reason
+    schg.client.close_position.assert_called_once()
+    schg.execute.assert_not_called()
+    assert schg.save.call_count == 1 and repo.get_strategy_state().bars == 0
+    assert repo.pending_partial_closes() == []
+    assert len(repo.get_intents(result.session_id)) == 1
+
+
+@pytest.mark.parametrize("status", ["pending", "sent", "filled", "recovered", "rejected",
+                                    "filled_unannotated", "abandoned"])
+@pytest.mark.parametrize("sent", [False, True])
+def test_buy_restart_budget_uses_sent_timestamp_not_status(repo, status, sent):
+    from nightwatch.db.repo import Repo
+    from .test_executor import FakeExecClient, _intent, _run
+
+    sid = repo.create_session("2026-10-16", "live", "demo", True).id
+    iid = repo.insert_intent(Intent(sid, "before-crash", 1, "UPRO", "close"))
+    if sent:
+        repo.set_intent_status(iid, "sent")
+    # Direct SQL represents historical state without stamping a new send.
+    with repo.conn:
+        repo.conn.execute("UPDATE intents SET status = ? WHERE id = ?", (status, iid))
+    path = repo.conn.execute("PRAGMA database_list").fetchone()[2]
+    with Repo.open(path) as restarted:
+        client = FakeExecClient(restarted)
+        report = _run(restarted, client, sid, [], [_intent()], max_orders=1)
+    if sent:
+        assert report.stopped == "session order ceiling reached"
+        assert report.results == () and report.deferred == (_intent(),)
+        assert client.buy_calls == [] and len(repo.get_intents(sid)) == 1
+    else:
+        assert len(client.buy_calls) == 1 and report.results[0].outcome == "filled"
+        assert len(repo.get_intents(sid)) == 2
+
+
+def test_recovery_historical_order_row_does_not_consume_new_session_budget(repo):
+    from nightwatch.db.repo import Decision
+    from nightwatch.engine.executor import recover_unfinished, remaining_order_budget
+    from .test_executor import FakeExecClient, _filled, _intent, _poll, _position, _run
+
+    old = repo.create_session("2026-10-15", "live", "demo", True).id
+    iid = repo.insert_intent(Intent(old, "lost-response", 1, "SCHG", "buy",
+                                    instrument_id=1234, amount_usd=633.33))
+    repo.set_intent_status(iid, "sent")
+    repo.insert_decision(Decision(old, "2026-10-15", spy_close=650, spy_ath=700,
+                                  drawdown=-0.07, tier=1))
+    sid = repo.create_session("2026-10-16", "live", "demo", True).id
+    client = FakeExecClient(repo)
+    client.recover_queue = [_filled()]
+    before = remaining_order_budget(repo, old, 1)
+    report = recover_unfinished(repo=repo, client=client, abandon_after_sessions=3, sleep=lambda _: None)
+    assert report.resolved and client.buy_calls == []
+    assert repo.get_order_by_reference_id("lost-response") is not None
+    assert repo.get_intent_by_request_id("lost-response").status == "recovered"
+    assert remaining_order_budget(repo, old, 1) == before == 0
+    assert remaining_order_budget(repo, sid, 1) == 1
+    client.poll_queue = [_poll(_filled("P2"))]
+    client.portfolio_queue = [[_position("P2", is_no_take_profit=True)]]
+    assert _run(repo, client, sid, [], [_intent()]).results[0].outcome == "filled"
+    assert len(client.buy_calls) == 1

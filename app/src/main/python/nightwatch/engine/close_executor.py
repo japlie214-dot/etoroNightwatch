@@ -19,6 +19,7 @@ from ..etoro.models import (
     MIN_POSITION_VALUE_USD, OrderStatus, Position, partial_close_leaves_legal_remainder,
 )
 from ..strategy.ladder import LadderIntent
+from .executor import remaining_order_budget
 
 
 @dataclass(frozen=True, slots=True)
@@ -149,10 +150,13 @@ def execute_closes(
     *, repo: Repo, client: EtoroClient, session_id: int,
     intents: Sequence[LadderIntent], instrument_ids: Mapping[str, int],
     positions_by_id: Mapping[str, Position], deadline: datetime,
+    max_orders: int | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     sleep: Callable[[float], None] = time.sleep,
 ) -> CloseReport:
-    """Refuse unsupported batches before writing; stop on any uncertain close."""
+    """Close within the session ceiling; stop on any uncertain close."""
+    if max_orders is not None and max_orders < 0:
+        raise ValueError(f"max_orders must be non-negative, got {max_orders}")
     reasons = []
     seen = set()
     for intent in intents:
@@ -182,6 +186,9 @@ def execute_closes(
     results = []
     followups = []
     for index, intent in enumerate(intents):
+        if max_orders is not None and remaining_order_budget(repo, session_id, max_orders) == 0:
+            return CloseReport(tuple(results), "session order ceiling reached",
+                               tuple(intents[index:]), True, tuple(followups))
         if now() >= deadline:
             return CloseReport(tuple(results), "past deadline", tuple(intents[index:]), True,
                                tuple(followups))
@@ -399,11 +406,13 @@ def _finish_schg_close(
 def execute_schg_sell(
     *, repo: Repo, client: EtoroClient, session_id: int, intent: LadderIntent,
     instrument_id: int, positions: Sequence[Position], price: float, deadline: datetime,
-    allow_partial: bool = True,
+    allow_partial: bool = True, max_orders: int | None = None,
     now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
     sleep: Callable[[float], None] = time.sleep,
 ) -> CloseReport:
-    """Caller must supply a fresh strict portfolio; each persisted leg is sent once."""
+    """Send each leg once, within the session ceiling, using a fresh strict portfolio."""
+    if max_orders is not None and max_orders < 0:
+        raise ValueError(f"max_orders must be non-negative, got {max_orders}")
     if (intent.symbol != "SCHG" or intent.side != "close" or intent.position_ref
             or intent.amount is None or not math.isfinite(intent.amount) or intent.amount <= 0):
         result = CloseOutcome(intent, None, None, None, None, intent.position_ref or "",
@@ -415,6 +424,9 @@ def execute_schg_sell(
                         for pid, _, _ in plan.legs)
     results = []
     for index, (pid, before, deducted) in enumerate(plan.legs):
+        if max_orders is not None and remaining_order_budget(repo, session_id, max_orders) == 0:
+            return CloseReport(tuple(results), "session order ceiling reached",
+                               leg_intents[index:], True, ())
         if now() >= deadline:
             return CloseReport(tuple(results), "past deadline", leg_intents[index:], True, ())
         request_id = new_request_id()

@@ -50,7 +50,7 @@ class Client:
     def close_position(self, request_id, pid, instrument_id, deducted):
         saved = self.repo.get_intent_by_request_id(request_id)
         rows = self.repo.pending_partial_closes()
-        assert saved.status == "sent" and saved.position_id == pid
+        assert saved.status == "sent" and saved.sent_at is not None and saved.position_id == pid
         assert any(r["intent_id"] == saved.id and r["status"] == "pending" for r in rows)
         assert not self.repo.conn.in_transaction
         self.calls.append((request_id, pid, instrument_id, deducted))
@@ -285,3 +285,34 @@ def test_refuse_before_any_write(setup, intent):
     report = run(setup, intent=intent)
     assert report.blocks_buys and report.results[0].outcome == "refused"
     assert repo.conn.total_changes == before and not client.calls
+
+
+def test_session_ceiling_counts_each_schg_leg_and_does_not_persist_deferred_leg(setup):
+    repo, sid, client, _ = setup
+    client.default_poll = fill(partial=False)
+    client.default_read = []
+    second = replace(POSITION, position_id="200")
+    report = run(setup, intent=replace(SELL, amount=80),
+                 positions=[POSITION, second], max_orders=1)
+    assert len(client.calls) == len(report.results) == 1
+    assert report.results[0].outcome == "confirmed"
+    assert report.stopped == "session order ceiling reached" and report.blocks_buys
+    assert report.deferred == (LadderIntent("SCHG", "close", position_ref="200", reason=SELL.reason),)
+    saved, = repo.get_intents(sid)
+    assert saved.sent_at is not None and saved.status == "filled"
+    assert repo.conn.execute("SELECT COUNT(*) FROM partial_close_effects").fetchone()[0] == 1
+
+
+def test_restart_sent_intent_without_order_row_exhausts_schg_budget(setup):
+    from nightwatch.db.repo import Intent, Repo
+
+    repo, sid, client, _ = setup
+    iid = repo.insert_intent(Intent(sid, "earlier-send", 1, "UPRO", "close"))
+    repo.set_intent_status(iid, "sent")
+    path = repo.conn.execute("PRAGMA database_list").fetchone()[2]
+    with Repo.open(path) as restarted:
+        report = run(setup, repo=restarted, max_orders=1)
+    assert report.stopped == "session order ceiling reached" and report.blocks_buys
+    assert len(report.deferred) == 1 and report.results == ()
+    assert client.calls == [] and repo.pending_partial_closes() == []
+    assert len(repo.get_intents(sid)) == 1

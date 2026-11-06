@@ -400,6 +400,11 @@ def _buy_one(
     )
 
 
+def remaining_order_budget(repo: Repo, session_id: int, max_orders: int) -> int:
+    """Count durable send attempts, regardless of their eventual outcome."""
+    return max(0, max_orders - sum(i.sent_at is not None for i in repo.get_intents(session_id)))
+
+
 def execute_buys(
     *,
     repo: Repo,
@@ -417,7 +422,8 @@ def execute_buys(
     """Send SCHG and UPRO open buys one at a time, persisting every step.
 
     ``spy`` is the decision's SPY context (``ath``, ``close``, ``drawdown``,
-    ``tier``). Never resubmits: an ambiguous buy ends execution.
+    ``tier``). ``max_orders`` caps all send attempts in this session, including
+    closes and earlier calls. Never resubmits: an ambiguous buy ends execution.
     """
     for intent in intents:
         if (
@@ -433,8 +439,8 @@ def execute_buys(
             raise ValueError(f"buy book must be catapult or reentry: {intent!r}")
         if book == "reentry" and intent.bucket_id is None:
             raise ValueError(f"reentry buy requires bucket_id: {intent!r}")
-    if max_orders < 1:
-        raise ValueError(f"max_orders must be at least 1, got {max_orders}")
+    if max_orders < 0:
+        raise ValueError(f"max_orders must be non-negative, got {max_orders}")
     if now() >= deadline:
         return ExecutionReport((), "past submission deadline", tuple(intents), (), ())
 
@@ -446,7 +452,8 @@ def execute_buys(
     deferred: tuple[LadderIntent, ...] = ()
 
     for index, intent in enumerate(intents):
-        if len(results) == max_orders:
+        if remaining_order_budget(repo, session_id, max_orders) == 0:
+            stopped = "session order ceiling reached"
             deferred = tuple(intents[index:])
             break
         if now() >= deadline:
