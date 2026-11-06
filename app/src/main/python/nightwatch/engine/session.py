@@ -92,6 +92,7 @@ class SessionResult:
     execution_halted: bool = False
     halt_set: bool = False
     halt_failure: str | None = None
+    tp_uncleared_positions: tuple[str, ...] = ()
 
 
 def fetch_server_date(base_url: str, *, timeout: float = 10.0) -> str | None:
@@ -429,6 +430,8 @@ def _run_session_core(
     halt_error = None
     halt_text = ""
     tp_failed = False
+    tp_uncleared_positions: set[str] = set()
+    tp_uncleared_text = ""
     execution_halted = False
     halt_set = False
     halt_failure = None
@@ -466,6 +469,12 @@ def _run_session_core(
             tp_failed = True
             halt("take-profit not cleared on position(s) " + ", ".join(items))
 
+    def note_tp_uncleared(items: Sequence[str]) -> None:
+        nonlocal tp_uncleared_text
+        tp_uncleared_positions.update(items)
+        if tp_uncleared_positions:
+            tp_uncleared_text = "; take-profit not cleared: " + ", ".join(sorted(tp_uncleared_positions))
+
     close_recovery_reports = []
 
     def recover():
@@ -500,14 +509,15 @@ def _run_session_core(
         limited = status in ("market_data_failed", "aborted_before_orders")
         fallback = prefix if limited else status + ("" if exc is None else f": {type(exc).__name__}")
         reason = _redact_reason(
-            prefix + ("" if exc is None else f": {exc}") + recovery_text + halt_text,
+            prefix + ("" if exc is None else f": {exc}") + recovery_text + halt_text + tp_uncleared_text,
             config=config,
             fallback=fallback + recovery_counts + ("; HALT details omitted" if halt_text else ""),
             limit=(300 if exc is None else len(prefix) + 2 + 300) if limited else None,
         )
         repo.finish_session(s.id, state="aborted", outcome=reason, error=halt_error)
         return SessionResult(s.id, status, gate, reason, tp_failed=tp_failed,
-                             execution_halted=execution_halted, halt_set=halt_set, halt_failure=halt_failure)
+                             execution_halted=execution_halted, halt_set=halt_set, halt_failure=halt_failure,
+                             tp_uncleared_positions=tuple(sorted(tp_uncleared_positions)))
 
     try:
         cutoff = session_close_datetime(trading_date) - timedelta(minutes=25)
@@ -526,6 +536,7 @@ def _run_session_core(
         close_recovery = close_recovery_reports[0] if close_recovery_reports else None
         if recovery is not None:
             halt_for_tp(recovery.tp_failed)
+            note_tp_uncleared(recovery.tp_uncleared)
             for name in ("resolved", "still_unresolved", "abandoned", "followups"):
                 lines = getattr(recovery, name)
                 recovery_text += f"; recovery {name} {len(lines)}"
@@ -816,6 +827,7 @@ def _run_session_core(
                     unconfirmed = [f"order {r.order_id}" for r in report.results
                                    if r.outcome == "filled" and r.position_id is None]
                     halt_for_tp([*report.tp_failed, *unconfirmed])
+                    note_tp_uncleared(report.tp_uncleared)
                     try:
                         for r in report.results:
                             if r.outcome == "filled" and r.intent.bucket_id:
@@ -828,7 +840,8 @@ def _run_session_core(
                     if persistence_error is not None:
                         not_saved = "persistence failure"
                     elif report.tp_failed or unconfirmed:
-                        not_saved = "take-profit not cleared"
+                        not_saved = ("filled order without a confirmed position: " + ", ".join(unconfirmed)
+                                     if unconfirmed else "take-profit not cleared: position verification failed")
                     elif execution_error is not None:
                         not_saved = "execution exception"
                     elif dropped:
@@ -920,12 +933,13 @@ def _run_session_core(
         except Exception as e:
             reason += f"; snapshot failed: {type(e).__name__}: {e}"
         reason = _redact_reason(
-            reason, config=config,
+            reason + tp_uncleared_text, config=config,
             fallback=status + recovery_counts + ("; HALT details omitted" if halt_text else ""),
         )
         repo.finish_session(s.id, state="finished", outcome=reason, error=halt_error)
         return SessionResult(s.id, status, None, reason, interval=interval, tp_failed=tp_failed,
-                             execution_halted=execution_halted, halt_set=halt_set, halt_failure=halt_failure)
+                             execution_halted=execution_halted, halt_set=halt_set, halt_failure=halt_failure,
+                             tp_uncleared_positions=tuple(sorted(tp_uncleared_positions)))
     except Exception as exc:
         if not before_orders():
             raise
@@ -995,6 +1009,16 @@ def run_session(
         text = f"[{config.environment.value.upper()}] TP NOT CLEARED — {halt}." + tail
         try:
             notifier.send(_redact_reason(text, config=config, fallback=f"tp_not_cleared; HALT details omitted; {halt_fallback}"),
+                          event="tp_not_cleared", session_id=result.session_id,
+                          trading_date=trading_date.isoformat())
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Session tp_not_cleared alert failed: %s", exc)
+    if notifier is not None and result.tp_uncleared_positions:
+        text = (f"[{config.environment.value.upper()}] TP still set on: "
+                + ", ".join(result.tp_uncleared_positions)
+                + "; session continued. Clear it in eToro if wanted.")
+        try:
+            notifier.send(_redact_reason(text, config=config, fallback="tp_not_cleared; details omitted"),
                           event="tp_not_cleared", session_id=result.session_id,
                           trading_date=trading_date.isoformat())
         except Exception as exc:

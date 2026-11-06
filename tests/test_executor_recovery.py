@@ -418,7 +418,7 @@ def test_pending_tp_row_with_tp_on_broker_superseded_and_cleared(repo, fake, sle
     assert fake.calls.count("place_buy_order") == 0
 
 
-def test_pending_tp_row_still_dirty_after_three_attempts_is_tp_failed(repo, fake, sleeps) -> None:
+def test_pending_tp_row_still_dirty_after_three_attempts_is_tp_uncleared(repo, fake, sleeps) -> None:
     _tp_row(repo, rid="tp-c", position_id="P1", status="pending")
     fake.portfolio_queue = [[_position(take_profit_rate=11.0)]]
 
@@ -426,7 +426,8 @@ def test_pending_tp_row_still_dirty_after_three_attempts_is_tp_failed(repo, fake
 
     assert len(fake.patch_calls) == 3
     assert [r["status"] for r in repo.list_tp_clears("P1")] == ["failed", "failed", "failed", "failed"]
-    assert report.tp_failed == ("P1",)
+    assert report.tp_uncleared == ("P1",)
+    assert report.tp_failed == ()
     assert fake.calls.count("place_buy_order") == 0
 
 
@@ -452,6 +453,35 @@ def test_tp_row_whose_position_is_absent_fails_with_followup(repo, fake, sleeps)
     assert repo.list_tp_clears("P9")[0]["status"] == "failed"
     assert any("not in portfolio" in line for line in report.followups)
     assert fake.calls.count("clear_take_profit") == 0
+
+
+def test_failed_tp_row_is_not_retried_or_changed(repo, fake, sleeps) -> None:
+    _tp_row(repo, rid="tp-failed", position_id="P1", status="failed")
+    before = repo.list_tp_clears()
+    fake.portfolio_queue = [[_position(take_profit_rate=11.0)]]
+
+    report = _recover(repo, fake, sleeps)
+
+    assert fake.patch_calls == []
+    assert repo.list_tp_clears() == before
+    assert report.tp_failed == report.tp_uncleared == ()
+
+
+@pytest.mark.parametrize("failure", ["missing", "mismatch", "clear"])
+def test_recovered_fill_separates_verification_from_clear_failure(repo, fake, sleeps, failure):
+    from dataclasses import replace
+
+    _seed_intent(repo, rid="split-fill")
+    fake.recover_by_rid["split-fill"] = [_filled()]
+    fake.portfolio_queue = ([[]] if failure == "missing" else
+                            [[replace(_position(), instrument_id=999)]] if failure == "mismatch" else
+                            [[_position()]])
+    report = _recover(repo, fake, sleeps)
+
+    assert report.tp_failed == (() if failure == "clear" else ("P1",))
+    assert report.tp_uncleared == (("P1",) if failure == "clear" else ())
+    assert len(fake.patch_calls) == (3 if failure == "clear" else 0)
+    assert (repo.get_lot_annotation("P1") is not None) == (failure == "clear")
 
 
 # -- idempotency and independence --------------------------------------------

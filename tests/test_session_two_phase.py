@@ -197,6 +197,22 @@ def test_recovery_close_blocks_both_executors_without_halt(two, host):
     assert not host.halt_flag_path().exists()
 
 
+def test_recovery_uncleared_does_not_override_close_recovery_stop(two, host):
+    from nightwatch.engine.executor import RecoveryReport
+
+    two.recovery = RecoveryReport((), (), (), (), (), tp_uncleared=("prior-position",))
+    two.recover_closes.return_value = CloseRecoveryReport((), ("u",), (), True)
+    two.recover_closes.side_effect = None
+    result = two.run()
+    assert result.status == "halted_before_execution"
+    assert "execution skipped: unresolved close at recovery" in result.reason
+    assert result.tp_uncleared_positions == ("prior-position",)
+    two.closes.assert_not_called()
+    two.execute.assert_not_called()
+    two.save.assert_not_called()
+    assert not result.halt_set and not host.halt_flag_path().exists()
+
+
 def test_recovery_tp_skip_precedes_closes(two):
     from nightwatch.engine.executor import RecoveryReport
     two.recovery = RecoveryReport((), (), (), ("prior-position",), ())
@@ -649,8 +665,9 @@ def test_schg_real_executor_sequence_cash_and_saves(schg, repo, monkeypatch, upr
 
 
 @pytest.mark.parametrize("upro", [False, True])
-@pytest.mark.parametrize("tp_failed", [False, True])
-def test_schg_then_buy_tp_veto_preserves_close_evidence_and_bucket_fill(schg, repo, host, upro, tp_failed):
+@pytest.mark.parametrize("tp_outcome", ["clean", "failed", "uncleared"])
+def test_schg_then_buy_tp_veto_preserves_close_evidence_and_bucket_fill(schg, repo, host, upro, tp_outcome):
+    tp_failed = tp_outcome == "failed"
     bucket(repo)
     schg.decision.intents = ([CLOSE] if upro else []) + [SELL, BUY, REENTRY]
     schg.decision.new_state = replace(schg.decision.new_state, recyclable_cash=200 if upro else 0)
@@ -660,7 +677,8 @@ def test_schg_then_buy_tp_veto_preserves_close_evidence_and_bucket_fill(schg, re
         assert kwargs["intents"] == [BUY, REENTRY]
         iid = reentry(repo, kwargs["session_id"])
         return ExecutionReport((filled(BUY), filled(REENTRY, intent_id=iid)),
-                               None, (), ("p1",) if tp_failed else (), ())
+                               None, (), ("p1",) if tp_failed else (), (),
+                               tp_uncleared=("p1",) if tp_outcome == "uncleared" else ())
 
     schg.execute.side_effect = execute
     result = schg.run()
@@ -697,14 +715,17 @@ def test_schg_then_buy_tp_veto_preserves_close_evidence_and_bucket_fill(schg, re
     assert repo.get_bucket("b").tranches_bought == 1
 
 
-def test_bucket_persistence_failure_precedes_tp_save_veto(two, repo, host, monkeypatch):
+@pytest.mark.parametrize("uncleared", [False, True])
+def test_bucket_persistence_failure_precedes_tp_save_veto(two, repo, host, monkeypatch, uncleared):
     bucket(repo)
     two.decision.intents = [REENTRY]
-    two.report = ExecutionReport((filled(REENTRY),), None, (), ("p1",), ())
+    two.report = ExecutionReport((filled(REENTRY),), None, (), () if uncleared else ("p1",), (),
+                                 tp_uncleared=("p1",) if uncleared else ())
     monkeypatch.setattr(repo, "apply_bucket_fill", Mock(side_effect=RuntimeError("apply failed")))
     result = two.run()
     assert result.status == "executed_partial"
-    assert "take-profit not cleared on position(s) p1" in result.reason
+    assert ("take-profit not cleared: p1" if uncleared else
+            "take-profit not cleared on position(s) p1") in result.reason
     assert "strategy state not saved: persistence failure" in result.reason
     assert "strategy state not saved: take-profit not cleared" not in result.reason
     assert "sale-effect persistence failed: RuntimeError: apply failed" in result.reason

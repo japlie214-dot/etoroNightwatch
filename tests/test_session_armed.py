@@ -119,6 +119,62 @@ def test_armed_fill_saves_before_post_execution_snapshot(armed, repo, host):
     assert "stopped=None; deferred 0; followups 0" in result.reason
 
 
+@pytest.mark.parametrize("source", ["execution", "recovery"])
+@pytest.mark.parametrize("failure", ["clear", "missing", "mismatch"])
+def test_real_buy_tp_outcomes_keep_only_verification_halts(armed, repo, host, monkeypatch, source, failure):
+    from nightwatch.db.repo import Decision, Intent
+    from nightwatch.engine import executor
+    from .test_executor import FakeExecClient, _position, _filled, _poll
+
+    fake = FakeExecClient(repo)
+    fresh_buy = FakeExecClient(repo)
+    fresh_buy.poll_queue = [_poll(_filled("P2"))]
+    fresh_buy.portfolio_queue = [[replace(_position("P2", is_no_take_profit=True), instrument_id=IDS["SCHG"])]]
+    position = replace(_position(), instrument_id=IDS["SCHG"] if failure != "mismatch" else -1)
+    fake.portfolio_queue = [[]] if failure == "missing" else [[position]]
+    if source == "recovery":
+        old = repo.create_session("2026-10-01", "live", "demo", True)
+        repo.insert_decision(Decision(old.id, "2026-10-01", spy_close=100, spy_ath=110,
+                                      drawdown=-0.1, tier=1))
+        repo.insert_intent(Intent(old.id, "recover", 1, "SCHG", "buy",
+                                  instrument_id=IDS["SCHG"], amount_usd=100))
+        fake.recover_queue = [_filled()]
+        if failure == "clear":
+            monkeypatch.setattr(armed.client, "get_portfolio", lambda: [position])
+        armed.recover.side_effect = lambda **kw: executor.recover_unfinished(
+            repo=repo, client=fake, abandon_after_sessions=3, sleep=lambda _: None)
+    def execute(**kwargs):
+        kwargs.update(client=fresh_buy if source == "recovery" else fake, sleep=lambda _: None)
+        return executor.execute_buys(**kwargs)
+    armed.execute.side_effect = execute
+    from nightwatch.notify import poll
+    monkeypatch.setattr(poll, "process_pending", lambda *args: None)
+    notifier = SimpleNamespace(send=Mock())
+    result = session.run_session(host=host, config=armed.config, repo=repo,
+                                 client=armed.client, tiingo=FakeTiingo(), trading_date=DAY,
+                                 wait=False, notifier=notifier)
+
+    clear = failure == "clear"
+    assert result.status == ("halted_before_execution" if source == "recovery" and not clear else "executed")
+    assert result.halt_set == host.halt_flag_path().exists() == (not clear)
+    assert result.tp_failed == (not clear)
+    assert result.tp_uncleared_positions == (("P1",) if clear else ())
+    assert armed.save.call_count == int(clear)
+    assert armed.execute.call_count == int(source == "execution" or clear)
+    assert len(fake.patch_calls) == (3 if clear else 0)
+    assert fake.violations == fresh_buy.violations == []
+    assert len(fresh_buy.buy_calls) == int(source == "recovery" and clear)
+    if clear:
+        assert repo.get_lot_annotation("P1") is not None
+        assert "take-profit not cleared: P1" in result.reason
+        alert, = [c.args[0] for c in notifier.send.call_args_list if c.kwargs["event"] == "tp_not_cleared"]
+        assert alert == "[DEMO] TP still set on: P1; session continued. Clear it in eToro if wanted."
+        assert "/resume" not in alert and "HALT" not in alert
+    else:
+        assert "strategy state not saved" in result.reason
+        assert repo.get_lot_annotation("P1") is None
+
+
 def test_armed_without_order_ceiling_refuses_without_broker_calls(armed, repo):
     armed.config = replace(armed.config, risk=replace(armed.config.risk, max_orders_per_session=None))
     result = armed.run()
@@ -217,6 +273,88 @@ def test_execution_tp_failure_halt_and_persistence_error(armed, repo, host, monk
         assert row.error == "disk full"
     else:
         assert "HALT set" in result.reason and row.error is None
+
+
+@pytest.mark.parametrize("halt_fails", [False, True])
+def test_uncleared_and_unconfirmed_send_separate_truthful_alerts(armed, repo, host, monkeypatch, halt_fails):
+    armed.report = ExecutionReport((filled(), filled(position_id=None)), None, (), (), (),
+                                   tp_uncleared=("p1",))
+    if halt_fails:
+        monkeypatch.setattr(session, "write_halt", Mock(side_effect=OSError("disk full")))
+    from nightwatch.notify import poll
+    monkeypatch.setattr(poll, "process_pending", lambda *args: None)
+    notifier = SimpleNamespace(send=Mock())
+    result = session.run_session(host=host, config=armed.config, repo=repo,
+                                 client=armed.client, tiingo=FakeTiingo(), trading_date=DAY,
+                                 wait=False, notifier=notifier)
+    assert result.tp_failed and result.halt_set == (not halt_fails)
+    assert host.halt_flag_path().exists() == (not halt_fails)
+    assert result.tp_uncleared_positions == ("p1",)
+    assert "filled order without a confirmed position: order order1" in result.reason
+    armed.save.assert_not_called()
+    alerts = [c.args[0] for c in notifier.send.call_args_list if c.kwargs["event"] == "tp_not_cleared"]
+    assert len(alerts) == 2
+    assert ("NOT protected" if halt_fails else "/resume") in alerts[0]
+    assert "HALT" in alerts[0]
+    assert "TP still set on: p1; session continued" in alerts[1]
+    assert "HALT" not in alerts[1] and "/resume" not in alerts[1]
+
+
+@pytest.mark.parametrize("gate12", [False, True])
+def test_recovery_uncleared_is_sorted_deduped_and_survives_abort(armed, repo, host, monkeypatch, gate12):
+    armed.recovery = RecoveryReport((), (), (), (), (), tp_uncleared=("z", "a", "z"))
+    armed.failed_gate = 12 if gate12 else None
+    armed.report = ExecutionReport((filled(),), None, (), (), (), tp_uncleared=("a", "b"))
+    result = armed.run()
+    assert result.status == ("preflight_failed" if gate12 else "executed")
+    assert result.tp_uncleared_positions == (("a", "z") if gate12 else ("a", "b", "z"))
+    assert not result.tp_failed and not result.halt_set and not host.halt_flag_path().exists()
+    assert armed.execute.call_count == armed.save.call_count == int(not gate12)
+
+
+def test_clean_success_has_no_tp_alert(armed, repo, host, monkeypatch):
+    from nightwatch.notify import poll
+    monkeypatch.setattr(poll, "process_pending", lambda *args: None)
+    notifier = SimpleNamespace(send=Mock())
+    result = session.run_session(host=host, config=armed.config, repo=repo,
+                                 client=armed.client, tiingo=FakeTiingo(), trading_date=DAY,
+                                 wait=False, notifier=notifier)
+    assert result.tp_uncleared_positions == ()
+    assert [c.kwargs["event"] for c in notifier.send.call_args_list] == ["session_report"]
+    armed.save.assert_called_once()
+
+
+def test_tp_fired_missing_open_lot_aborts_at_gate11_without_orders(armed, repo, host, monkeypatch):
+    from .test_session_decide import annotation
+    from nightwatch.notify import poll
+
+    from nightwatch.engine import preflight
+    reconcile = preflight.reconcile
+    discrepancies = []
+    def capture(*args, **kwargs):
+        result = reconcile(*args, **kwargs)
+        discrepancies.extend(result)
+        return result
+    monkeypatch.setattr(preflight, "reconcile", capture)
+    repo.insert_lot_annotation(annotation("tp-fired"))
+    monkeypatch.setattr(armed.client, "get_portfolio", lambda: [])
+    for name in ("place_buy_order", "close_position", "place_sell_order"):
+        monkeypatch.setattr(armed.client, name, Mock(), raising=False)
+    closes, sells = Mock(), Mock()
+    monkeypatch.setattr(session, "execute_closes", closes)
+    monkeypatch.setattr(session, "execute_schg_sell", sells)
+    monkeypatch.setattr(poll, "process_pending", lambda *args: None)
+    result = session.run_session(host=host, config=armed.config, repo=repo,
+                                 client=armed.client, tiingo=FakeTiingo(), trading_date=DAY,
+                                 wait=False)
+    assert result.status == "preflight_failed" and result.failed_gate == 11
+    assert [d.kind for d in discrepancies] == ["unmatched_open_lot"]
+    assert "lot_annotations row for tp-fired" in result.reason
+    assert repo.get_lot_annotation("tp-fired").is_open
+    assert not result.halt_set and not host.halt_flag_path().exists()
+    for call in (armed.execute, closes, sells, armed.client.place_buy_order,
+                 armed.client.close_position, armed.client.place_sell_order, armed.save):
+        call.assert_not_called()
 
 
 def test_real_limits_drop_prevents_state_save(armed, repo):
@@ -334,7 +472,7 @@ def test_filled_without_position_sets_halt_and_never_saves(armed, host):
     result = armed.run()
     assert "order order1" in host.halt_flag_path().read_text()
     assert "HALT set" in result.reason
-    assert "strategy state not saved: take-profit not cleared" in result.reason
+    assert "strategy state not saved: filled order without a confirmed position" in result.reason
     armed.save.assert_not_called()
 
 

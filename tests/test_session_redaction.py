@@ -121,6 +121,38 @@ def test_each_notification_is_redacted(recovered, monkeypatch, event, sanitizer_
 
 
 @pytest.mark.parametrize("sanitizer_fails", [False, True])
+@pytest.mark.parametrize("abort", [False, True])
+def test_alert_only_tp_positions_are_redacted_even_after_abort(recovered, repo, monkeypatch, sanitizer_fails, abort):
+    h = recovered
+    monkeypatch.setattr(session, "recover_unfinished", Mock(return_value=session.RecoveryReport(
+        (), (), (), (), (), tp_uncleared=("position-" + PLANTED,))))
+    if abort:
+        gates = session.build_preflight_gates
+        def fail_last(**kwargs):
+            return gates(**kwargs)[:-1] + [GateSpec(12, "risk_caps", lambda: GateResult(
+                12, "risk_caps", False, "offline failure"))]
+        monkeypatch.setattr(session, "build_preflight_gates", fail_last)
+    if sanitizer_fails:
+        monkeypatch.setattr(RedactionFilter, "redact", Mock(side_effect=ValueError("sanitize failed")))
+    result = h.run()
+    assert result.status == ("preflight_failed" if abort else "executed")
+    assert result.tp_uncleared_positions == ("position-" + PLANTED,)
+    assert not result.tp_failed and not result.halt_set
+    assert h.save.call_count == int(not abort)
+    calls = h.notifier.send.call_args_list
+    assert [call.kwargs["event"] for call in calls] == ["session_report", "tp_not_cleared"]
+    assert all(PLANTED not in call.args[0] for call in calls)
+    assert PLANTED not in repo.get_session(result.session_id).outcome
+    alert = calls[-1].args[0]
+    if sanitizer_fails:
+        assert alert == "tp_not_cleared; details omitted"
+    else:
+        assert "TP still set on: position-" + REDACTED in alert
+        assert "; session continued. Clear it in eToro if wanted." in alert
+    assert "HALT" not in alert and "/resume" not in alert
+
+
+@pytest.mark.parametrize("sanitizer_fails", [False, True])
 def test_interval_halt_error_is_redacted(harness, repo, monkeypatch, sanitizer_fails):
     h = harness
     h.config = replace(h.config, tiingo=replace(h.config.tiingo, secrets={"TIINGO_KEY": PLANTED}))

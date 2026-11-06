@@ -9,8 +9,8 @@ For each SCHG or UPRO open intent, in order, up to ``max_orders``:
    read-back.
 
 An ambiguous buy outcome stops execution and is never resubmitted. A
-take-profit that cannot be cleared is reported in ``tp_failed`` so the session
-can set HALT; this module never writes HALT itself.
+take-profit that cannot be cleared is reported in ``tp_uncleared`` for an alert;
+position-verification failures stay in ``tp_failed`` for the session to HALT.
 """
 
 from __future__ import annotations
@@ -79,10 +79,12 @@ class ExecutionReport:
     stopped: str | None
     #: Intents that were not attempted.
     deferred: tuple[LadderIntent, ...]
-    #: Position ids whose take-profit is not confirmed cleared.
+    #: Position ids whose broker position could not be verified.
     tp_failed: tuple[str, ...]
     #: Human-readable follow-up lines.
     followups: tuple[str, ...]
+    #: Observed position ids whose take-profit clear failed.
+    tp_uncleared: tuple[str, ...] = ()
 
 
 def _iso(moment: datetime) -> str:
@@ -183,12 +185,13 @@ def finish_filled_buy(
     sleep: Callable[[float], None],
     followups: list[str],
     tp_failed: list[str],
+    tp_uncleared: list[str],
 ) -> ExecutedBuy:
     """Steps after a confirmed fill: position read, annotation, TP clear.
 
     ``order_id`` is the effective id (``res.order_id or order_id``). The caller
     has already written the order row and set the intent to ``filled``. Appends
-    to ``followups`` and ``tp_failed`` in place.
+    to ``followups``, ``tp_failed`` and ``tp_uncleared`` in place.
     """
     partial = res.status in _PARTIAL_STATUSES
     detail = f"filled: status {res.status.name}" + ("; partial fill" if partial else "")
@@ -245,7 +248,7 @@ def finish_filled_buy(
         repo=repo, client=client, order_row_id=order_row_id,
         position=position, sleep=sleep,
     ):
-        tp_failed.append(position_id)
+        tp_uncleared.append(position_id)
     return filled
 
 
@@ -261,6 +264,7 @@ def _buy_one(
     now: Callable[[], datetime],
     sleep: Callable[[float], None],
     tp_failed: list[str],
+    tp_uncleared: list[str],
     followups: list[str],
 ) -> ExecutedBuy:
     instrument_id = instrument_ids[intent.symbol]
@@ -386,7 +390,7 @@ def _buy_one(
         request_id=request_id, res=res, order_id=effective_order_id,
         order_row_id=order_row_id, instrument_id=instrument_id,
         trading_date=trading_date, spy=spy,
-        sleep=sleep, followups=followups, tp_failed=tp_failed,
+        sleep=sleep, followups=followups, tp_failed=tp_failed, tp_uncleared=tp_uncleared,
     )
 
 
@@ -430,6 +434,7 @@ def execute_buys(
 
     results: list[ExecutedBuy] = []
     tp_failed: list[str] = []
+    tp_uncleared: list[str] = []
     followups: list[str] = []
     stopped: str | None = None
     deferred: tuple[LadderIntent, ...] = ()
@@ -446,7 +451,7 @@ def execute_buys(
             repo=repo, client=client, session_id=session_id,
             trading_date=trading_date, intent=intent,
             instrument_ids=instrument_ids, spy=spy, now=now, sleep=sleep,
-            tp_failed=tp_failed, followups=followups,
+            tp_failed=tp_failed, tp_uncleared=tp_uncleared, followups=followups,
         )
         results.append(result)
         if result.outcome != "filled":
@@ -459,6 +464,7 @@ def execute_buys(
         stopped=stopped,
         deferred=deferred,
         tp_failed=tuple(tp_failed),
+        tp_uncleared=tuple(tp_uncleared),
         followups=tuple(followups),
     )
 
@@ -473,10 +479,12 @@ class RecoveryReport:
     still_unresolved: tuple[str, ...]
     #: Intents marked ``abandoned`` this call.
     abandoned: tuple[str, ...]
-    #: Position ids whose take-profit is not confirmed cleared.
+    #: Position ids whose broker position could not be verified.
     tp_failed: tuple[str, ...]
     #: Human-readable follow-up lines.
     followups: tuple[str, ...]
+    #: Observed position ids whose take-profit clear failed.
+    tp_uncleared: tuple[str, ...] = ()
 
 
 def _decision_spy(repo: Repo, session_id: int) -> SpyContext | None:
@@ -530,6 +538,7 @@ def _recover_intent(
     abandoned: list[str],
     followups: list[str],
     tp_failed: list[str],
+    tp_uncleared: list[str],
 ) -> None:
     intent_id = intent.id
     request_id = intent.request_id
@@ -626,7 +635,7 @@ def _recover_intent(
         request_id=request_id, res=final, order_id=effective_order_id,
         order_row_id=order_row_id, instrument_id=intent.instrument_id,
         trading_date=date.fromisoformat(trading_date),
-        spy=spy, sleep=sleep, followups=followups, tp_failed=tp_failed,
+        spy=spy, sleep=sleep, followups=followups, tp_failed=tp_failed, tp_uncleared=tp_uncleared,
     )
     if any("not visible in portfolio" in line for line in followups[before:]):
         still_unresolved.append(f"{label}: filled, position not visible yet")
@@ -643,7 +652,7 @@ def _recover_tp_clear(
     sleep: Callable[[float], None],
     resolved: list[str],
     followups: list[str],
-    tp_failed: list[str],
+    tp_uncleared: list[str],
 ) -> None:
     tp_id = row["id"]
     position_id = row["position_id"]
@@ -669,7 +678,7 @@ def _recover_tp_clear(
     ):
         resolved.append(f"{label}: TP cleared by fresh attempt")
     else:
-        tp_failed.append(position_id)
+        tp_uncleared.append(position_id)
 
 
 def recover_unfinished(
@@ -689,6 +698,7 @@ def recover_unfinished(
     still_unresolved: list[str] = []
     abandoned: list[str] = []
     tp_failed: list[str] = []
+    tp_uncleared: list[str] = []
     followups: list[str] = []
 
     for intent, trading_date in repo.unresolved_buy_intents():
@@ -696,13 +706,13 @@ def recover_unfinished(
             repo=repo, client=client, intent=intent, trading_date=trading_date,
             abandon_after_sessions=abandon_after_sessions, sleep=sleep,
             resolved=resolved, still_unresolved=still_unresolved,
-            abandoned=abandoned, followups=followups, tp_failed=tp_failed,
+            abandoned=abandoned, followups=followups, tp_failed=tp_failed, tp_uncleared=tp_uncleared,
         )
 
     for row in repo.pending_tp_clears():
         _recover_tp_clear(
             repo=repo, client=client, row=row, sleep=sleep,
-            resolved=resolved, followups=followups, tp_failed=tp_failed,
+            resolved=resolved, followups=followups, tp_uncleared=tp_uncleared,
         )
 
     return RecoveryReport(
@@ -710,5 +720,6 @@ def recover_unfinished(
         still_unresolved=tuple(still_unresolved),
         abandoned=tuple(abandoned),
         tp_failed=tuple(tp_failed),
+        tp_uncleared=tuple(tp_uncleared),
         followups=tuple(followups),
     )

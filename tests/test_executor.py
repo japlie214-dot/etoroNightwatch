@@ -174,7 +174,7 @@ def test_happy_path_fills_annotates_and_clears_tp(repo, session_id, fake, sleeps
     assert result.position_id == "P1"
     assert report.stopped is None
     assert report.deferred == ()
-    assert report.tp_failed == ()
+    assert report.tp_failed == report.tp_uncleared == ()
     assert report.followups == ()
 
     assert fake.calls.count("place_buy_order") == 1
@@ -320,6 +320,7 @@ def test_position_never_visible_skips_annotation_and_patch(repo, session_id, fak
     assert report.tp_failed == ("P1",)
     assert fake.calls.count("clear_take_profit") == 0
     assert repo.get_lot_annotation("P1") is None
+    assert report.tp_uncleared == ()
     assert sleeps == [3.0] * 10
 
 
@@ -331,7 +332,8 @@ def test_tp_never_clears_makes_three_attempts(repo, session_id, fake, sleeps) ->
     assert len({rid for rid, _ in fake.patch_calls}) == 3
     rows = repo.list_tp_clears("P1")
     assert [r["status"] for r in rows] == ["failed", "failed", "failed"]
-    assert report.tp_failed == ("P1",)
+    assert report.tp_uncleared == ("P1",)
+    assert report.tp_failed == ()
 
 
 def test_tp_definite_refusal_is_not_retried(repo, session_id, fake, sleeps) -> None:
@@ -340,7 +342,8 @@ def test_tp_definite_refusal_is_not_retried(repo, session_id, fake, sleeps) -> N
     assert fake.calls.count("clear_take_profit") == 1
     rows = repo.list_tp_clears("P1")
     assert [r["status"] for r in rows] == ["failed"]
-    assert report.tp_failed == ("P1",)
+    assert report.tp_uncleared == ("P1",)
+    assert report.tp_failed == ()
 
 
 def test_tp_ambiguous_then_success(repo, session_id, fake, sleeps) -> None:

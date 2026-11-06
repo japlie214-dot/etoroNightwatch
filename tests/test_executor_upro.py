@@ -60,7 +60,7 @@ def test_upro_catapult_uses_own_instrument_and_identity_and_clears_tp(repo, sess
     assert annotation.entry_reference_spy == SPY.close
     assert len(fake.patch_calls) == 1
     assert [row["status"] for row in repo.list_tp_clears("P1")] == ["cleared"]
-    assert report.tp_failed == report.followups == ()
+    assert report.tp_failed == report.tp_uncleared == report.followups == ()
 
 
 @pytest.mark.parametrize("reason", [
@@ -96,7 +96,7 @@ def test_mixed_buys_submit_in_order_with_distinct_instruments(repo, session_id):
     assert [repo.get_order(row.order_row_id).symbol for row in report.results] == ["SCHG", "UPRO"]
     assert repo.get_lot_annotation("P1").book == "catapult"
     assert repo.get_lot_annotation("P2").symbol == "UPRO"
-    assert report.tp_failed == report.followups == ()
+    assert report.tp_failed == report.tp_uncleared == report.followups == ()
 
 
 @pytest.mark.parametrize("kwargs,ids", [
@@ -139,6 +139,7 @@ def test_instrument_mismatch_skips_annotation_and_tp_and_reports_halt(repo, sess
         ])
     assert repo.get_lot_annotation("P1") is None
     assert report.tp_failed == ("P1",)
+    assert report.tp_uncleared == ()
     assert any("instrument mismatch" in line for line in report.followups)
     assert fake.patch_calls == []
     assert repo.list_tp_clears() == []
@@ -171,7 +172,7 @@ def test_recovery_restores_upro_reentry_and_bucket_without_resubmitting(repo, se
     assert (order.symbol, order.instrument_id) == ("UPRO", 5678)
     assert fake.buy_calls == fake.violations == []
     assert len(fake.patch_calls) == 1
-    assert report.tp_failed == report.followups == ()
+    assert report.tp_failed == report.tp_uncleared == report.followups == ()
     assert len(report.resolved) == 1
 
 
