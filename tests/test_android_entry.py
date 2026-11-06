@@ -596,7 +596,7 @@ def test_demo_write_envelope_and_isolation(demo_home, tmp_path, monkeypatch, pre
 
 @pytest.mark.parametrize("state,armed,expected", [
     ("finished", True, "already_ran"), ("finished", False, "previous_unfinished"),
-    ("preflight", True, "previous_unfinished"), ("aborted", True, "previous_unfinished"),
+    ("aborted", True, "previous_unfinished"),
 ])
 def test_demo_dedupe_never_runs_again(demo_home, monkeypatch, state, armed, expected):
     with Repo.open(default_db_path(demo_home), host=demo_home) as repo:
@@ -656,7 +656,46 @@ def test_demo_real_money_guard_independent_of_environment(demo_home, monkeypatch
     assert result["reason_code"] == "real_not_allowed" and result["armed"] is False
 
 
-def test_demo_prior_unfinished_armed_session_blocks_gate_five(demo_home, monkeypatch):
+def test_demo_real_armed_same_date_crash_recovers_then_dedupes(demo_home, monkeypatch):
+    from unittest.mock import Mock
+    from nightwatch.notify import poll
+    from .test_executor_recovery import FakeRecoveryClient, _filled, _position, _seed_intent
+
+    with Repo.open(default_db_path(demo_home), host=demo_home) as repo:
+        _seed_intent(repo, rid="crashed", day=NOW.date().isoformat())
+        previous = repo.get_session_by_date(NOW.date().isoformat())
+    clients = []
+
+    def client(config, *, role, repo):
+        assert role == "write"
+        fake = FakeRecoveryClient(repo)
+        fake.recover_by_rid["crashed"] = [_filled()]
+        fake.portfolio_queue = [[_position(is_no_take_profit=True)]]
+        fake.close = lambda: None
+        clients.append(fake)
+        return fake
+
+    notifier = SimpleNamespace(send=Mock(), close=lambda: None)
+    monkeypatch.setattr(entry, "EtoroClient", client)
+    monkeypatch.setattr(entry, "TelegramNotifier", lambda *a, **kw: notifier)
+    monkeypatch.setattr(entry, "TiingoClient", lambda *a: FakeTiingo())
+    monkeypatch.setattr(poll, "process_pending", lambda *a: None)
+    monkeypatch.setattr(session, "build_preflight_gates", lambda **kw: pytest.fail("second trading pass"))
+    assert entry.run_session is session.run_session
+    result = invoke_demo(demo_home)
+    assert result["status"] == "already_ran" and result["armed"] is True
+    assert result["session_id"] == previous.id and result["gates"] == []
+    assert clients[0].buy_calls == clients[0].patch_calls == clients[0].violations == []
+    assert clients[0].calls.count("recover_by_reference_id") == 1
+    assert "crashed_recovered" in notifier.send.call_args.args[0]
+    with Repo.open(default_db_path(demo_home), host=demo_home) as repo:
+        row = repo.get_session(previous.id)
+        assert row.state == "finished" and row.outcome == "crashed_recovered"
+        assert repo.get_intent_by_request_id("crashed").status == "recovered"
+        assert repo.conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 1
+
+
+def test_demo_prior_unfinished_armed_session_recovers_before_gate_five(demo_home, monkeypatch):
     from nightwatch.engine.preflight import gate_5_database
 
     with Repo.open(default_db_path(demo_home), host=demo_home) as repo:
@@ -669,11 +708,13 @@ def test_demo_prior_unfinished_armed_session_blocks_gate_five(demo_home, monkeyp
     def gates(**kwargs):
         return [GateSpec(n, f"gate_{n}",
                          lambda n=n: gate_5_database(repo=kwargs["repo"], session_id=kwargs["session_id"])
-                         if n == 5 else GateResult(n, f"gate_{n}", True, "ok"))
+                         if n == 5 else GateResult(n, f"gate_{n}", n != 6, "offline stop"))
                 for n in range(1, 13)]
 
     monkeypatch.setattr(session, "build_preflight_gates", gates)
     result = invoke_demo(demo_home)
-    assert result["status"] == "preflight_failed" and result["failed_gate"] == 5
+    assert result["status"] == "preflight_failed" and result["failed_gate"] == 6
+    assert result["gates"][4] == [5, "database", True]
     with Repo.open(default_db_path(demo_home), host=demo_home) as repo:
-        assert repo.get_session(previous.id) == previous
+        row = repo.get_session(previous.id)
+        assert row.state == "finished" and row.outcome == "crashed_recovered"

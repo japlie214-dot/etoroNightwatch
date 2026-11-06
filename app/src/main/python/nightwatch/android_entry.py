@@ -131,7 +131,9 @@ def _run_entry(base_dir: str, *, armed: bool, now_utc: datetime | None) -> str:
                             resources.callback(repo.close)
                             try:
                                 previous = repo.get_session_by_date(trading_date.isoformat())
-                                if previous is not None:
+                                if previous is not None and not (
+                                    armed and previous.state not in ("finished", "aborted", "failed")
+                                ):
                                     envelope["session_id"] = previous.id
                                     # The engine persists prose, not a status column. This is its
                                     # dry-run success prefix plus terminal state, not just existence.

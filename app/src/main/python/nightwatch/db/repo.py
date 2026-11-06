@@ -867,6 +867,12 @@ class Repo:
             next_run_at=next_run_at, finished_at=utcnow(),
         )
 
+    def finalize_crashed(self, session_id: int, outcome: str) -> None:
+        """Finish a crashed session without changing its intents or trading date."""
+        if outcome not in ("crashed_recovered", "crashed_unresolved"):
+            raise ValueError("invalid crash outcome")
+        self.finish_session(session_id, state="finished", outcome=outcome)
+
     @staticmethod
     def _session(row: sqlite3.Row) -> Session:
         return Session(
@@ -1024,6 +1030,16 @@ class Repo:
             (trading_date,),
         ).fetchone()
         return float(row[0] or 0.0)
+
+    def unresolved_intents(self, session_id: int | None = None) -> list[Intent]:
+        """Orders without a definitive outcome, including abandoned uncertainty."""
+        rows = self.conn.execute(
+            "SELECT * FROM intents WHERE status IN ('pending', 'sent', 'unknown', 'abandoned') "
+            + ("AND session_id = ? " if session_id is not None else "")
+            + "ORDER BY session_id, sequence",
+            (session_id,) if session_id is not None else (),
+        ).fetchall()
+        return [self._intent(r) for r in rows]
 
     def pending_intents(self) -> list[Intent]:
         """Return intents that were written but never resolved (crash recovery)."""

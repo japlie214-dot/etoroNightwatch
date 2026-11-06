@@ -5,7 +5,12 @@ S6c-2: preflight, SPY signal, phase A dry-run decision and portfolio snapshot.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, replace
+import errno
+import json
+import os
+from uuid import uuid4
 from datetime import date, datetime, timedelta, timezone
 import logging
 import math
@@ -93,6 +98,7 @@ class SessionResult:
     halt_set: bool = False
     halt_failure: str | None = None
     tp_uncleared_positions: tuple[str, ...] = ()
+    crash_recovery: bool = False
 
 
 def fetch_server_date(base_url: str, *, timeout: float = 10.0) -> str | None:
@@ -413,17 +419,6 @@ def _run_session_core(
             return SessionResult(None, "refused_armed", None, _redact_reason(
                 "armed but refused: " + "; ".join(refusals), config=config, fallback="refused_armed"))
     iso = trading_date.isoformat()
-    existing = repo.get_session_by_date(iso)
-    if existing is not None:
-        return SessionResult(
-            existing.id, "already_ran", None,
-            _redact_reason(f"session {existing.id} already exists for {iso} (state {existing.state})",
-                           config=config, fallback="already_ran"),
-        )
-    s = repo.create_session(
-        iso, mode="live" if armed else "dry_run", environment=config.etoro.environment.value,
-        armed=armed, state="preflight",
-    )
     recovery_reports = []
     recovery_text = ""
     recovery_counts = ""
@@ -519,6 +514,38 @@ def _run_session_core(
                              execution_halted=execution_halted, halt_set=halt_set, halt_failure=halt_failure,
                              tp_uncleared_positions=tuple(sorted(tp_uncleared_positions)))
 
+    crashed = repo.unfinished_sessions()
+    if crashed and armed:
+        recovery_reports.append(recover())
+        for previous in crashed:
+            unresolved = repo.unresolved_intents(previous.id)
+            label = "crashed_unresolved" if unresolved else "crashed_recovered"
+            repo.finalize_crashed(previous.id, label)
+            recovery_text += f"; session {previous.id}: {label}"
+        if repo.unresolved_intents():
+            halt("crash recovery: unresolved order intents remain")
+    elif crashed:
+        try:
+            logging.getLogger(__name__).warning(
+                "dry session: unfinished session ids %s; crash recovery not attempted",
+                [previous.id for previous in crashed],
+            )
+        except Exception:
+            pass
+
+    existing = repo.get_session_by_date(iso)
+    if existing is not None:
+        return SessionResult(
+            existing.id, "already_ran", None,
+            _redact_reason(
+                f"session {existing.id} already exists for {iso} (state {existing.state})"
+                + recovery_text + halt_text, config=config, fallback="already_ran"),
+            halt_set=halt_set, halt_failure=halt_failure, crash_recovery=bool(crashed and armed),
+        )
+    s = repo.create_session(
+        iso, mode="live" if armed else "dry_run", environment=config.etoro.environment.value,
+        armed=armed, state="preflight",
+    )
     try:
         cutoff = session_close_datetime(trading_date) - timedelta(minutes=25)
         network_retry = NetworkRetry()
@@ -529,7 +556,7 @@ def _run_session_core(
         outcome = run_preflight(build_preflight_gates(
             host=host, config=config, repo=repo, client=client, tiingo=tiingo,
             session_id=s.id, trading_date=trading_date,
-            recover=recover if armed else None,
+            recover=recover if armed and not recovery_reports else None,
             recovery_reports=recovery_reports, network_retry=network_retry,
         ), repo=repo, session_id=s.id)
         recovery = recovery_reports[0] if recovery_reports else None
@@ -959,7 +986,88 @@ def format_session_report(
     )
 
 
+@contextmanager
+def _session_lock(host: Host):
+    # The kernel guard serializes lease updates; the lease permits stale takeover.
+    with (host.data_dir() / "engine-session.lock").open("a+b") as handle:
+        @contextmanager
+        def guard(*, blocking=False):
+            try:
+                if os.name == "nt":
+                    import msvcrt
+
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_LOCK if blocking else msvcrt.LK_NBLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+            except OSError as exc:
+                if blocking or exc.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                    raise
+                yield False
+            else:
+                try:
+                    yield True
+                finally:
+                    if os.name == "nt":
+                        handle.seek(0)
+                        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                    else:
+                        fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+        def read_lease():
+            handle.seek(1)
+            data = handle.read()
+            return json.loads(data) if data else None
+
+        def write_lease(lease):
+            handle.seek(1)
+            handle.truncate()
+            if lease is not None:
+                handle.write(json.dumps(lease).encode("utf-8"))
+            handle.flush()
+
+        token = uuid4().hex
+        acquired = False
+        with guard() as guarded:
+            if guarded:
+                lease = read_lease()
+                age = None if lease is None else time.time() - lease["acquired_at"]
+                if lease is None or age > 90 * 60:
+                    if lease is not None:
+                        logging.getLogger(__name__).warning(
+                            "session lock stale takeover: prior lease age %.0fs", age)
+                    write_lease({"token": token, "acquired_at": time.time()})
+                    acquired = True
+        try:
+            yield acquired
+        finally:
+            if acquired:
+                with guard(blocking=True):
+                    lease = read_lease()
+                    # A superseded owner must not release the new owner's lease.
+                    if lease is not None and lease["token"] == token:
+                        write_lease(None)
+
+
 def run_session(
+    *, host: Host, config: Config, repo: Repo, client: EtoroClient, trading_date: date,
+    tiingo: TiingoClient, wait: bool = True,
+    sleep_until: Callable[[datetime], None] = _sleep_until,
+    notifier: "TelegramNotifier | None" = None,
+    now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
+) -> SessionResult:
+    with _session_lock(host) as acquired:
+        if not acquired:
+            return SessionResult(None, "busy", None, "session_locked")
+        return _run_locked_session(
+            host=host, config=config, repo=repo, client=client, trading_date=trading_date,
+            tiingo=tiingo, wait=wait, sleep_until=sleep_until, notifier=notifier, now=now,
+        )
+
+
+def _run_locked_session(
     *, host: Host, config: Config, repo: Repo, client: EtoroClient, trading_date: date,
     tiingo: TiingoClient, wait: bool = True,
     sleep_until: Callable[[datetime], None] = _sleep_until,
@@ -977,7 +1085,7 @@ def run_session(
         host=host, config=config, repo=repo, client=client, trading_date=trading_date,
         tiingo=tiingo, wait=wait, sleep_until=sleep_until,
     )
-    if result.status == "already_ran":
+    if result.status == "already_ran" and not result.crash_recovery:
         return result
     next_run = next_close_minus(45, after=now())
     next_iso = next_run.astimezone(timezone.utc).isoformat(timespec="seconds")

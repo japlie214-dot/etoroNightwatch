@@ -364,6 +364,10 @@ def gate_5_database(*, repo: Repo, session_id: int) -> GateResult:
             f"{s.trading_date} (id {s.id}, state {s.state})" for s in others
         )
         return GateResult(5, "database", False, reason, {"unfinished_ids": [s.id for s in others]})
+    unresolved = repo.unresolved_intents()
+    if unresolved:
+        return GateResult(5, "database", False, f"{len(unresolved)} unresolved order intent(s)",
+                          {"unresolved_intent_ids": [i.id for i in unresolved]})
     return GateResult(5, "database", True, "database ok", {"schema_version": actual})
 
 
