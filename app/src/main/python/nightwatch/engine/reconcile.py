@@ -130,9 +130,10 @@ close. Left unbuilt here, as directed.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
+import math
 from typing import Mapping, Sequence
 
-from ..db.repo import Intent, LotAnnotation
+from ..db.repo import Decision, Intent, LotAnnotation
 from ..etoro.models import Position
 
 __all__ = [
@@ -396,8 +397,12 @@ def _match_abandoned_intent(
     return candidates[0]
 
 
+class ReconcileContextMissing(ValueError):
+    """An adoption has no usable original decision SPY reference."""
+
+
 def _build_adopted_annotation(
-    position: Position, intent: Intent, *, symbol: str
+    position: Position, intent: Intent, *, symbol: str, decision: Decision | None
 ) -> LotAnnotation | None:
     """Build the sidecar row for an adoption, sourced ONLY from ``position``
     (the broker's own authoritative facts, exactly like any other lot) and
@@ -415,17 +420,20 @@ def _build_adopted_annotation(
     place to hold that line most tightly, since nothing else double-checks
     it before this annotation is persisted.
 
-    Entry-SPY-context fields (``entry_reference_spy``, ``entry_spy_ath``,
-    etc.) are left ``None`` -- deriving them from history the way
-    ``market.adopt`` does for a pre-existing position is out of scope here
-    (this task touches only ``engine/reconcile.py``/``engine/preflight.py``)
-    and leaving them unset is honest, not a fabrication: every other
-    optional column on this dataclass already tolerates ``None``.
+    SPY entry context comes from the intent's original session decision,
+    never today's signal or reconstructed history. Missing reference fails
+    the whole reconciliation before the caller can persist any proposals.
     """
     if not position.is_buy or position.leverage != 1:
         return None
     if position.open_date is None:
         return None
+    if (decision is None or decision.session_id != intent.session_id
+            or decision.spy_close is None or not math.isfinite(decision.spy_close)
+            or decision.spy_close <= 0):
+        raise ReconcileContextMissing(
+            f"reconcile_context_missing: intent {intent.request_id} has no decision SPY reference"
+        )
     return LotAnnotation(
         position_id=position.position_id,
         symbol=symbol,
@@ -434,6 +442,11 @@ def _build_adopted_annotation(
         entry_amount=position.amount,
         origin="app",
         entry_context_source=ADOPTED_FROM_ABANDONED_INTENT,
+        entry_reference_spy=decision.spy_close,
+        entry_spy_close=decision.spy_close,
+        entry_spy_ath=decision.spy_ath,
+        entry_spy_drawdown=decision.drawdown,
+        entry_tier=decision.tier,
         bucket_id=intent.bucket_id,
     )
 
@@ -445,6 +458,7 @@ def resolve_abandoned_intent_adoptions(
     abandoned_intents: Sequence[Intent],
     *,
     size_tolerance_pct: float,
+    decisions: Mapping[int, Decision] | None = None,
 ) -> tuple[list[Discrepancy], list[Adoption]]:
     """Resolve as many ``unmatched_broker_position`` entries in
     ``discrepancies`` (:func:`reconcile`'s own output) as have genuine
@@ -465,11 +479,9 @@ def resolve_abandoned_intent_adoptions(
     looking the position back up in ``annotations`` directly, the same way
     :func:`reconcile` itself does.
 
-    This function makes no DB writes -- like :func:`reconcile` and gate 11
-    itself, it only detects and reports; persisting each :class:`Adoption`'s
-    ``annotation`` (and marking its ``intent`` resolved) is the caller's
-    job, once one exists (``engine/session.py``, explicitly out of scope
-    here).
+    This function makes no DB writes. Gate 11 persists all proposals in one
+    transaction. ``decisions`` supplies the original session decision for
+    each adoption; missing SPY reference raises :class:`ReconcileContextMissing`.
     """
     positions_by_id = {p.position_id: p for p in positions}
     annotations_by_id = {a.position_id: a for a in annotations}
@@ -504,7 +516,10 @@ def resolve_abandoned_intent_adoptions(
             remaining.append(discrepancy)
             continue
 
-        annotation = _build_adopted_annotation(position, intent, symbol=discrepancy.symbol)
+        annotation = _build_adopted_annotation(
+            position, intent, symbol=discrepancy.symbol,
+            decision=(decisions or {}).get(intent.session_id),
+        )
         if annotation is None:
             remaining.append(discrepancy)
             continue

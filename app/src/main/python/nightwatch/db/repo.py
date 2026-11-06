@@ -18,7 +18,10 @@ import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable, Iterator, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping, Sequence
+
+if TYPE_CHECKING:
+    from ..engine.reconcile import Adoption, Resolution
 
 from ..host import Host, get_host
 from . import migrations
@@ -1838,6 +1841,39 @@ class Repo:
         """
         with self.conn:
             self._insert_lot_annotation(annotation)
+
+    def apply_reconciliation(self, changes: Sequence[Adoption | Resolution]) -> None:
+        """Commit gate-11 annotations and their resolved intents together or neither."""
+        from ..engine.reconcile import Adoption
+
+        if not changes:
+            return
+        with self.conn:
+            self.conn.execute("BEGIN")
+            now = utcnow()
+            for change in changes:
+                intent = self.get_intent_by_request_id(change.intent.request_id)
+                if intent is None or intent.id != change.intent.id:
+                    raise ValueError("reconciliation requires a persisted intent")
+                if intent.status == "recovered" and intent.position_id == change.position_id:
+                    continue
+                if intent.status != "abandoned":
+                    raise ValueError("reconciliation requires an abandoned intent")
+                if isinstance(change, Adoption):
+                    self._insert_lot_annotation(change.annotation)
+                else:
+                    cur = self.conn.execute(
+                        "UPDATE lot_annotations SET is_open = 0, exit_context_source = ?, "
+                        "updated_at = ? WHERE position_id = ? AND is_open = 1",
+                        (change.annotation.exit_context_source, now, change.position_id),
+                    )
+                    if cur.rowcount != 1:
+                        raise ValueError("reconciliation requires an open annotation")
+                self.conn.execute(
+                    "UPDATE intents SET status = 'recovered', position_id = ?, resolved_at = ? "
+                    "WHERE id = ?",
+                    (change.position_id, now, intent.id),
+                )
 
     def finalize_filled_buy(
         self, intent_id: int, annotation: LotAnnotation, *, status: str = "filled"

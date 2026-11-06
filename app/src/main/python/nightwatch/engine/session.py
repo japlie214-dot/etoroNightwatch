@@ -146,6 +146,7 @@ def build_preflight_gates(
             managed_symbols=config.symbols.traded, instrument_symbols=instrument_symbols,
             abandoned_intents=repo.abandoned_intents(),
             reconciliation_config=config.reconciliation,
+            repo=repo, apply=config.is_armed,
         )
 
     return [

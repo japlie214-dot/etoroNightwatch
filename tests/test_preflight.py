@@ -16,7 +16,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from nightwatch.config import MarketDataConfig, ReconciliationConfig
-from nightwatch.db.repo import Intent, LotAnnotation
+from nightwatch.db.repo import Decision, Intent, LotAnnotation
 from nightwatch.engine.preflight import (
     GateResult,
     find_broker_take_profits,
@@ -827,7 +827,15 @@ def test_gate_11_default_omits_abandoned_intents_and_behaves_exactly_as_before()
     assert result.details["adoptions"] == []
 
 
-def test_gate_11_adopts_a_position_matching_an_abandoned_intent() -> None:
+@pytest.fixture
+def decision_repo(repo):
+    previous = repo.create_session("2026-08-21", "live", "demo", True)
+    repo.insert_decision(Decision(previous.id, "2026-08-21", spy_close=600.0,
+                                  spy_ath=620.0, drawdown=1 - 600 / 620, tier=1))
+    return repo
+
+
+def test_gate_11_adopts_a_position_matching_an_abandoned_intent(decision_repo) -> None:
     position = _gate11_position("pos-late-fill", 1084)  # SCHG
     intent = _gate11_abandoned_intent()
     result = gate_11_reconciliation(
@@ -835,7 +843,7 @@ def test_gate_11_adopts_a_position_matching_an_abandoned_intent() -> None:
         annotations=[],
         managed_symbols=MANAGED_SYMBOLS,
         instrument_symbols=INSTRUMENT_SYMBOLS,
-        abandoned_intents=[intent],
+        abandoned_intents=[intent], repo=decision_repo, apply=False,
     )
     assert result.passed is True
     assert result.details["discrepancies"] == []
@@ -847,7 +855,7 @@ def test_gate_11_adopts_a_position_matching_an_abandoned_intent() -> None:
     assert "auto-adopted" in result.reason
 
 
-def test_gate_11_bare_unmatched_position_still_fails_with_unrelated_abandoned_intents() -> None:
+def test_gate_11_bare_unmatched_position_still_fails_with_unrelated_abandoned_intents(decision_repo) -> None:
     """THE non-negotiable behaviour: an unmatched broker position with no
     genuine provenance must still fail this gate, even when the
     auto-adopt path is engaged for other positions in the same call."""
@@ -861,7 +869,7 @@ def test_gate_11_bare_unmatched_position_still_fails_with_unrelated_abandoned_in
         annotations=[],
         managed_symbols=MANAGED_SYMBOLS,
         instrument_symbols=INSTRUMENT_SYMBOLS,
-        abandoned_intents=[intent],
+        abandoned_intents=[intent], repo=decision_repo, apply=False,
     )
     assert result.passed is False
     assert len(result.details["adoptions"]) == 1
@@ -870,7 +878,7 @@ def test_gate_11_bare_unmatched_position_still_fails_with_unrelated_abandoned_in
     assert result.details["discrepancies"][0]["position_id"] == "pos-mystery"
 
 
-def test_gate_11_respects_reconciliation_config_size_tolerance() -> None:
+def test_gate_11_respects_reconciliation_config_size_tolerance(decision_repo) -> None:
     """A tighter configured tolerance than the position's actual deviation
     must still fail this gate closed -- the config value is not decorative."""
     position = _gate11_position("pos-slippage", 1084)
@@ -881,7 +889,7 @@ def test_gate_11_respects_reconciliation_config_size_tolerance() -> None:
         annotations=[],
         managed_symbols=MANAGED_SYMBOLS,
         instrument_symbols=INSTRUMENT_SYMBOLS,
-        abandoned_intents=[intent],
+        abandoned_intents=[intent], repo=decision_repo, apply=False,
         reconciliation_config=ReconciliationConfig(abandoned_intent_size_tolerance_pct=0.02),
     )
     assert result.passed is False
@@ -893,7 +901,7 @@ def test_gate_11_respects_reconciliation_config_size_tolerance() -> None:
         annotations=[],
         managed_symbols=MANAGED_SYMBOLS,
         instrument_symbols=INSTRUMENT_SYMBOLS,
-        abandoned_intents=[intent],
+        abandoned_intents=[intent], repo=decision_repo, apply=False,
         reconciliation_config=ReconciliationConfig(abandoned_intent_size_tolerance_pct=0.10),
     )
     assert result_wide.passed is True
@@ -931,7 +939,7 @@ def _gate11_abandoned_close_intent(
     )
 
 
-def test_gate_11_resolves_a_vanished_position_matching_an_abandoned_close_intent() -> None:
+def test_gate_11_resolves_a_vanished_position_matching_an_abandoned_close_intent(decision_repo) -> None:
     annotations = [_gate11_annotation("pos-vanished", "SCHG")]
     intent = _gate11_abandoned_close_intent()
     result = gate_11_reconciliation(
@@ -939,7 +947,7 @@ def test_gate_11_resolves_a_vanished_position_matching_an_abandoned_close_intent
         annotations=annotations,
         managed_symbols=MANAGED_SYMBOLS,
         instrument_symbols=INSTRUMENT_SYMBOLS,
-        abandoned_intents=[intent],
+        abandoned_intents=[intent], repo=decision_repo, apply=False,
     )
     assert result.passed is True
     assert result.details["discrepancies"] == []
@@ -985,7 +993,7 @@ def test_gate_11_default_omits_abandoned_intents_and_close_resolution_is_also_a_
     assert result.details["resolutions"] == []
 
 
-def test_gate_11_both_adopt_and_resolve_paths_can_fire_in_one_call() -> None:
+def test_gate_11_both_adopt_and_resolve_paths_can_fire_in_one_call(decision_repo) -> None:
     """The buy-side adopt and close-side resolve paths are independent and
     both draw from the same ``abandoned_intents`` -- confirm they can both
     fire together without interfering with each other."""
@@ -998,7 +1006,7 @@ def test_gate_11_both_adopt_and_resolve_paths_can_fire_in_one_call() -> None:
         annotations=annotations,
         managed_symbols=MANAGED_SYMBOLS,
         instrument_symbols=INSTRUMENT_SYMBOLS,
-        abandoned_intents=[buy_intent, close_intent],
+        abandoned_intents=[buy_intent, close_intent], repo=decision_repo, apply=False,
     )
     assert result.passed is True
     assert len(result.details["adoptions"]) == 1
@@ -1087,3 +1095,152 @@ def test_find_broker_take_profits_is_detection_only_and_never_fails_gate_11() ->
     )
     assert result.passed is True
     assert find_broker_take_profits([position]) != []
+
+
+def _persist_reconciliation_pair(repo):
+    from dataclasses import replace
+
+    buy = _gate11_abandoned_intent(instrument_id=3244, symbol="UPRO")
+    close = replace(_gate11_abandoned_close_intent(), sequence=2)
+    repo.insert_intent(buy)
+    repo.insert_intent(close)
+    repo.insert_lot_annotation(_gate11_annotation("pos-vanished", "SCHG"))
+    return [_gate11_position("pos-late-fill", 3244)]
+
+
+def _reconciliation_rows(repo):
+    return tuple(
+        [tuple(row) for row in repo.conn.execute(f"SELECT * FROM {table} ORDER BY 1")]
+        for table in ("lot_annotations", "intents")
+    )
+
+
+def _persisted_gate11(repo, positions, *, apply=True):
+    return gate_11_reconciliation(
+        positions, repo.list_lot_annotations(), managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS, abandoned_intents=repo.abandoned_intents(),
+        repo=repo, apply=apply,
+    )
+
+
+def test_gate_11_persists_buy_and_close_atomically_and_rerun_is_noop(decision_repo):
+    from nightwatch.config import RiskConfig
+    from nightwatch.engine.preflight import gate_12_risk_caps
+
+    repo = decision_repo
+    positions = _persist_reconciliation_pair(repo)
+    result = _persisted_gate11(repo, positions)
+    assert result.passed, result.reason
+    adopted = repo.get_lot_annotation("pos-late-fill")
+    assert adopted.entry_reference_spy == adopted.entry_spy_close == 600.0
+    assert adopted.entry_spy_ath == 620.0
+    assert adopted.entry_spy_drawdown == 1 - 600 / 620
+    assert adopted.entry_tier == 1
+    assert adopted.entry_context_source == "adopted_from_abandoned_intent"
+    closed = repo.get_lot_annotation("pos-vanished")
+    assert not closed.is_open
+    assert closed.exit_context_source == "resolved_from_abandoned_intent"
+    intents = repo.get_intents(1)
+    assert [(i.status, i.position_id) for i in intents] == [
+        ("recovered", "pos-late-fill"), ("recovered", "pos-vanished")]
+    assert all(i.resolved_at for i in intents)
+    before = _reconciliation_rows(repo)
+    again = _persisted_gate11(repo, positions)
+    assert again.passed
+    assert again.details["adoptions"] == again.details["resolutions"] == []
+    assert _reconciliation_rows(repo) == before
+    caps = gate_12_risk_caps(repo=repo, positions=positions, risk=RiskConfig(max_open_lots=1))
+    assert caps.passed
+    assert caps.details["open_lots"] == 1
+    from nightwatch.engine.limits import apply_submission_limits
+    from nightwatch.strategy.ladder import LadderIntent
+
+    accepted, dropped = apply_submission_limits(
+        [LadderIntent("UPRO", "open", amount=50.0)], cap_usd=1000.0,
+        reserved_usd=0.0, cash_usd=1000.0,
+        open_lots=len(repo.list_lot_annotations(is_open=True)), max_open_lots=1,
+        min_order_usd={"UPRO": 10.0},
+    )
+    assert not accepted
+    assert [d.reason for d in dropped] == ["max_open_lots 1"]
+
+
+@pytest.mark.parametrize("spy_close", [None, 0.0, -1.0, float("nan"), float("inf")])
+def test_gate_11_missing_context_fails_without_any_writes(repo, spy_close):
+    previous = repo.create_session("2026-08-21", "live", "demo", True)
+    repo.insert_decision(Decision(previous.id, "2026-08-21", spy_close=spy_close))
+    positions = _persist_reconciliation_pair(repo)
+    before = _reconciliation_rows(repo)
+    result = _persisted_gate11(repo, positions)
+    assert not result.passed
+    assert result.details["error"] == "reconcile_context_missing"
+    assert "reconcile_context_missing" in result.reason
+    assert _reconciliation_rows(repo) == before
+
+
+def test_gate_11_missing_decision_fails_without_any_writes(repo):
+    repo.create_session("2026-08-21", "live", "demo", True)
+    positions = _persist_reconciliation_pair(repo)
+    before = _reconciliation_rows(repo)
+    result = _persisted_gate11(repo, positions)
+    assert not result.passed
+    assert result.details["error"] == "reconcile_context_missing"
+    assert _reconciliation_rows(repo) == before
+
+
+def test_gate_11_write_failure_rolls_back_annotations_and_intents(decision_repo):
+    repo = decision_repo
+    positions = _persist_reconciliation_pair(repo)
+    repo.conn.execute(
+        "CREATE TEMP TRIGGER fail_reconciliation BEFORE UPDATE ON intents "
+        "WHEN NEW.side = 'close' BEGIN SELECT RAISE(ABORT, 'forced reconciliation failure'); END"
+    )
+    before = _reconciliation_rows(repo)
+    result = _persisted_gate11(repo, positions)
+    assert not result.passed
+    assert "reconciliation persistence failed" in result.reason
+    assert "forced reconciliation failure" in result.reason
+    assert _reconciliation_rows(repo) == before
+    assert not repo.conn.in_transaction
+    repo.conn.execute("DROP TRIGGER fail_reconciliation")
+    assert _persisted_gate11(repo, positions).passed
+
+
+@pytest.mark.parametrize("armed", [False, True])
+def test_session_gate_11_wiring_applies_only_when_armed(decision_repo, host, armed):
+    from datetime import date
+    from types import SimpleNamespace
+    from nightwatch.db.repo import Instrument
+    from nightwatch.engine.session import build_preflight_gates
+
+    repo = decision_repo
+    positions = _persist_reconciliation_pair(repo)
+    repo.upsert_instrument(Instrument("UPRO", 3244))
+    config = SimpleNamespace(
+        is_armed=armed, symbols=SimpleNamespace(traded=MANAGED_SYMBOLS),
+        reconciliation=ReconciliationConfig(),
+    )
+    client = SimpleNamespace(get_portfolio=lambda: positions)
+    gates = build_preflight_gates(
+        host=host, config=config, repo=repo, client=client, tiingo=None,
+        session_id=1, trading_date=date(2026, 8, 24),
+    )
+    before = _reconciliation_rows(repo)
+    result = gates[10].check()
+    assert result.passed, result.reason
+    assert len(result.details["adoptions"]) == len(result.details["resolutions"]) == 1
+    if armed:
+        assert repo.get_lot_annotation("pos-late-fill").entry_reference_spy == 600.0
+        assert not repo.get_lot_annotation("pos-vanished").is_open
+    else:
+        assert _reconciliation_rows(repo) == before
+
+
+def test_gate_11_unresolved_discrepancy_prevents_partial_application(decision_repo):
+    repo = decision_repo
+    positions = _persist_reconciliation_pair(repo) + [_gate11_position("mystery", 1084)]
+    before = _reconciliation_rows(repo)
+    result = _persisted_gate11(repo, positions)
+    assert not result.passed
+    assert "mystery" in result.reason
+    assert _reconciliation_rows(repo) == before

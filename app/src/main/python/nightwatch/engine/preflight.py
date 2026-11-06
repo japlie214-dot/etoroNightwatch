@@ -126,6 +126,7 @@ from .reconcile import (
     Adoption,
     Discrepancy,
     Resolution,
+    ReconcileContextMissing,
     reconcile,
     resolve_abandoned_close_intents,
     resolve_abandoned_intent_adoptions,
@@ -993,19 +994,17 @@ def gate_11_reconciliation(
     instrument_symbols: Mapping[int, str],
     abandoned_intents: Sequence[Intent] = (),
     reconciliation_config: ReconciliationConfig = ReconciliationConfig(),
+    repo: Repo | None = None,
+    apply: bool = True,
 ) -> GateResult:
     """Gate 11 (DESIGN §1.4 fix #3, §5; DESIGN_market_data.md §4.5's
     "inverted gate 11") -- FAIL-CLOSED: any non-empty discrepancy list from
     :func:`nightwatch.engine.reconcile.reconcile` fails this gate loudly.
 
-    Like :func:`gate_10_price_data`, this is a pure function over
-    already-fetched data (the live positions, and every ``lot_annotations``
-    row), not a fetcher -- it has no opinion on wake locks, sessions, or how
-    its inputs were obtained. All policy (never fabricate a lot for an
-    unmatched broker position, detect both membership directions) lives in
-    :func:`~nightwatch.engine.reconcile.reconcile`; this function only turns
-    that module's report into a :class:`GateResult`, exactly as
-    :func:`gate_10_price_data` turns its own checks into one.
+    Broker inputs are already fetched. The repo supplies original decision
+    context and atomically applies all proposed adoptions/resolutions before
+    this gate passes. ``apply=False`` computes proposals without reconciliation
+    writes for dry sessions; context and write failures fail the gate closed.
 
     **Auto-adopt, added 2026-09-06 (DESIGN_session.md §3.4, the operator's
     "no forced human-in-the-loop" decision):** if ``abandoned_intents`` is
@@ -1015,13 +1014,8 @@ def gate_11_reconciliation(
     one of this app's OWN persisted, abandoned intents (by instrument and
     size) and leaves every other discrepancy -- including a bare unmatched
     position with no such record -- failing this gate exactly as before.
-    The default, empty ``abandoned_intents`` makes this a complete no-op:
-    every existing caller of this function (and every existing test) gets
-    byte-identical behaviour to before this change. The resolved
-    :class:`~nightwatch.engine.reconcile.Adoption` list is surfaced in
-    ``details["adoptions"]`` for the caller to actually persist (this
-    function, like :func:`reconcile`, makes no DB writes) -- it never
-    affects ``passed``.
+    The default, empty ``abandoned_intents`` disables adoption. Proposed
+    adoptions are surfaced in ``details["adoptions"]`` for auditing.
 
     **Auto-resolve, added 2026-09-06, closing the mirror-image gap:** the
     SAME ``abandoned_intents`` is also offered to
@@ -1032,10 +1026,8 @@ def gate_11_reconciliation(
     gone) resolved against one of this app's OWN persisted, abandoned close
     intents (by position, symbol, and book). No new parameter: the same
     empty default makes this path a no-op too, exactly like the adopt path.
-    The resolved :class:`~nightwatch.engine.reconcile.Resolution` list is
-    surfaced in ``details["resolutions"]`` for the caller to actually
-    persist (via :meth:`~nightwatch.db.repo.Repo.update_lot_annotation`) --
-    it never affects ``passed`` either.
+    Proposed resolutions are surfaced in ``details["resolutions"]`` and
+    persisted in the same transaction as adoptions and intent status updates.
 
     Args:
         positions: Every currently open broker position, already fetched
@@ -1071,18 +1063,33 @@ def gate_11_reconciliation(
     adoptions: list[Adoption] = []
     resolutions: list[Resolution] = []
     if abandoned_intents:
-        discrepancies, adoptions = resolve_abandoned_intent_adoptions(
-            positions,
-            annotations,
-            discrepancies,
-            abandoned_intents,
-            size_tolerance_pct=reconciliation_config.abandoned_intent_size_tolerance_pct,
-        )
-        discrepancies, resolutions = resolve_abandoned_close_intents(
-            annotations,
-            discrepancies,
-            abandoned_intents,
-        )
+        try:
+            decisions = {}
+            if repo is not None:
+                for intent in abandoned_intents:
+                    if intent.side == "buy" and intent.session_id not in decisions:
+                        decision = repo.get_decision(intent.session_id)
+                        if decision is not None:
+                            decisions[intent.session_id] = decision
+            discrepancies, adoptions = resolve_abandoned_intent_adoptions(
+                positions,
+                annotations,
+                discrepancies,
+                abandoned_intents,
+                size_tolerance_pct=reconciliation_config.abandoned_intent_size_tolerance_pct,
+                decisions=decisions,
+            )
+            discrepancies, resolutions = resolve_abandoned_close_intents(
+                annotations,
+                discrepancies,
+                abandoned_intents,
+            )
+        except ReconcileContextMissing as exc:
+            return GateResult(11, "Reconciliation", False, str(exc),
+                              {"error": "reconcile_context_missing"})
+        except Exception as exc:
+            return GateResult(11, "Reconciliation", False,
+                              f"reconciliation context read failed: {type(exc).__name__}: {exc}")
 
     passed = not discrepancies
     reason = (
@@ -1135,6 +1142,14 @@ def gate_11_reconciliation(
             for r in resolutions
         ],
     }
+    if passed and apply and (adoptions or resolutions):
+        try:
+            if repo is None:
+                raise ValueError("reconciliation persistence requires a repo")
+            repo.apply_reconciliation([*adoptions, *resolutions])
+        except Exception as exc:
+            return GateResult(11, "Reconciliation", False,
+                              f"reconciliation persistence failed: {type(exc).__name__}: {exc}", details)
     return GateResult(gate=11, name="Reconciliation", passed=passed, reason=reason, details=details)
 
 

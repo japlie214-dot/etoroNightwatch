@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import pytest
 
-from nightwatch.db.repo import Intent, LotAnnotation
+from nightwatch.db.repo import Decision, Intent, LotAnnotation
 from nightwatch.engine.reconcile import (
     ADOPTED_FROM_ABANDONED_INTENT,
     RESOLVED_FROM_ABANDONED_INTENT,
@@ -307,6 +307,8 @@ def test_adopts_an_unmatched_position_matching_one_abandoned_intent() -> None:
         discrepancies=discrepancies,
         abandoned_intents=[intent],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
 
     assert remaining == []
@@ -323,6 +325,11 @@ def test_adopts_an_unmatched_position_matching_one_abandoned_intent() -> None:
     assert adoption.annotation.entry_context_source == "adopted_from_abandoned_intent"
     assert adoption.annotation.entry_amount == position.amount
     assert adoption.annotation.entry_date == position.open_date
+    assert adoption.annotation.entry_reference_spy == 600.0
+    assert adoption.annotation.entry_spy_close == 600.0
+    assert adoption.annotation.entry_spy_ath == 620.0
+    assert adoption.annotation.entry_spy_drawdown == 1 - 600 / 620
+    assert adoption.annotation.entry_tier == 1
 
 
 def test_bare_unmatched_position_with_no_abandoned_intents_still_fails_closed() -> None:
@@ -344,6 +351,8 @@ def test_bare_unmatched_position_with_no_abandoned_intents_still_fails_closed() 
         discrepancies=discrepancies,
         abandoned_intents=[],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -374,6 +383,8 @@ def test_bare_unmatched_position_with_unrelated_abandoned_intents_still_fails_cl
         discrepancies=discrepancies,
         abandoned_intents=[unrelated_instrument, wrong_size, not_abandoned, not_a_buy],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -399,6 +410,8 @@ def test_ambiguous_match_two_candidate_intents_fails_closed_not_arbitrarily_reso
         discrepancies=discrepancies,
         abandoned_intents=[intent_a, intent_b],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -426,6 +439,8 @@ def test_closed_annotation_case_is_never_eligible_for_adoption() -> None:
         discrepancies=discrepancies,
         abandoned_intents=[intent],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -450,6 +465,8 @@ def test_unmatched_open_lot_direction_is_never_touched_by_adoption() -> None:
         discrepancies=discrepancies,
         abandoned_intents=[intent],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -470,6 +487,8 @@ def test_size_tolerance_boundary_just_inside_adopts() -> None:
         discrepancies=discrepancies,
         abandoned_intents=[intent],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert len(adoptions) == 1
     assert remaining == []
@@ -490,6 +509,8 @@ def test_size_tolerance_boundary_just_outside_fails_closed() -> None:
         discrepancies=discrepancies,
         abandoned_intents=[intent],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -513,6 +534,8 @@ def test_short_position_is_refused_even_with_a_matching_abandoned_intent() -> No
         discrepancies=discrepancies,
         abandoned_intents=[intent],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -533,6 +556,8 @@ def test_leveraged_position_is_refused_even_with_a_matching_abandoned_intent() -
         discrepancies=discrepancies,
         abandoned_intents=[intent],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -553,6 +578,8 @@ def test_intent_already_linked_to_a_different_position_is_not_a_candidate() -> N
         discrepancies=discrepancies,
         abandoned_intents=[intent],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -576,6 +603,8 @@ def test_intent_with_invalid_book_is_not_adopted() -> None:
         discrepancies=discrepancies,
         abandoned_intents=[intent],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert adoptions == []
     assert remaining == discrepancies
@@ -597,6 +626,8 @@ def test_empty_abandoned_intents_is_a_complete_no_op() -> None:
         discrepancies=discrepancies,
         abandoned_intents=[],
         size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0, spy_ath=620.0,
+                               drawdown=1 - 600 / 620, tier=1)},
     )
     assert remaining == discrepancies
     assert adoptions == []
