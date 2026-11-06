@@ -1,6 +1,10 @@
 """Session reports and persisted wake times, without network calls."""
 
-from datetime import date, datetime, timezone
+from dataclasses import replace
+from datetime import date, datetime, timedelta, timezone
+import json
+
+import httpx
 from unittest.mock import Mock
 
 import pytest
@@ -18,7 +22,7 @@ from .test_session_market import FakeTiingo
 
 DAY = date(2026, 10, 8)
 NOW = datetime(2026, 10, 8, 14, tzinfo=timezone.utc)
-NEXT = "2026-10-08T19:15:00+00:00"
+NEXT = "2026-10-08T19:05:00+00:00"
 
 
 def test_format_session_report():
@@ -88,7 +92,33 @@ def test_after_wake_uses_next_trading_day(repo, host, config, core_result):
         host=host, config=config, repo=repo, client=FakeClient(), tiingo=FakeTiingo(),
         trading_date=DAY, now=lambda: datetime(2026, 10, 8, 20, tzinfo=timezone.utc),
     ) is result
-    assert repo.get_session(result.session_id).next_run_at == "2026-10-09T19:15:00+00:00"
+    assert repo.get_session(result.session_id).next_run_at == "2026-10-09T19:05:00+00:00"
+
+
+@pytest.mark.parametrize("instant,expected", [
+    ("2026-10-08T19:10:00+00:00", "2026-10-09T19:05:00+00:00"),
+    ("2026-11-25T21:00:00+00:00", "2026-11-27T17:05:00+00:00"),
+    ("2026-10-30T20:00:00+00:00", "2026-11-02T20:05:00+00:00"),
+    ("2026-03-06T21:00:00+00:00", "2026-03-09T19:05:00+00:00"),
+])
+def test_report_matches_android_wake(repo, host, config, core_result, instant, expected):
+    from nightwatch.android_entry import next_session_wake_epoch_ms
+    from nightwatch.market.calendar import session_close_datetime
+
+    result, _, _ = core_result()
+    now = datetime.fromisoformat(instant)
+    notifier = Mock()
+    session.run_session(
+        host=host, config=config, repo=repo, client=FakeClient(), tiingo=FakeTiingo(),
+        trading_date=DAY, now=lambda: now, notifier=notifier,
+    )
+    persisted = repo.get_session(result.session_id).next_run_at
+    wake = datetime.fromtimestamp(next_session_wake_epoch_ms(int(now.timestamp() * 1000)) / 1000,
+                                  timezone.utc)
+    assert persisted == expected == wake.isoformat(timespec="seconds")
+    assert wake == session_close_datetime(wake.astimezone(session_close_datetime(DAY).tzinfo).date()) - timedelta(minutes=55)
+    assert notifier.send.call_args.args[0].endswith(f"next run: {expected}")
+    assert _next_reply(repo) == f"next run: {expected}"
 
 
 def test_already_ran_is_noop(repo, host, config, core_result, monkeypatch):
@@ -172,6 +202,82 @@ def test_cli_notifier_lifecycle(repo, host, config, monkeypatch, capsys):
     notifier.close.assert_called_once()
     assert client.closed and tiingo.closed
     assert capsys.readouterr().out == "status: refused_armed\nsession_id: None\nfailed_gate: None\nreason: refused\n"
+
+
+@pytest.mark.parametrize("surface", ["cli", "android"])
+@pytest.mark.parametrize("telegram_enabled", [False, True])
+def test_production_client_sends_one_redacted_drift(host, config, monkeypatch, surface, telegram_enabled):
+    from nightwatch import android_entry
+    from nightwatch.db.repo import Repo, default_db_path
+    from nightwatch.etoro.client import EtoroClient
+    from nightwatch.notify.telegram import TelegramNotifier
+
+    marker = "PRIVATE_PAYLOAD_MARKER"
+    config = replace(config,
+        etoro=replace(config.etoro, secrets={
+            "ETORO_PUBLIC_KEY": "test-public", "ETORO_DEMO_PRIVATE_KEY": marker,
+        }),
+        telegram=replace(config.telegram, enabled=telegram_enabled, secrets={
+            "TELEGRAM_BOT_TOKEN": "test-bot", "TELEGRAM_CHAT_ID": "test-chat",
+        }),
+    )
+    sent, clients, notifiers = [], [], []
+
+    def send(http, request, **kwargs):
+        if request.url.host == "api.telegram.org":
+            assert request.url.path.endswith("/sendMessage")
+            sent.append(json.loads(request.content))
+            return httpx.Response(200, json={"result": {"message_id": 1}}, request=request)
+        assert request.method == "GET"
+        return httpx.Response(200, json={"rates": [{
+            "instrumentID": 424242, "ask": 2.0, "lastExecution": 1.9,
+            "date": "now", "privateData": marker,
+        }]}, request=request)
+
+    def make_client(*args, **kwargs):
+        client = EtoroClient(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    def make_notifier(*args, **kwargs):
+        notifier = TelegramNotifier(*args, **kwargs)
+        notifiers.append(notifier)
+        return notifier
+
+    def run_session(**kwargs):
+        assert kwargs["client"]._contract_notifier is kwargs["notifier"]
+        for _ in range(2):
+            assert kwargs["client"].get_rates([424242])[424242].bid == 0.0
+        return session.SessionResult(None, "would_have_done", None, "offline")
+
+    module = cli if surface == "cli" else android_entry
+    monkeypatch.setattr(httpx.Client, "send", send)
+    monkeypatch.setattr(module, "load_config", lambda **kwargs: config)
+    monkeypatch.setattr(module, "EtoroClient", make_client)
+    monkeypatch.setattr(module, "TelegramNotifier", make_notifier)
+    monkeypatch.setattr(module, "TiingoClient", lambda *args: FakeTiingo())
+    monkeypatch.setattr(module, "run_session", run_session)
+    if surface == "cli":
+        monkeypatch.setattr(cli, "get_host", lambda: host)
+        assert cli.main(["run", "--date", DAY.isoformat(), "--no-wait"]) == 0
+    else:
+        result = json.loads(android_entry.run_session_dry(
+            str(host.root), now_utc=datetime(2026, 10, 8, 19, 10, tzinfo=timezone.utc),
+        ))
+        assert result["status"] == "would_have_done"
+    assert len(clients) == len(notifiers) == 1
+    assert clients[0]._http.is_closed and notifiers[0]._client.is_closed
+    with Repo.open(default_db_path(host), host=host) as repo:
+        rows = repo.conn.execute("SELECT event, body, status FROM notifications").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["event"] == "etoro_contract_drift"
+    assert rows[0]["status"] == ("sent" if telegram_enabled else "skipped")
+    assert "rates payload contract drift" in rows[0]["body"]
+    assert "missing" in rows[0]["body"] and "bid" in rows[0]["body"]
+    assert marker not in rows[0]["body"] and "424242" not in rows[0]["body"]
+    assert len(sent) == int(telegram_enabled)
+    if telegram_enabled:
+        assert sent[0]["text"] == rows[0]["body"]
 
 
 @pytest.mark.parametrize("resume", [False, True])

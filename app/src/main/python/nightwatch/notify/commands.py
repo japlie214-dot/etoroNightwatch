@@ -255,13 +255,15 @@ def _status_reply(repo: Repo, host: Host, config: Config) -> str:
 
 
 def _positions_reply(repo: Repo) -> str:
-    lots = repo.open_lots()
-    if not lots:
+    groups = {}
+    for lot in repo.list_lot_annotations(is_open=True):
+        key = (lot.book, lot.bucket_id or "", lot.symbol)
+        groups[key] = groups.get(key, 0) + 1
+    if not groups:
         return "no open positions"
     return "\n".join(
-        f"{lot.symbol} [{lot.book}] {lot.units} units @ {lot.entry_price} "
-        f"(entered {lot.entry_date})"
-        for lot in lots
+        f"{symbol} [{book}" + (f" bucket={bucket}" if bucket else "") + f"] {count} lot(s)"
+        for (book, bucket, symbol), count in sorted(groups.items())
     )
 
 

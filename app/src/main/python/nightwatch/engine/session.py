@@ -24,7 +24,7 @@ from ..db.repo import Bucket, Decision, PortfolioSnapshot, PriceWindowFingerprin
 from ..etoro.client import EtoroClient
 from ..etoro.models import Balance, Candle, Position, Rate
 from ..host import Host, get_host
-from ..market.calendar import next_close_minus, session_close_datetime
+from ..market.calendar import WAKE_BEFORE_CLOSE_MIN, next_close_minus, session_close_datetime
 from ..market.source import IexQuote, TiingoClient
 from ..market.window import AssembledSignal, WindowAssemblyError, assemble_spy_signal, resolve_provisional_close
 from ..notify.telegram import TelegramNotifier
@@ -1091,7 +1091,7 @@ def _run_locked_session(
     )
     if result.status == "already_ran" and not result.crash_recovery:
         return result
-    next_run = next_close_minus(45, after=now())
+    next_run = next_close_minus(WAKE_BEFORE_CLOSE_MIN, after=now())
     next_iso = next_run.astimezone(timezone.utc).isoformat(timespec="seconds")
     if result.session_id is not None:
         try:

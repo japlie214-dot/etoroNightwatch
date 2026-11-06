@@ -309,17 +309,47 @@ def test_commands_table_records_both_accepted_and_rejected(
 # -- read-only replies carry real data --------------------------------------------
 
 
-def test_positions_reply_reflects_open_lots(repo: Repo, host: DesktopHost) -> None:
-    from nightwatch.db.repo import Lot
+def test_positions_reply_reflects_open_annotations(repo: Repo, host: DesktopHost) -> None:
+    from nightwatch.db.repo import Bucket, LotAnnotation
 
-    repo.insert_lot(
-        Lot(book="catapult", symbol="UPRO", units=2.0, entry_price=60.0,
-            cost_basis=120.0, entry_date="2026-01-02")
-    )
-    config = _config()
-    result = _send(repo, host, config, "/positions", counter=1)
+    for bucket in ("bucket-a", "bucket-b"):
+        repo.upsert_bucket(Bucket(bucket_id=bucket, sale_date="2026-01-02", sale_spy_close=600.0,
+                                  proceeds=120.0, tranche_amount=40.0, created_bar=1))
+    for position_id, symbol, book, bucket, is_open in [
+        ("private-position-a", "UPRO", "catapult", None, True),
+        ("private-position-b", "UPRO", "catapult", None, True),
+        ("private-position-c", "SCHG", "catapult", None, True),
+        ("private-position-d", "UPRO", "reentry", "bucket-a", True),
+        ("private-position-e", "UPRO", "reentry", "bucket-b", True),
+        ("private-position-closed", "UPRO", "catapult", None, False),
+    ]:
+        repo.insert_lot_annotation(LotAnnotation(
+            position_id=position_id, symbol=symbol, book=book, bucket_id=bucket,
+            entry_date="2026-01-02", entry_amount=120.0, origin="app",
+            is_open=is_open,
+        ))
+    assert repo.open_lots() == []
+    result = _send(repo, host, _config(), "/positions", counter=1)
     assert result.accepted
-    assert "UPRO" in (result.reply or "")
+    assert result.reply == (
+        "SCHG [catapult] 1 lot(s)\nUPRO [catapult] 2 lot(s)\n"
+        "UPRO [reentry bucket=bucket-a] 1 lot(s)\n"
+        "UPRO [reentry bucket=bucket-b] 1 lot(s)"
+    )
+    assert "private-position" not in result.reply
+
+
+def test_positions_ignores_legacy_lots_and_closed_annotations(repo, host):
+    from nightwatch.db.repo import Lot, LotAnnotation
+
+    repo.insert_lot(Lot(book="catapult", symbol="UPRO", units=2.0, entry_price=60.0,
+                        cost_basis=120.0, entry_date="2026-01-02"))
+    repo.insert_lot_annotation(LotAnnotation(
+        position_id="closed-position", symbol="UPRO", book="catapult",
+        entry_date="2026-01-02", entry_amount=120.0, origin="app", is_open=False,
+    ))
+    result = _send(repo, host, _config(), "/positions", counter=1)
+    assert result.accepted and result.reply == "no open positions"
 
 
 def test_help_reply_lists_every_supported_command(repo: Repo, host: DesktopHost) -> None:

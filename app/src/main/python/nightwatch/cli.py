@@ -80,9 +80,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         return 1
     trading_date = args.date or datetime.now(ZoneInfo("America/New_York")).date()
     with Repo.open(default_db_path(host), host=host) as repo:
-        client = EtoroClient(config.etoro, role="write" if config.is_armed else "read", repo=repo)
         notifier = TelegramNotifier(config.telegram, repo, environment=config.environment.value)
+        client = None
         try:
+            client = EtoroClient(config.etoro, role="write" if config.is_armed else "read",
+                                 repo=repo, contract_notifier=notifier)
             tiingo = TiingoClient(config.tiingo)
             try:
                 result = run_session(
@@ -101,8 +103,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
                     reason = json.loads(row.detail)["reason"]
                     print(f"gate {row.gate} {row.name} {'PASS' if row.passed else 'FAIL'} {reason}")
         finally:
-            client.close()
-            notifier.close()
+            try:
+                if client is not None:
+                    client.close()
+            finally:
+                notifier.close()
     return 0 if result.status in ("would_have_done", "already_ran", "executed") else 1
 
 

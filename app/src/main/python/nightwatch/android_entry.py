@@ -25,7 +25,7 @@ from .db.repo import Repo, default_db_path
 from .engine.session import run_session
 from .etoro.client import EtoroClient
 from .host import DesktopHost, get_host, set_host
-from .market.calendar import EASTERN, is_trading_day, next_close_minus, session_close_datetime
+from .market.calendar import EASTERN, WAKE_BEFORE_CLOSE_MIN, is_trading_day, next_close_minus, session_close_datetime
 from .market.source import TiingoClient
 from .notify.telegram import TelegramNotifier
 
@@ -68,7 +68,7 @@ def next_session_wake_epoch_ms(now_epoch_ms: int | None = None) -> int:
     """Next NYSE close minus 55 minutes; the lead is a margin, not a timing guarantee."""
     now = (datetime.now(timezone.utc) if now_epoch_ms is None else
            datetime.fromtimestamp(now_epoch_ms / 1000, timezone.utc))
-    return int(next_close_minus(55, after=now).timestamp() * 1000)
+    return int(next_close_minus(WAKE_BEFORE_CLOSE_MIN, after=now).timestamp() * 1000)
 
 
 def run_session_dry(base_dir: str, *, now_utc: datetime | None = None) -> str:
@@ -148,10 +148,11 @@ def _run_entry(base_dir: str, *, armed: bool, now_utc: datetime | None) -> str:
                                         failed_gate=previous.preflight_failed_gate,
                                     )
                                 else:
-                                    client = EtoroClient(config.etoro, role="write" if armed else "read", repo=repo)
-                                    resources.callback(client.close)
                                     notifier = TelegramNotifier(config.telegram, repo, environment=config.environment.value)
                                     resources.callback(notifier.close)
+                                    client = EtoroClient(config.etoro, role="write" if armed else "read",
+                                                         repo=repo, contract_notifier=notifier)
+                                    resources.callback(client.close)
                                     tiingo = TiingoClient(config.tiingo)
                                     if hasattr(tiingo, "close"):
                                         resources.callback(tiingo.close)

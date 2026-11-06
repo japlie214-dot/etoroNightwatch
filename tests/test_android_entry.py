@@ -52,7 +52,7 @@ def wired(config_path, host, monkeypatch):
     clients = []
     closed = []
 
-    def client(config, *, role, repo):
+    def client(config, *, role, repo, contract_notifier):
         assert role == "read"
         clients.append(role)
         return SimpleNamespace(close=lambda: closed.append("client"))
@@ -288,7 +288,7 @@ def test_real_engine_dry_run_never_writes(config_path, host, monkeypatch, live):
     client.candles = {i: [replace(c, timestamp=NOW.isoformat()) for c in cs] for i, cs in client.candles.items()}
     client.minute_candles = {i: [replace(c, timestamp=NOW.isoformat()) for c in cs] for i, cs in client.minute_candles.items()}
 
-    def make_client(config, *, role, repo):
+    def make_client(config, *, role, repo, contract_notifier):
         assert role == "read"
         return client
 
@@ -561,7 +561,7 @@ def test_demo_write_envelope_and_isolation(demo_home, tmp_path, monkeypatch, pre
         monkeypatch.setenv("NIGHTWATCH_ARM", previous_arm)
     clients, closed = [], []
 
-    def client(config, *, role, repo):
+    def client(config, *, role, repo, contract_notifier):
         assert role == "write" and not config.is_real_money
         clients.append(role)
         return SimpleNamespace(close=lambda: closed.append("client"))
@@ -666,7 +666,7 @@ def test_demo_real_armed_same_date_crash_recovers_then_dedupes(demo_home, monkey
         previous = repo.get_session_by_date(NOW.date().isoformat())
     clients = []
 
-    def client(config, *, role, repo):
+    def client(config, *, role, repo, contract_notifier):
         assert role == "write"
         fake = FakeRecoveryClient(repo)
         fake.recover_by_rid["crashed"] = [_filled()]

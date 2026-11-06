@@ -202,7 +202,8 @@ def test_cli_run_summary(host, config, monkeypatch, capsys, status, no_wait):
     monkeypatch.setattr(cli, "load_config", lambda **kwargs: config)
     monkeypatch.setattr(cli, "get_host", lambda: host)
 
-    def make_client(etoro, *, role, repo):
+    def make_client(etoro, *, role, repo, contract_notifier):
+        assert contract_notifier._repo is repo
         assert etoro is config.etoro and role == "read"
         assert repo.schema_version() > 0
         return client

@@ -47,6 +47,7 @@ __all__ = [
     "EASTERN",
     "REGULAR_CLOSE",
     "EARLY_CLOSE",
+    "WAKE_BEFORE_CLOSE_MIN",
     "nyse_holidays",
     "nyse_early_closes",
     "is_trading_day",
@@ -65,6 +66,9 @@ REGULAR_CLOSE: Final = time(16, 0)
 
 #: Documented NYSE half-day close (DESIGN §4.1's "13:00 ET half-days").
 EARLY_CLOSE: Final = time(13, 0)
+
+#: Shared lead for the Android wake and the reported next run.
+WAKE_BEFORE_CLOSE_MIN: Final = 55
 
 #: NYSE added Martin Luther King Jr. Day and Washington's Birthday in 1998.
 _MLK_AND_PRESIDENTS_FIRST_YEAR: Final = 1998
