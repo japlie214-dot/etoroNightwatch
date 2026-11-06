@@ -14,7 +14,7 @@ import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 
-/** Probe battery plus the alarm-only dry-run desktop-host simulation on Android.
+/** Probe battery plus alarm-only desktop-host sessions (dry or explicitly armed DEMO).
  * Saved alarms are registered before long work, including market-calendar/DST-aware scheduling.
  * Process death, Doze, power gating and device overlap remain device proof.
  */
@@ -30,6 +30,24 @@ class WakeService : Service() {
     companion object {
         private const val NOTIF_ID = 7001
         const val EXTRA_TRIGGER = "trigger" // "alarm", "fcm", or "boot"
+
+        internal fun callSelectedSession(
+            filesDir: File,
+            halted: () -> Boolean,
+            powerAllowed: () -> Boolean,
+            selected: (Boolean) -> Unit,
+            dry: (String) -> String,
+            armedDemo: (String) -> String,
+        ): String? {
+            if (halted() || !powerAllowed()) return null
+            val armed = File(filesDir, "nightwatch_demo/ARM_DEMO").exists()
+            selected(armed)
+            return if (armed) armedDemo(File(filesDir, "nightwatch_demo").absolutePath)
+                else dry(File(filesDir, "nightwatch_config").absolutePath)
+        }
+
+        internal fun acceptsArmed(armedDemo: Boolean, value: Any): Boolean =
+            value is Boolean && (armedDemo || !value)
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -143,7 +161,7 @@ class WakeService : Service() {
                 store.log("SNAPSHOT_PUSH_FAILED", "error=${e.javaClass.simpleName}")
             }
 
-            // 5b. Only alarms enter the new read-role, never-armed Python route.
+            // 5b. Only alarms enter the device-selected session route.
             if (trigger == "alarm") {
                 if (HaltFlag.isHalted(this)) {
                     store.log("SESSION_SKIPPED_HALT", "trigger=$trigger")
@@ -170,25 +188,36 @@ class WakeService : Service() {
 
     private fun runSessionDry() {
         var sessionWakeLock: PowerManager.WakeLock? = null
+        var armedDemo = false
         val result = try {
             val handle = newWakeLock("NightwatchProbe:Session")
             sessionWakeLock = handle
             handle.acquire(50 * 60 * 1000L)
-            if (HaltFlag.isHalted(this)) {
-                store.log("SESSION_SKIPPED_HALT", "latched before Python session call")
-                return
-            }
-            val battery = PowerStatus.batteryPercent(this)
-            val charging = PowerStatus.isCharging(this)
-            if (!PowerStatus.shouldRunSession(charging, battery)) {
-                val detail = "battery=$battery charging=$charging"
-                store.log("SESSION_SKIPPED_POWER", detail)
-                NotificationHelper.postFailure(this, "Nightwatch session skipped: low power", detail)
-                return
-            }
-            val raw = PyBridge.runSessionDry(this, File(filesDir, "nightwatch_config").absolutePath)
+            val raw = callSelectedSession(filesDir,
+                halted = {
+                    HaltFlag.isHalted(this).also {
+                        if (it) store.log("SESSION_SKIPPED_HALT", "latched before Python session call")
+                    }
+                },
+                powerAllowed = {
+                    val battery = PowerStatus.batteryPercent(this)
+                    val charging = PowerStatus.isCharging(this)
+                    PowerStatus.shouldRunSession(charging, battery).also {
+                        if (!it) {
+                            val detail = "battery=$battery charging=$charging"
+                            store.log("SESSION_SKIPPED_POWER", detail)
+                            NotificationHelper.postFailure(this, "Nightwatch session skipped: low power", detail)
+                        }
+                    }
+                },
+                selected = {
+                    armedDemo = it
+                    store.log("SESSION_MODE", if (it) "armed_demo" else "dry")
+                },
+                dry = { PyBridge.runSessionDry(this, it) },
+                armedDemo = { PyBridge.runSessionArmedDemo(this, it) }) ?: return
             val parsed = JSONObject(raw)
-            require(parsed.get("status") is String && parsed.get("armed") == false)
+            require(parsed.get("status") is String && acceptsArmed(armedDemo, parsed.get("armed")))
             require(parsed.get("halt") is Boolean)
             require(parsed.get("reason_code") is String)
             require(parsed.get("error_type") == JSONObject.NULL || parsed.get("error_type") is String)
@@ -232,10 +261,11 @@ class WakeService : Service() {
         try {
             val line = result.toString()
             store.log("SESSION_RESULT", line)
-            if (result.getString("status") in setOf("would_have_done", "already_ran", "busy", "out_of_window")) {
-                NotificationHelper.post(this, "Nightwatch dry-run session", line)
+            val title = if (armedDemo) "Nightwatch DEMO ARMED session" else "Nightwatch dry-run session"
+            if (result.getString("status") in setOf("would_have_done", "already_ran", "busy", "out_of_window", "executed")) {
+                NotificationHelper.post(this, title, line)
             } else {
-                NotificationHelper.postFailure(this, "Nightwatch dry-run session failed", line)
+                NotificationHelper.postFailure(this, "$title failed", line)
             }
         } catch (e: Exception) {
             store.log("SESSION_RESULT_FAILED", "error=${e.javaClass.simpleName}")

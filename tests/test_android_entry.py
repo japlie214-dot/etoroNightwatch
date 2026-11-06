@@ -490,3 +490,190 @@ def test_real_engine_preorder_abort_then_previous_unfinished(config_path, host, 
         assert repo.get_intents(row.id) == []
     second = invoke(host)
     assert second["status"] == "previous_unfinished" and second["session_id"] == first["session_id"]
+
+
+@pytest.fixture
+def demo_home(tmp_path, config_path, monkeypatch):
+    from .conftest import MINIMAL_CONFIG_TOML
+
+    demo = DesktopHost(tmp_path / "nightwatch_demo")
+    demo.config_dir().mkdir(parents=True)
+    config = (MINIMAL_CONFIG_TOML.replace('mode = "dry_run"', 'mode = "live"')
+              .replace('[strategy]', '[strategy]\nexit_mode = "fixed"')
+              .replace('[risk]', '[risk]\nmax_notional_per_session_usd = 1000\n'
+                       'max_daily_loss_usd = 100\nmax_open_lots = 10\nmax_orders_per_session = 3'))
+    (demo.config_dir() / "config.toml").write_text(config)
+    (demo.root / "ARM_DEMO").touch()
+    return demo
+
+
+def invoke_demo(demo, **kwargs):
+    result = json.loads(entry.run_session_armed_demo(str(demo.root), now_utc=kwargs.pop("now_utc", NOW)))
+    assert set(result) == KEYS
+    assert MARKER not in json.dumps(result)
+    return result
+
+
+@pytest.mark.parametrize("reason", ["wrong_home", "not_armed_on_device", "real_not_allowed", "config_not_live"])
+def test_demo_refusals_before_client(demo_home, monkeypatch, reason):
+    demo = demo_home
+    if reason == "wrong_home":
+        demo = DesktopHost(demo.root.parent / "nightwatch_config")
+    elif reason == "not_armed_on_device":
+        (demo.root / "ARM_DEMO").unlink()
+    else:
+        path = demo.config_dir() / "config.toml"
+        old, new = (('environment = "demo"', 'environment = "real"') if reason == "real_not_allowed"
+                    else ('mode = "live"', 'mode = "dry_run"'))
+        path.write_text(path.read_text().replace(old, new))
+    calls = []
+    monkeypatch.setattr(entry, "EtoroClient", lambda *a, **k: calls.append("client"))
+    if reason in {"wrong_home", "not_armed_on_device"}:
+        monkeypatch.setattr(entry, "load_config", lambda **k: pytest.fail("config loaded before device checks"))
+    previous_host = get_host()
+    monkeypatch.setenv("NIGHTWATCH_ARM", "previous")
+    result = invoke_demo(demo)
+    assert result["status"] == "refused" and result["reason_code"] == reason
+    assert result["armed"] is False and calls == []
+    assert not (demo.root / "data").exists()
+    assert get_host() is previous_host
+    import os
+    assert os.environ["NIGHTWATCH_ARM"] == "previous"
+
+
+@pytest.mark.parametrize("existing_old_db", [False, True])
+@pytest.mark.parametrize("previous_arm", [None, "previous"])
+@pytest.mark.parametrize("status", ["executed", "executed_partial", "halted_before_execution", "armed_refused_intents", "unknown"])
+def test_demo_write_envelope_and_isolation(demo_home, tmp_path, monkeypatch, previous_arm, status, existing_old_db):
+    import os
+
+    demo = demo_home
+    old_host = DesktopHost(tmp_path / "nightwatch_config")
+    set_host(old_host)
+    old_db = default_db_path(old_host)
+    if existing_old_db:
+        with Repo.open(old_db, host=old_host) as repo:
+            repo.create_session("2026-10-01", "dry_run", "demo", False)
+    before = old_db.read_bytes() if existing_old_db else None
+    if previous_arm is None:
+        monkeypatch.delenv("NIGHTWATCH_ARM", raising=False)
+    else:
+        monkeypatch.setenv("NIGHTWATCH_ARM", previous_arm)
+    clients, closed = [], []
+
+    def client(config, *, role, repo):
+        assert role == "write" and not config.is_real_money
+        clients.append(role)
+        return SimpleNamespace(close=lambda: closed.append("client"))
+
+    def run(**kwargs):
+        assert kwargs["config"].is_armed and kwargs["wait"] is True
+        assert session.arming_refusals(kwargs["config"]) == []
+        assert kwargs["config"].risk.max_orders_per_session is not None
+        assert os.environ["NIGHTWATCH_ARM"] == "1" and get_host().root == demo.root
+        assert default_db_path(get_host()).resolve().is_relative_to(demo.root.resolve())
+        assert default_db_path(demo).is_file()
+        repo = kwargs["repo"]
+        row = repo.create_session(NOW.date().isoformat(), "live", "demo", True)
+        repo.record_preflight_check(PreflightCheck(row.id, 1, "halt", True, "{}"))
+        repo.finish_session(row.id, "finished", "demo result")
+        (demo.root / "HALT").touch()
+        return session.SessionResult(row.id, status, None, MARKER)
+
+    monkeypatch.setattr(entry, "EtoroClient", client)
+    monkeypatch.setattr(entry, "TelegramNotifier", lambda *a, **k: SimpleNamespace(close=lambda: closed.append("notifier")))
+    monkeypatch.setattr(entry, "TiingoClient", lambda *a: SimpleNamespace(close=lambda: closed.append("tiingo")))
+    monkeypatch.setattr(entry, "run_session", run)
+    first = invoke_demo(demo)
+    assert first["armed"] is True and first["halt"] is True
+    assert first["status"] == (status if status != "unknown" else "error")
+    assert first["gates"] == [[1, "halt", True]]
+    assert get_host() is old_host and os.environ.get("NIGHTWATCH_ARM") == previous_arm
+    assert (old_db.read_bytes() if old_db.exists() else None) == before
+    assert invoke_demo(demo)["status"] == "already_ran" and clients == ["write"]
+    assert set(closed) == {"client", "notifier", "tiingo"}
+
+
+@pytest.mark.parametrize("state,armed,expected", [
+    ("finished", True, "already_ran"), ("finished", False, "previous_unfinished"),
+    ("preflight", True, "previous_unfinished"), ("aborted", True, "previous_unfinished"),
+])
+def test_demo_dedupe_never_runs_again(demo_home, monkeypatch, state, armed, expected):
+    with Repo.open(default_db_path(demo_home), host=demo_home) as repo:
+        row = repo.create_session(NOW.date().isoformat(), "live", "demo", armed)
+        if state != "preflight":
+            repo.finish_session(row.id, state, "outcome")
+        before = repo.get_session(row.id)
+    monkeypatch.setattr(entry, "EtoroClient", lambda *a, **k: pytest.fail("dedupe must precede client"))
+    result = invoke_demo(demo_home)
+    assert result["status"] == expected and result["armed"] is False
+    with Repo.open(default_db_path(demo_home), host=demo_home) as repo:
+        assert repo.get_session(row.id) == before
+
+
+@pytest.mark.parametrize("stage", ["config", "client", "session"])
+def test_demo_failure_restores_environment_and_host(demo_home, monkeypatch, stage):
+    import os
+
+    previous = get_host()
+    monkeypatch.setenv("NIGHTWATCH_ARM", "previous")
+
+    def fail(*a, **k):
+        raise ConfigError(MARKER)
+
+    monkeypatch.setattr(entry, "EtoroClient", lambda *a, **k: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(entry, "TelegramNotifier", lambda *a, **k: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(entry, "TiingoClient", lambda *a: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(entry, {"config": "load_config", "client": "EtoroClient", "session": "run_session"}[stage], fail)
+    result = invoke_demo(demo_home)
+    assert result["status"] == "error" and result["error_type"] == "ConfigError"
+    assert result["armed"] is (stage == "session")
+    assert get_host() is previous and os.environ["NIGHTWATCH_ARM"] == "previous"
+
+
+def test_dry_restores_previous_host(wired, tmp_path):
+    old = DesktopHost(tmp_path / "nightwatch_config")
+    set_host(old)
+    assert invoke(wired[0])["status"] == "would_have_done"
+    assert get_host() is old
+
+
+def test_demo_window_and_lock_unchanged(demo_home, monkeypatch):
+    monkeypatch.setattr(entry, "EtoroClient", lambda *a, **k: pytest.fail("must not construct client"))
+    assert invoke_demo(demo_home, now_utc=datetime(2026, 11, 6, 20, 35, 1, tzinfo=timezone.utc))["status"] == "out_of_window"
+    with entry._session_lock(demo_home.data_dir() / "session.lock") as acquired:
+        assert acquired
+        assert invoke_demo(demo_home)["status"] == "busy"
+
+
+def test_demo_real_money_guard_independent_of_environment(demo_home, monkeypatch):
+    from nightwatch.config import EtoroEnvironment
+
+    monkeypatch.setattr(entry, "load_config", lambda **k: SimpleNamespace(
+        environment=EtoroEnvironment.DEMO, etoro=SimpleNamespace(is_real_money=True), is_armed=True))
+    monkeypatch.setattr(entry, "EtoroClient", lambda *a, **k: pytest.fail("real-money client constructed"))
+    result = invoke_demo(demo_home)
+    assert result["reason_code"] == "real_not_allowed" and result["armed"] is False
+
+
+def test_demo_prior_unfinished_armed_session_blocks_gate_five(demo_home, monkeypatch):
+    from nightwatch.engine.preflight import gate_5_database
+
+    with Repo.open(default_db_path(demo_home), host=demo_home) as repo:
+        previous = repo.create_session("2026-10-01", "live", "demo", True)
+    monkeypatch.setattr(entry, "EtoroClient", lambda *a, **k: SimpleNamespace(
+        close=lambda: None, set_deadline_in=lambda seconds: None))
+    monkeypatch.setattr(entry, "TiingoClient", lambda c: FakeTiingo())
+    monkeypatch.setattr(DesktopHost, "now", lambda self: NOW)
+
+    def gates(**kwargs):
+        return [GateSpec(n, f"gate_{n}",
+                         lambda n=n: gate_5_database(repo=kwargs["repo"], session_id=kwargs["session_id"])
+                         if n == 5 else GateResult(n, f"gate_{n}", True, "ok"))
+                for n in range(1, 13)]
+
+    monkeypatch.setattr(session, "build_preflight_gates", gates)
+    result = invoke_demo(demo_home)
+    assert result["status"] == "preflight_failed" and result["failed_gate"] == 5
+    with Repo.open(default_db_path(demo_home), host=demo_home) as repo:
+        assert repo.get_session(previous.id) == previous

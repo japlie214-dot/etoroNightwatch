@@ -192,7 +192,20 @@ object HaltFlag {
     private const val PREFS = "nightwatch_probe_halt_prefs"
     private const val KEY_HALT = "halt"
 
-    fun file(context: Context): File = File(context.filesDir, "nightwatch_config/HALT")
+    private fun files(filesDir: File) = listOf(
+        File(filesDir, "nightwatch_config/HALT"), File(filesDir, "nightwatch_demo/HALT"))
+
+    internal fun fileExists(filesDir: File) = files(filesDir).any { it.exists() }
+
+    internal fun createFiles(filesDir: File) {
+        files(filesDir).forEach {
+            it.parentFile?.mkdirs()
+            it.writeText("kotlin halt command ${Instant.now()}")
+        }
+    }
+
+    internal fun deleteFiles(filesDir: File): Boolean =
+        files(filesDir).map { !it.exists() || it.delete() }.all { it }
 
     internal interface Effects {
         fun fileExists(): Boolean
@@ -208,13 +221,9 @@ object HaltFlag {
     }
 
     internal class AndroidEffects(private val context: Context) : Effects {
-        override fun fileExists() = file(context).exists()
-        override fun createFile() {
-            val file = file(context)
-            file.parentFile?.mkdirs()
-            file.writeText("kotlin halt command ${Instant.now()}")
-        }
-        override fun deleteFile() = file(context).delete()
+        override fun fileExists() = fileExists(context.filesDir)
+        override fun createFile() = createFiles(context.filesDir)
+        override fun deleteFile() = deleteFiles(context.filesDir)
         override fun setHalted(halted: Boolean) = set(context, halted)
         override fun isHalted() = HaltFlag.isHalted(context)
         override fun cancelAlarm() = AlarmScheduler.cancel(context)
@@ -253,5 +262,6 @@ object HaltFlag {
     }
 
     fun isHalted(context: Context): Boolean =
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_HALT, false)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getBoolean(KEY_HALT, false) ||
+            fileExists(context.filesDir)
 }

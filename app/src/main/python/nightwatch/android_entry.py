@@ -1,4 +1,4 @@
-"""Dry-run desktop-host simulation on Android, not an AndroidHost.
+"""Desktop-host sessions on Android: dry by default, explicitly armed DEMO only.
 
 Power gates are assumed satisfied (T046); Kotlin latches the Python HALT file.
 Provision a fresh, separately migrated phone DB, never the desktop book:
@@ -20,11 +20,11 @@ import json
 import os
 from pathlib import Path
 
-from .config import load_config
+from .config import EtoroEnvironment, load_config
 from .db.repo import Repo, default_db_path
 from .engine.session import run_session
 from .etoro.client import EtoroClient
-from .host import DesktopHost, set_host
+from .host import DesktopHost, get_host, set_host
 from .market.calendar import EASTERN, is_trading_day, next_close_minus, session_close_datetime
 from .market.source import TiingoClient
 from .notify.telegram import TelegramNotifier
@@ -59,7 +59,8 @@ def _session_lock(path: Path):
 _STATUSES = frozenset({
     "would_have_done", "already_ran", "preflight_failed", "rerun_failed",
     "signal_failed", "decide_failed", "refused_armed",
-    "market_data_failed", "aborted_before_orders",
+    "market_data_failed", "aborted_before_orders", "executed", "executed_partial",
+    "halted_before_execution", "armed_refused_intents",
 })
 
 
@@ -71,6 +72,16 @@ def next_session_wake_epoch_ms(now_epoch_ms: int | None = None) -> int:
 
 
 def run_session_dry(base_dir: str, *, now_utc: datetime | None = None) -> str:
+    """Run disarmed, preserving the existing removal of NIGHTWATCH_ARM."""
+    return _run_entry(base_dir, armed=False, now_utc=now_utc)
+
+
+def run_session_armed_demo(base_dir: str, *, now_utc: datetime | None = None) -> str:
+    """Run only the explicitly armed, dedicated demo home."""
+    return _run_entry(base_dir, armed=True, now_utc=now_utc)
+
+
+def _run_entry(base_dir: str, *, armed: bool, now_utc: datetime | None) -> str:
     """Return one sanitized JSON envelope. ``now_utc`` is an aware test hook only."""
     if now_utc is not None and (
         not isinstance(now_utc, datetime) or now_utc.utcoffset() is None
@@ -78,13 +89,30 @@ def run_session_dry(base_dir: str, *, now_utc: datetime | None = None) -> str:
         raise ValueError("now_utc must be an aware datetime")
     envelope = dict(status="error", armed=False, session_id=None, failed_gate=None,
                     reason_code="entry_error", error_type=None, gates=[])
+    previous_host = get_host()
+    previous_arm = os.environ.get("NIGHTWATCH_ARM")
     try:
-        os.environ.pop("NIGHTWATCH_ARM", None)
-        host = DesktopHost(Path(base_dir))
-        set_host(host)
-        config = load_config(host=host)
-        if config.is_armed:
-            envelope.update(status="refused", reason_code="armed_not_allowed")
+        if not armed:
+            os.environ.pop("NIGHTWATCH_ARM", None)
+        refusal = None
+        if armed and Path(base_dir).name != "nightwatch_demo":
+            refusal = "wrong_home"
+        elif armed and not (Path(base_dir) / "ARM_DEMO").exists():
+            refusal = "not_armed_on_device"
+        else:
+            if armed:
+                os.environ["NIGHTWATCH_ARM"] = "1"
+            host = DesktopHost(Path(base_dir))
+            set_host(host)
+            config = load_config(host=host)
+            if armed and (config.environment is not EtoroEnvironment.DEMO or config.etoro.is_real_money):
+                refusal = "real_not_allowed"
+            elif armed and not config.is_armed:
+                refusal = "config_not_live"
+            elif not armed and config.is_armed:
+                refusal = "armed_not_allowed"
+        if refusal:
+            envelope.update(status="refused", reason_code=refusal)
         else:
             now = (now_utc or datetime.now(timezone.utc)).astimezone(EASTERN)
             trading_date = now.date()
@@ -107,7 +135,7 @@ def run_session_dry(base_dir: str, *, now_utc: datetime | None = None) -> str:
                                     envelope["session_id"] = previous.id
                                     # The engine persists prose, not a status column. This is its
                                     # dry-run success prefix plus terminal state, not just existence.
-                                    successful = (
+                                    successful = (previous.state == "finished" and previous.armed) if armed else (
                                         previous.state == "finished" and previous.finished_at is not None
                                         and not previous.armed and previous.error is None
                                         and (previous.outcome or "").startswith("would have done ")
@@ -118,13 +146,14 @@ def run_session_dry(base_dir: str, *, now_utc: datetime | None = None) -> str:
                                         failed_gate=previous.preflight_failed_gate,
                                     )
                                 else:
-                                    client = EtoroClient(config.etoro, role="read", repo=repo)
+                                    client = EtoroClient(config.etoro, role="write" if armed else "read", repo=repo)
                                     resources.callback(client.close)
                                     notifier = TelegramNotifier(config.telegram, repo, environment=config.environment.value)
                                     resources.callback(notifier.close)
                                     tiingo = TiingoClient(config.tiingo)
                                     if hasattr(tiingo, "close"):
                                         resources.callback(tiingo.close)
+                                    envelope["armed"] = armed
                                     result = run_session(
                                         host=host, config=config, repo=repo, client=client,
                                         trading_date=trading_date, tiingo=tiingo, wait=True,
@@ -142,6 +171,13 @@ def run_session_dry(base_dir: str, *, now_utc: datetime | None = None) -> str:
                                                          for r in repo.get_preflight_checks(row.id)]
     except Exception as exc:
         envelope.update(status="error", reason_code="entry_error", error_type=type(exc).__name__)
+    finally:
+        set_host(previous_host)
+        if armed:
+            if previous_arm is None:
+                os.environ.pop("NIGHTWATCH_ARM", None)
+            else:
+                os.environ["NIGHTWATCH_ARM"] = previous_arm
     try:
         envelope["halt"] = (Path(base_dir) / "HALT").exists()
     except Exception:

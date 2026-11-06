@@ -24,6 +24,14 @@ object PyBridge {
         }
     }
 
+    fun runSessionArmedDemo(context: Context, baseDir: String): String {
+        ensureStarted(context)
+        return synchronized(sessionLock) {
+            Python.getInstance().getModule("nightwatch.android_entry")
+                .callAttr("run_session_armed_demo", baseDir).toString()
+        }
+    }
+
     /** Market scheduling callers must use a background dispatcher. */
     fun nextSessionWakeEpochMs(context: Context): Long {
         ensureStarted(context)
