@@ -27,6 +27,9 @@ class FakeTiingo:
         self.calls = []
         self.closed = False
 
+    def set_deadline_in(self, seconds):
+        self.deadline_in = seconds
+
     def get_iex_quotes(self, symbols):
         self.calls.append(symbols)
         if self.offline:
@@ -47,6 +50,9 @@ class MarketClient:
         self.market_calls = []
         self.portfolio_calls = 0
         self.order_sizes = []
+
+    def set_deadline_in(self, seconds):
+        self.deadline_in = seconds
 
     def resolve_instrument_id(self, symbol):
         return IDS[symbol]

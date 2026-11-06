@@ -218,6 +218,8 @@ class TiingoClient:
             base_url=config.base_url, timeout=config.timeout_seconds
         )
         self._sleep = sleep
+        self._clock = clock
+        self._deadline: float | None = None
         self._max_attempts = max_attempts
         self._base_delay = base_delay_seconds
         self._max_delay = max_delay_seconds
@@ -267,6 +269,19 @@ class TiingoClient:
                 f"({self._daily_bucket.capacity}/day) -- refusing to call"
             )
 
+    def set_deadline_in(self, seconds: float | None) -> None:
+        self._deadline = None if seconds is None else self._clock() + seconds
+
+    def _check_deadline(self, wait: float = 0.0) -> None:
+        if self._deadline is not None:
+            now = self._clock()
+            if now >= self._deadline or now + wait > self._deadline:
+                raise TiingoTimeoutError("deadline")
+
+    def _sleep_with_deadline(self, seconds: float) -> None:
+        self._check_deadline(seconds)
+        self._sleep(seconds)
+
     def _request(self, path: str, params: Mapping[str, Any] | None) -> httpx.Response:
         """One GET, with rate limiting, retries and typed errors.
 
@@ -275,9 +290,11 @@ class TiingoClient:
         backoff; 429 retries honouring ``Retry-After``; every other 4xx is
         raised immediately, never retried.
         """
+        self._check_deadline()
         self._consume_budget()
         last_error: Exception | str = "unknown error"
         for attempt in range(1, self._max_attempts + 1):
+            self._check_deadline()
             try:
                 # Explicit per-call timeout, in addition to the client's own
                 # configured default -- DESIGN_market_data.md §8's hung probe
@@ -292,13 +309,13 @@ class TiingoClient:
                 last_error = exc
                 if attempt == self._max_attempts:
                     raise TiingoTimeoutError(f"timed out calling {path}: {exc}") from exc
-                self._sleep(self._backoff(attempt))
+                self._sleep_with_deadline(self._backoff(attempt))
                 continue
             except httpx.RequestError as exc:
                 last_error = exc
                 if attempt == self._max_attempts:
                     raise TiingoNetworkError(f"network error calling {path}: {exc}") from exc
-                self._sleep(self._backoff(attempt))
+                self._sleep_with_deadline(self._backoff(attempt))
                 continue
 
             if response.status_code == 200:
@@ -309,14 +326,14 @@ class TiingoClient:
                 last_error = f"429 rate limited (retry_after={retry_after}s)"
                 if attempt == self._max_attempts:
                     raise TiingoRateLimitError(str(last_error), retry_after=retry_after)
-                self._sleep(retry_after if retry_after is not None else self._backoff(attempt))
+                self._sleep_with_deadline(retry_after if retry_after is not None else self._backoff(attempt))
                 continue
 
             if 500 <= response.status_code < 600:
                 last_error = f"{response.status_code} server error: {response.text}"
                 if attempt == self._max_attempts:
                     raise TiingoServerError(str(last_error), status_code=response.status_code)
-                self._sleep(self._backoff(attempt))
+                self._sleep_with_deadline(self._backoff(attempt))
                 continue
 
             # Any other 4xx -- confirmed live: 404 "Ticker '...' not found",

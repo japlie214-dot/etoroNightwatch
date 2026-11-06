@@ -35,7 +35,7 @@ from .preflight import (
     gate_2_power, gate_3_network, gate_4_clock, gate_5_database,
     gate_6_auth, gate_7_environment, gate_8_instruments, gate_9_calendar,
     gate_10_price_data, gate_11_reconciliation, gate_12_risk_caps, run_preflight,
-    ProvisionalClose,
+    NetworkRetry, ProvisionalClose,
 )
 
 
@@ -107,6 +107,7 @@ def build_preflight_gates(
     session_id: int, trading_date: date, now: Callable[[], datetime] | None = None,
     recover: Callable[[], RecoveryReport] | None = None,
     recovery_reports: list[RecoveryReport] | None = None,
+    network_retry: NetworkRetry | None = None,
 ) -> list[GateSpec]:
     now = now or host.now
     positions: list[list[Position] | None] = [None]
@@ -146,7 +147,7 @@ def build_preflight_gates(
             status=host.power_status(), min_battery_percent=config.risk.min_battery_percent,
         )),
         GateSpec(3, "network", lambda: gate_3_network(
-            probe=etoro_reachability_probe(config.etoro.base_url),
+            probe=etoro_reachability_probe(config.etoro.base_url), network_retry=network_retry,
         )),
         GateSpec(4, "Clock", lambda: gate_4_clock(
             local_now=now(), server_date=fetch_server_date(config.etoro.base_url),
@@ -509,11 +510,17 @@ def _run_session_core(
                              execution_halted=execution_halted, halt_set=halt_set, halt_failure=halt_failure)
 
     try:
+        cutoff = session_close_datetime(trading_date) - timedelta(minutes=25)
+        network_retry = NetworkRetry()
+        if armed:
+            seconds_remaining = (cutoff - host.now()).total_seconds()
+            for reader in (client, tiingo, network_retry):
+                reader.set_deadline_in(seconds_remaining)
         outcome = run_preflight(build_preflight_gates(
             host=host, config=config, repo=repo, client=client, tiingo=tiingo,
             session_id=s.id, trading_date=trading_date,
             recover=recover if armed else None,
-            recovery_reports=recovery_reports,
+            recovery_reports=recovery_reports, network_retry=network_retry,
         ), repo=repo, session_id=s.id)
         recovery = recovery_reports[0] if recovery_reports else None
         close_recovery = close_recovery_reports[0] if close_recovery_reports else None
@@ -547,7 +554,6 @@ def _run_session_core(
                 _sleep_until(t30, host=host)
             else:
                 sleep_until(t30)
-        cutoff = session_close_datetime(trading_date) - timedelta(minutes=25)
         for attempt in range(3):
             if host.now() >= cutoff:
                 return abort("market_data_failed", "market data: close-25 cutoff reached", 10)
@@ -664,6 +670,8 @@ def _run_session_core(
                 status = "armed_refused_intents"
                 reason += "; multiple SCHG sells; strategy state not saved: multiple SCHG sells"
             else:
+                for reader in (client, tiingo, network_retry):
+                    reader.set_deadline_in(None)
                 closes = [i for i in d.intents if i.side == "close" and i.symbol == "UPRO"]
                 schg_sells = [i for i in d.intents if i.side == "close" and i.symbol == "SCHG"]
                 buys = [i for i in d.intents if i.side == "open"]

@@ -141,6 +141,7 @@ __all__ = [
     "gate_1_halt",
     "gate_2_power",
     "gate_3_network",
+    "NetworkRetry",
     "etoro_reachability_probe",
     "gate_4_clock",
     "gate_5_database",
@@ -251,14 +252,34 @@ def gate_2_power(*, status: PowerStatus, min_battery_percent: int) -> GateResult
     return GateResult(2, "power", False, reason, details)
 
 
+class NetworkRetry:
+    """Session-local monotonic deadline for the preflight network retry."""
+
+    def __init__(self, *, clock: Callable[[], float] = time.monotonic) -> None:
+        self._clock = clock
+        self._deadline: float | None = None
+
+    def set_deadline_in(self, seconds: float | None) -> None:
+        self._deadline = None if seconds is None else self._clock() + seconds
+
+    def _check_deadline(self, wait: float = 0.0) -> None:
+        if self._deadline is not None:
+            now = self._clock()
+            if now >= self._deadline or now + wait > self._deadline:
+                raise httpx.TimeoutException("deadline")
+
+
 def gate_3_network(
     *, probe: Callable[[], None], timeout_seconds: float = 90.0,
     interval_seconds: float = 5.0, sleep: Callable[[float], None] = time.sleep,
     clock: Callable[[], float] = time.monotonic,
+    network_retry: NetworkRetry | None = None,
 ) -> GateResult:
+    network_retry = network_retry or NetworkRetry(clock=clock)
     start = clock()
     attempts = 0
     while True:
+        network_retry._check_deadline()
         attempts += 1
         try:
             probe()
@@ -272,6 +293,7 @@ def gate_3_network(
             )
         if clock() - start + interval_seconds > timeout_seconds:
             break
+        network_retry._check_deadline(interval_seconds)
         sleep(interval_seconds)
     elapsed = clock() - start
     return GateResult(

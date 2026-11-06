@@ -196,6 +196,7 @@ class EtoroClient:
         self._limiter = rate_limiter or RateLimiter()
         self._sleep = sleep
         self._clock = clock
+        self._deadline: float | None = None
         self._max_attempts = max_attempts
         self._poll_interval = poll_interval_seconds
         self._poll_timeout = poll_timeout_seconds
@@ -235,15 +236,31 @@ class EtoroClient:
 
     # -- core transport --------------------------------------------------------
 
+    def set_deadline_in(self, seconds: float | None) -> None:
+        self._deadline = None if seconds is None else self._clock() + seconds
+
+    def _check_deadline(self, wait: float = 0.0) -> None:
+        if self._deadline is not None:
+            now = self._clock()
+            if now >= self._deadline or now + wait > self._deadline:
+                raise EtoroTimeoutError("deadline")
+
+    def _sleep_with_deadline(self, seconds: float) -> None:
+        self._check_deadline(seconds)
+        self._sleep(seconds)
+
     def _wait_for_capacity(self, request_class: RequestClass) -> None:
         deadline = self._clock() + 120.0  # generous local safety valve
-        while not self._limiter.try_acquire(request_class):
+        while True:
+            self._check_deadline()
+            if self._limiter.try_acquire(request_class):
+                break
             wait = min(self._limiter.time_until_available(request_class), 5.0)
             if self._clock() + wait > deadline:
                 # Do not hang forever locally; let the request proceed and
                 # rely on the server's own 429 + Retry-After as the backstop.
                 break
-            self._sleep(max(wait, 0.01))
+            self._sleep_with_deadline(max(wait, 0.01))
 
     def _check_response_contract(
         self,
@@ -307,6 +324,7 @@ class EtoroClient:
         for attempt in range(1, attempt_limit + 1):
             self._wait_for_capacity(request_class)
             headers = auth.build_headers(self._credentials, request_id)
+            self._check_deadline()
             try:
                 response = self._http.request(
                     method, path, params=params, json=json_body, headers=headers
@@ -315,13 +333,13 @@ class EtoroClient:
                 last_error = exc
                 if attempt == attempt_limit:
                     raise EtoroTimeoutError(f"timed out calling {path}: {exc}") from exc
-                self._sleep(self._backoff(attempt))
+                self._sleep_with_deadline(self._backoff(attempt))
                 continue
             except httpx.RequestError as exc:
                 last_error = exc
                 if attempt == attempt_limit:
                     raise EtoroNetworkError(f"network error calling {path}: {exc}") from exc
-                self._sleep(self._backoff(attempt))
+                self._sleep_with_deadline(self._backoff(attempt))
                 continue
 
             self.last_server_date = response.headers.get("Date", self.last_server_date)
@@ -351,14 +369,14 @@ class EtoroClient:
                 last_error = f"429 rate limited (retry_after={retry_after}s)"
                 if attempt == attempt_limit:
                     raise EtoroRateLimitError(str(last_error), retry_after=retry_after)
-                self._sleep(retry_after)
+                self._sleep_with_deadline(retry_after)
                 continue
 
             if 500 <= response.status_code < 600:
                 last_error = f"{response.status_code} server error: {self._safe_body(response)}"
                 if attempt == attempt_limit:
                     raise EtoroServerError(str(last_error), status_code=response.status_code)
-                self._sleep(self._backoff(attempt))
+                self._sleep_with_deadline(self._backoff(attempt))
                 continue
 
             # Any other 4xx: permanent, never retried.
