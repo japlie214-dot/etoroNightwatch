@@ -99,7 +99,8 @@ def _wall_clock() -> str:
 
 
 def _fmt_exc(e: BaseException) -> str:
-    return f"{type(e).__name__}: {e}"
+    status = getattr(e, "status_code", None)
+    return f"{type(e).__name__} status={status if type(status) is int else 'unknown'}"
 
 
 def _save_json(output_dir: Path, name: str, obj: Any) -> Path:
@@ -485,8 +486,6 @@ def main(argv: list[str] | None = None) -> int:
         if close_trace is not None:
             _save_json(output_dir, "failed_close_trace", close_trace)
         _p(f"EXCEPTION during measurement loop: {_fmt_exc(e)} -- stopping here, reporting whatever was collected.")
-        import traceback
-        _p(traceback.format_exc())
     finally:
         _save_json(output_dir, "all_traces", [_trace_to_dict(t) for t in all_traces])
 

@@ -1415,9 +1415,9 @@ class EtoroClient:
         live against the demo account: the close-order response carries none
         of ``orderId``/``orderID``/``id`` at the top level.
 
-        So: the guessed keys are still tried first, then the whole response
-        body is logged at WARNING (it is the only way to learn the real
-        shape), then a buy order is recovered through the ``referenceId`` path
+        So: the guessed keys are still tried first, then response status and
+        byte length are logged at WARNING without the body, then a buy order
+        is recovered through the ``referenceId`` path
         DESIGN §6.H already defines -- the ``x-request-id`` we sent is ours
         and eToro echoes it back as ``referenceId``. Only if that also fails
         does this raise. Close recovery by reference is unverified and fails
@@ -1446,23 +1446,29 @@ class EtoroClient:
                     if value not in (None, ""):
                         return str(value)
         _logger.warning(
-            "%s: response carries no recognised order id key -- full body: %s",
+            "%s: response carries no recognised order id key -- status=%s bytes=%s",
             what,
-            str(data)[:1000],
+            response.status_code,
+            len(response.content),
         )
         if what == "close_position":
             raise EtoroValidationError(
                 "close_position: response had no order id; close recovery by reference is "
                 "unverified (T024) -- reconcile from portfolio, do not resubmit"
             )
+        recovery_error_type = None
         try:
             recovered = self.lookup_order(reference_id=request_id)
         except EtoroError as exc:
+            recovery_error_type = type(exc).__name__
+        if recovery_error_type is not None:
+            # Raise outside the handler so __context__ cannot retain the broker body.
             raise EtoroValidationError(
                 f"{what}: submitted successfully but the response carries no "
                 f"order id, and recovery by referenceId={request_id} failed "
-                f"({exc}). Body: {str(data)[:400]}"
-            ) from exc
+                f"({recovery_error_type}); status={response.status_code} "
+                f"bytes={len(response.content)}"
+            ) from None
         if recovered.order_id:
             _logger.warning(
                 "%s: order id recovered via referenceId=%s -> %s",
@@ -1472,7 +1478,7 @@ class EtoroClient:
         raise EtoroValidationError(
             f"{what}: submitted successfully but no order id could be found "
             f"in the response or recovered by referenceId={request_id}. "
-            f"Body: {str(data)[:400]}"
+            f"status={response.status_code} bytes={len(response.content)}"
         )
 
     # -- orders: close (full or partial) --------------------------------------

@@ -14,6 +14,7 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONObject
 import java.io.IOException
+import java.security.MessageDigest
 
 /**
  * DESIGN §8.2 tier 1 (FCM high-priority push), the demotion canary, and — v2 — the full inbound
@@ -43,6 +44,17 @@ import java.io.IOException
  */
 class NightwatchProbeMessagingService : FirebaseMessagingService() {
 
+    companion object {
+        internal fun messageDetail(data: Map<String, String>): String =
+            "type=data data_keys=${data.keys.sorted()}"
+
+        internal fun tokenDetail(token: String): String {
+            val hash = MessageDigest.getInstance("SHA-256").digest(token.toByteArray(Charsets.UTF_8))
+                .take(4).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+            return "length=${token.length} sha256=$hash"
+        }
+    }
+
     private val scope = CoroutineScope(Dispatchers.IO + Job())
     private val http by lazy { OkHttpClient() }
 
@@ -64,14 +76,13 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
         // notification itself so it always fires, foreground or background.
         val command = message.data["command"]
         val title = message.data["title"] ?: "Nightwatch Probe"
-        val body = message.data["body"] ?: "command=$command data=${message.data}"
+        val body = message.data["body"] ?: "Data message received"
 
         // The unmistakable event this bug exposed the absence of: log it BEFORE any dispatch
         // logic, unconditionally, every single time onMessageReceived actually runs.
         store.log(
             "FCM_MESSAGE_RECEIVED",
-            "priority=$priorityStr originalPriority=$origPriorityStr command=$command " +
-                "data_keys=${message.data.keys} data=${message.data}"
+            "priority=$priorityStr originalPriority=$origPriorityStr ${messageDetail(message.data)}"
         )
 
         if (priorityStr != "PRIORITY_HIGH") {
@@ -108,7 +119,7 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
         // scheduled trigger (DESIGN §9.1/§9.4). Everything else must carry a valid, non-replayed
         // HMAC or it is rejected and audited, never silently ignored.
         if (command == "refresh" || command == "run_session") {
-            store.log("COMMAND_RECEIVED", "command=$command channel=fcm verdict=accepted (unauthenticated-by-design)")
+            store.log("COMMAND_RECEIVED", "${messageDetail(data)} channel=fcm verdict=accepted (unauthenticated-by-design)")
             CommandHandler.handle(this, command, data)
             return
         }
@@ -118,14 +129,14 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
             is CommandVerifier.Verdict.Accepted -> {
                 store.log(
                     "COMMAND_RECEIVED",
-                    "command=$command channel=fcm counter=${verdict.counter} verdict=accepted"
+                    "${messageDetail(data)} channel=fcm verdict=accepted"
                 )
                 CommandHandler.handle(this, command, data)
             }
             is CommandVerifier.Verdict.Rejected -> {
                 store.log(
                     "COMMAND_REJECTED",
-                    "command=$command channel=fcm counter=$counter verdict=rejected reason=${verdict.reason}"
+                    "${messageDetail(data)} channel=fcm verdict=rejected"
                 )
                 NotificationHelper.postFailure(
                     this,
@@ -138,7 +149,7 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
 
     override fun onNewToken(token: String) {
         val store = EventStore.get(this)
-        store.log("FCM_NEW_TOKEN", token)
+        store.log("FCM_NEW_TOKEN", tokenDetail(token))
         TokenHolder.set(token)
 
         // POST the token to the Worker's /device-token endpoint so real pushes can be sent.
@@ -166,12 +177,11 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
             http.newCall(request).execute().use { response ->
                 store.log(
                     "FCM_TOKEN_POST",
-                    "status=${response.code} success=${response.isSuccessful} " +
-                        "body=${response.body?.string()?.take(500)}"
+                    "status=${response.code} success=${response.isSuccessful}"
                 )
             }
         } catch (e: IOException) {
-            store.log("FCM_TOKEN_POST_FAILED", "${e.javaClass.simpleName}: ${e.message}")
+            store.log("FCM_TOKEN_POST_FAILED", "error=${e.javaClass.simpleName}")
         }
     }
 

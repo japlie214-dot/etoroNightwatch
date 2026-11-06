@@ -2,6 +2,8 @@ package com.nightwatch.etoro.probe
 
 import android.content.Context
 import com.chaquo.python.Python
+import com.chaquo.python.Kwarg
+import java.io.File
 import com.chaquo.python.android.AndroidPlatform
 
 /**
@@ -13,6 +15,29 @@ object PyBridge {
     private var started = false
     private var callCounter = 0
     private val sessionLock = Any()
+
+    /** No foreign text survives a missing config or unavailable sanitizer. */
+    fun redactDiagnostic(context: Context, text: String): String? = try {
+        ensureStarted(context)
+        val py = Python.getInstance()
+        val hostModule = py.getModule("nightwatch.host")
+        val configModule = py.getModule("nightwatch.config")
+        val sessionModule = py.getModule("nightwatch.engine.session")
+        val homes = listOf("nightwatch_config", "nightwatch_demo")
+            .map { File(context.filesDir, it) }.filter { it.isDirectory }
+        check(homes.isNotEmpty())
+        var safe = text
+        for (home in homes) {
+            val path = py.getModule("pathlib").callAttr("Path", home.absolutePath)
+            val host = hostModule.callAttr("DesktopHost", path)
+            val config = configModule.callAttr("load_config", Kwarg("host", host))
+            safe = sessionModule.callAttr("_redact_reason", safe,
+                Kwarg("config", config), Kwarg("fallback", "")).toString()
+        }
+        safe.takeIf { it.isNotEmpty() }
+    } catch (_: Exception) {
+        null
+    }
 
     // Separate monitor keeps probe methods usable during the wait. Python GIL/shared
     // interpreter contention remains: probes during a session may run slower.

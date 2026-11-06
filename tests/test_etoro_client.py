@@ -2484,3 +2484,110 @@ def test_buy_write_response_without_order_id_recovers_by_reference() -> None:
     assert [request.method for request in scripted.requests] == ["POST", "GET"]
     assert scripted.requests[1].url.path == "/api/v2/trading/info/demo/orders:lookup"
     assert scripted.requests[1].url.params["referenceId"] == request_id
+
+
+@pytest.mark.parametrize("recovery", ["success", "error", "empty", "close"])
+@pytest.mark.parametrize("json_body", [False, True])
+def test_write_fallback_diagnostics_never_include_response_body(
+    monkeypatch, caplog, recovery, json_body,
+) -> None:
+    from types import SimpleNamespace
+    import traceback
+
+    private = "broker-private"
+    response = (httpx.Response(200, json={"unexpected": private}) if json_body else
+                httpx.Response(200, text=private))
+    scripted = ScriptedTransport([response])
+    client = EtoroClient(_config(), transport=httpx.MockTransport(scripted.handler))
+    logger = logging.getLogger("nightwatch.etoro.client")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(logger, "propagate", False)
+    monkeypatch.setattr(logger, "level", logging.WARNING)
+    lookups = []
+
+    def lookup(**kwargs):
+        lookups.append(kwargs)
+        if recovery == "error":
+            raise EtoroValidationError(private)
+        return SimpleNamespace(order_id="o-99" if recovery == "success" else None)
+
+    monkeypatch.setattr(client, "lookup_order", lookup)
+    try:
+        if recovery == "success":
+            assert client.place_buy_order("ref-1", 42, 100) == "o-99"
+        else:
+            with pytest.raises(EtoroValidationError) as caught:
+                if recovery == "close":
+                    client.close_position("ref-1", "p-1", 42)
+                else:
+                    client.place_buy_order("ref-1", 42, 100)
+            rendered = "".join(traceback.format_exception(caught.value))
+            assert private not in rendered
+            assert "Body:" not in rendered
+            assert caught.value.__cause__ is None
+            assert caught.value.__context__ is None
+        lines = [record.getMessage() for record in caplog.records]
+        assert any(f"status=200 bytes={len(response.content)}" in line for line in lines)
+        assert all(private not in line and "full body" not in line for line in lines)
+        assert lookups == ([] if recovery == "close" else [{"reference_id": "ref-1"}])
+        assert len(scripted.requests) == 1
+    finally:
+        client.close()
+
+
+def _load_latency_probe():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "android-probe/app/src/main/python/probe_order_latency_2026_09_11.py"
+    spec = importlib.util.spec_from_file_location("latency_diagnostic_test", path)
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    return probe
+
+
+@pytest.mark.parametrize("phase", ["loop", "resolve"])
+def test_latency_probe_omits_exception_body_and_traceback(monkeypatch, tmp_path, capsys, phase):
+    from types import SimpleNamespace
+    import nightwatch.config as config_module
+    import nightwatch.etoro.client as client_module
+    import nightwatch.probes.order_latency as latency
+
+    probe = _load_latency_probe()
+    private = "broker-private"
+    closed = []
+    client = SimpleNamespace(resolve_instrument_id=lambda _: 42, close=lambda: closed.append(True))
+    monkeypatch.setattr(config_module, "load_config", lambda **_: SimpleNamespace(etoro=None, describe=lambda: "synthetic config"))
+    monkeypatch.setattr(client_module, "EtoroClient", lambda *_, **__: client)
+    monkeypatch.setattr(probe, "_confirm_demo_or_die", lambda *_: latency.DemoConfirmation(True, (), "demo"))
+
+    def fail_open(*_, **__):
+        error = RuntimeError(private)
+        error.open_leg_trace = dict(order_id="o-1", request_id="ref-1", repeat_index=0)
+        raise error
+
+    def fail_resolve(_):
+        raise EtoroValidationError(private, status_code=400)
+
+    if phase == "resolve":
+        client.resolve_instrument_id = fail_resolve
+    saved = []
+    monkeypatch.setattr(latency, "run_open_leg", fail_open)
+    monkeypatch.setattr(probe, "_save_json", lambda _, name, value: saved.append((name, value)))
+    assert probe.main(["--output-dir", str(tmp_path), "--repeats", "3"]) == (4 if phase == "resolve" else 1)
+    output = capsys.readouterr().out
+    assert private not in output and "Traceback" not in output
+    if phase == "loop":
+        assert "EXCEPTION during measurement loop: RuntimeError" in output
+        assert "POSITION(S) LEFT OPEN" in output
+        assert any(name == "failed_open_trace" for name, _ in saved)
+    else:
+        assert "could not resolve SCHG instrument id: EtoroValidationError status=400" in output
+    assert closed == [True]
+
+
+@pytest.mark.parametrize("status", [None, 400, 503, "broker-private"])
+def test_latency_probe_error_formatter_exposes_only_type_and_numeric_status(status):
+    probe = _load_latency_probe()
+    error = RuntimeError("broker-private")
+    error.status_code = status
+    assert probe._fmt_exc(error) == f"RuntimeError status={status if type(status) is int else 'unknown'}"

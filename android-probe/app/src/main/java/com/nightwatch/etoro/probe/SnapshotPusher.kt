@@ -2,13 +2,10 @@ package com.nightwatch.etoro.probe
 
 import android.app.AlarmManager
 import android.content.Context
-import android.os.Build
-import android.os.SystemClock
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
-import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.util.concurrent.TimeUnit
@@ -32,43 +29,40 @@ object SnapshotPusher {
         lastCheckResults: List<CheckBattery.CheckResult>?
     ): JSONObject {
         val store = EventStore.get(context)
-        val device = JSONObject().apply {
-            put("app_version_code", BuildConfig.VERSION_CODE)
-            put("app_version_name", BuildConfig.VERSION_NAME)
-            put("battery_pct", PowerStatus.batteryPercent(context))
-            put("charging", PowerStatus.isCharging(context))
-            put("exact_alarm_permission", PowerStatus.canScheduleExactAlarms(context))
-            put("battery_exempt", PowerStatus.isIgnoringBatteryOptimizations(context))
-            put("standby_bucket", PowerStatus.standbyBucket(context))
-            put("doze_active", PowerStatus.isDeviceIdleMode(context))
-            put("uptime_ms", SystemClock.elapsedRealtime())
-            put("android_release", Build.VERSION.RELEASE)
-            put("android_sdk_int", Build.VERSION.SDK_INT)
-            put("device", "${Build.MANUFACTURER} ${Build.MODEL}")
-            put("next_alarm_epoch_ms", nextAlarmEpochMs(context))
-            put("server_time_now", java.util.Date().toString())
-        }
+        return JSONObject(snapshotFields(store.recent(50), lastCheckResults,
+            nextAlarmEpochMs(context), HaltFlag.isHalted(context)) {
+            PyBridge.redactDiagnostic(context, it)
+        })
+    }
 
-        val events = JSONArray()
-        store.recent(50).forEach { events.put(it.formatted()) }
-
-        val checks = JSONArray()
-        lastCheckResults?.forEach { r ->
-            checks.put(
-                JSONObject().apply {
-                    put("name", r.name)
-                    put("pass", r.pass)
-                    put("detail", r.detail)
+    internal fun snapshotFields(
+        events: List<EventStore.Event>,
+        checks: List<CheckBattery.CheckResult>?,
+        nextRun: Long?,
+        halt: Boolean,
+        redact: (String) -> String?
+    ): Map<String, Any?> {
+        fun safe(text: String): String? = try { redact(text) } catch (_: Exception) { null }
+        return mapOf(
+            "probe" to "nightwatch-android-probe-v2",
+            "device" to mapOf("next_alarm_epoch_ms" to nextRun),
+            "halt" to halt,
+            "recent_events" to events.map { event ->
+                mutableMapOf<String, Any>(
+                    "type" to (safe(event.type) ?: "EVENT"),
+                    "ts_epoch_ms" to event.tsEpochMs
+                ).apply {
+                    safe(event.detail)?.let { put("detail", it) }
                 }
-            )
-        }
-
-        return JSONObject().apply {
-            put("probe", "nightwatch-android-probe-v2")
-            put("device", device)
-            put("recent_events", events)
-            put("latest_checks", checks)
-        }
+            },
+            "latest_checks" to (checks ?: emptyList()).map { check ->
+                mutableMapOf<String, Any>(
+                    "name" to (safe(check.name) ?: "CHECK"), "pass" to check.pass
+                ).apply {
+                    safe(check.detail)?.let { put("detail", it) }
+                }
+            }
+        )
     }
 
     private fun nextAlarmEpochMs(context: Context): Long? {
@@ -88,11 +82,11 @@ object SnapshotPusher {
                 Result(
                     success = response.isSuccessful,
                     httpStatus = response.code,
-                    detail = "status=${response.code} body=${response.body?.string()?.take(300)}"
+                    detail = "status=${response.code}"
                 )
             }
         } catch (e: IOException) {
-            Result(false, null, "${e.javaClass.simpleName}: ${e.message}")
+            Result(false, null, "error=${e.javaClass.simpleName}")
         }
     }
 

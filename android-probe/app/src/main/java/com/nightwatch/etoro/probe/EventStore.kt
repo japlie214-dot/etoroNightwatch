@@ -19,6 +19,8 @@ import java.util.TimeZone
 class EventStore(context: Context) :
     SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {
 
+    private val appContext = context.applicationContext
+
     companion object {
         private const val DB_NAME = "nightwatch_probe_events.db"
         private const val DB_VERSION = 1
@@ -27,6 +29,12 @@ class EventStore(context: Context) :
 
         @Volatile
         private var instance: EventStore? = null
+
+        internal fun redactedDetail(type: String, detail: String, redact: (String) -> String?): String {
+            // Unknown commands contain arbitrary FCM values, not diagnostic labels.
+            if (type == "COMMAND_UNKNOWN") return "details omitted"
+            return try { redact(detail) ?: "" } catch (_: Exception) { "" }
+        }
 
         fun get(context: Context): EventStore =
             instance ?: synchronized(this) {
@@ -62,7 +70,7 @@ class EventStore(context: Context) :
         val cv = ContentValues().apply {
             put("ts_epoch_ms", System.currentTimeMillis())
             put("type", type)
-            put("detail", detail)
+            put("detail", redactedDetail(type, detail) { PyBridge.redactDiagnostic(appContext, it) })
         }
         db.insert("events", null, cv)
     }
