@@ -365,11 +365,21 @@ def gate_5_database(*, repo: Repo, session_id: int) -> GateResult:
             f"{s.trading_date} (id {s.id}, state {s.state})" for s in others
         )
         return GateResult(5, "database", False, reason, {"unfinished_ids": [s.id for s in others]})
-    unresolved = repo.unresolved_intents()
+    unresolved = []
+    ignored = []
+    for intent in repo.unresolved_intents():
+        if intent.status == "abandoned" and intent.sent_at is None:
+            ignored.append(intent.id)
+        else:
+            unresolved.append(intent)
+    details: dict[str, object] = {}
+    if ignored:
+        details["ignored_abandoned_unsent_intent_ids"] = ignored
     if unresolved:
-        return GateResult(5, "database", False, f"{len(unresolved)} unresolved order intent(s)",
-                          {"unresolved_intent_ids": [i.id for i in unresolved]})
-    return GateResult(5, "database", True, "database ok", {"schema_version": actual})
+        details["unresolved_intent_ids"] = [i.id for i in unresolved]
+        return GateResult(5, "database", False, f"{len(unresolved)} unresolved order intent(s)", details)
+    details["schema_version"] = actual
+    return GateResult(5, "database", True, "database ok", details)
 
 
 def gate_6_auth(*, client: EtoroClient) -> GateResult:

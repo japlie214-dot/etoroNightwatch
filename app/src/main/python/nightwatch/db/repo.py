@@ -1860,6 +1860,8 @@ class Repo:
                 if intent.status != "abandoned":
                     raise ValueError("reconciliation requires an abandoned intent")
                 if isinstance(change, Adoption):
+                    if intent.sent_at is None:
+                        raise ValueError("adoption requires a sent abandoned intent")
                     self._insert_lot_annotation(change.annotation)
                 else:
                     cur = self.conn.execute(

@@ -808,6 +808,7 @@ def _gate11_abandoned_intent(
         book=book,
         amount_usd=amount_usd,
         status="abandoned",
+        sent_at="2026-08-21T09:59:00+00:00",
     )
 
 
@@ -1102,7 +1103,9 @@ def _persist_reconciliation_pair(repo):
 
     buy = _gate11_abandoned_intent(instrument_id=3244, symbol="UPRO")
     close = replace(_gate11_abandoned_close_intent(), sequence=2)
-    repo.insert_intent(buy)
+    buy_id = repo.insert_intent(buy)
+    repo.set_intent_status(buy_id, "sent")
+    repo.set_intent_status(buy_id, "abandoned", resolved=True)
     repo.insert_intent(close)
     repo.insert_lot_annotation(_gate11_annotation("pos-vanished", "SCHG"))
     return [_gate11_position("pos-late-fill", 3244)]
@@ -1121,6 +1124,48 @@ def _persisted_gate11(repo, positions, *, apply=True):
         instrument_symbols=INSTRUMENT_SYMBOLS, abandoned_intents=repo.abandoned_intents(),
         repo=repo, apply=apply,
     )
+
+
+@pytest.mark.parametrize("sent", [False, True])
+def test_gate_11_adopts_only_sent_abandoned_buys(decision_repo, sent):
+    repo = decision_repo
+    intent_id = repo.insert_intent(_gate11_abandoned_intent())
+    if sent:
+        repo.set_intent_status(intent_id, "sent")
+        repo.set_intent_status(intent_id, "abandoned", resolved=True)
+    before = _reconciliation_rows(repo)
+    result = _persisted_gate11(repo, [_gate11_position("pos-late-fill", 1084)])
+    assert result.passed == sent, result.reason
+    if sent:
+        assert repo.get_lot_annotation("pos-late-fill") is not None
+        assert repo.get_intents(1)[0].status == "recovered"
+    else:
+        assert result.details["adoptions"] == []
+        assert result.details["discrepancies"][0]["kind"] == "unmatched_broker_position"
+        assert _reconciliation_rows(repo) == before
+
+
+def test_apply_reconciliation_rechecks_persisted_send_evidence_and_rolls_back(decision_repo):
+    from dataclasses import replace
+    from nightwatch.engine.reconcile import Adoption
+
+    repo = decision_repo
+    _persist_reconciliation_pair(repo)
+    buy, close = repo.get_intents(1)
+    unsent_id = repo.insert_intent(replace(buy, request_id="unsent", sequence=3))
+    unsent = repo.get_intent_by_request_id("unsent")
+    assert unsent.id == unsent_id and unsent.sent_at is None
+    # A caller's stale/forged send evidence must not override the database.
+    changes = [
+        Adoption("pos-valid", buy, _gate11_annotation("pos-valid", "UPRO")),
+        Adoption("pos-unsent", replace(unsent, sent_at=buy.sent_at),
+                 _gate11_annotation("pos-unsent", "UPRO")),
+    ]
+    before = _reconciliation_rows(repo)
+    with pytest.raises(ValueError, match="sent abandoned intent"):
+        repo.apply_reconciliation(changes)
+    assert _reconciliation_rows(repo) == before
+    assert not repo.conn.in_transaction
 
 
 def test_gate_11_persists_buy_and_close_atomically_and_rerun_is_noop(decision_repo):

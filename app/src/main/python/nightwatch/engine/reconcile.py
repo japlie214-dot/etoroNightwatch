@@ -341,6 +341,8 @@ def _match_abandoned_intent(
     * ``status == "abandoned"`` -- filtered here, not trusted from the
       caller, so passing a broader set of intents (e.g. every intent this
       session ever wrote) is safe rather than a footgun.
+    * ``sent_at is not None`` -- an abandoned unsent intent cannot have
+      created a broker position (T063).
     * ``side == "buy"`` -- only a buy creates a NEW broker position; a
       stuck close resolves via the ``unmatched_open_lot`` direction
       instead, never this one.
@@ -375,7 +377,7 @@ def _match_abandoned_intent(
     for intent in abandoned_intents:
         if intent.status != "abandoned":
             continue
-        if intent.side != "buy":
+        if intent.side != "buy" or intent.sent_at is None:
             continue
         if intent.instrument_id != position.instrument_id:
             continue

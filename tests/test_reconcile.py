@@ -271,6 +271,7 @@ def _abandoned_intent(
     position_id: str | None = None,
     bucket_id: str | None = None,
     status: str = "abandoned",
+    sent_at: str | None = "2026-08-21T09:59:00+00:00",
 ) -> Intent:
     return Intent(
         session_id=session_id,
@@ -284,6 +285,7 @@ def _abandoned_intent(
         position_id=position_id,
         bucket_id=bucket_id,
         status=status,
+        sent_at=sent_at,
     )
 
 
@@ -330,6 +332,21 @@ def test_adopts_an_unmatched_position_matching_one_abandoned_intent() -> None:
     assert adoption.annotation.entry_spy_ath == 620.0
     assert adoption.annotation.entry_spy_drawdown == 1 - 600 / 620
     assert adoption.annotation.entry_tier == 1
+
+
+def test_abandoned_unsent_buy_is_not_adoption_provenance() -> None:
+    position = _position("pos-unmatched", SCHG_ID)
+    discrepancies = reconcile(
+        [position], [], managed_symbols=MANAGED_SYMBOLS,
+        instrument_symbols=INSTRUMENT_SYMBOLS,
+    )
+    remaining, adoptions = resolve_abandoned_intent_adoptions(
+        [position], [], discrepancies, [_abandoned_intent(sent_at=None)],
+        size_tolerance_pct=0.02,
+        decisions={1: Decision(1, "2026-08-21", spy_close=600.0)},
+    )
+    assert remaining == discrepancies
+    assert adoptions == []
 
 
 def test_bare_unmatched_position_with_no_abandoned_intents_still_fails_closed() -> None:

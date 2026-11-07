@@ -114,7 +114,11 @@ def test_unresolved_crash_sets_halt_and_gate_five_refuses(repo, host, recovery, 
     assert result.halt_set and host.halt_flag_path().exists()
     assert result.failed_gate == 1 or result.status == "already_ran"
     gate = gate_5_database(repo=repo, session_id=result.session_id)
-    assert not gate.passed and "unresolved" in gate.reason
+    if case == "abandoned":
+        assert gate.passed
+        assert gate.details["ignored_abandoned_unsent_intent_ids"] == [repo.get_intents(old.id)[0].id]
+    else:
+        assert not gate.passed and "unresolved" in gate.reason
     assert repo.unresolved_intents(old.id)[0].session_id == old.id
     if case == "ages_to_abandoned":
         assert repo.get_intent_by_request_id("sent").status == "sent"

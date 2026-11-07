@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from nightwatch.db import migrations
-from nightwatch.db.repo import Repo
+from nightwatch.db.repo import Intent, Repo
 from nightwatch.engine.preflight import GateResult, GateSpec, gate_5_database, run_preflight
 from nightwatch.host import DesktopHost
 
@@ -101,6 +101,43 @@ def test_closed_connection_exception_stops_and_persists(
     rows = repo.get_preflight_checks(session_id)
     assert [row.gate for row in rows] == [1, 2, 3, 4, 5]
     assert [row.passed for row in rows] == [True, True, True, True, False]
+
+
+@pytest.mark.parametrize("status, sent", [
+    ("abandoned", False), ("abandoned", True), ("pending", False),
+    ("sent", True), ("filled_unannotated", True),
+])
+def test_gate_5_ignores_only_abandoned_unsent_and_persists_visibility(repo, session_id, status, sent):
+    ignored_id = repo.insert_intent(Intent(
+        session_id, "ignored-unsent", 1, "UPRO", "buy", amount_usd=50.0,
+        status="abandoned",
+    ))
+    intent_id = repo.insert_intent(Intent(
+        session_id, "candidate", 2, "UPRO", "buy", amount_usd=50.0,
+    ))
+    if sent:
+        repo.set_intent_status(intent_id, "sent")
+    repo.set_intent_status(intent_id, status, resolved=status == "abandoned")
+    ignored = [ignored_id, intent_id] if status == "abandoned" and not sent else [ignored_id]
+    gates = [GateSpec(n, f"gate {n}", lambda n=n: GateResult(n, f"gate {n}", True, "ok"))
+             for n in range(1, 13)]
+    gates[4] = GateSpec(5, "database", lambda: gate_5_database(repo=repo, session_id=session_id))
+    outcome = run_preflight(gates, repo=repo, session_id=session_id)
+    result = outcome.results[4]
+    assert result.passed == (len(ignored) == 2)
+    assert result.details["ignored_abandoned_unsent_intent_ids"] == ignored
+    if not result.passed:
+        assert result.details["unresolved_intent_ids"] == [intent_id]
+        assert outcome.failed.gate == 5
+    else:
+        assert [r.gate for r in outcome.results] == list(range(1, 13))
+    import json
+
+    persisted = repo.get_preflight_checks(session_id)[4]
+    assert json.loads(persisted.detail)["details"]["ignored_abandoned_unsent_intent_ids"] == ignored
+    # Gate 5 does not change crash-recovery classification or the daily cap.
+    assert [i.id for i in repo.unresolved_intents(session_id)] == [ignored_id, intent_id]
+    assert repo.reserved_buy_usd("2026-10-02") == 100.0
 
 
 def test_gate_writes_nothing(repo: Repo, session_id: int) -> None:
