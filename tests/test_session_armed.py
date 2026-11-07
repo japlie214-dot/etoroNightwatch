@@ -97,6 +97,30 @@ def armed(repo, host, config, monkeypatch):
     return e
 
 
+@pytest.mark.parametrize("mode,arm_flag,label", [
+    (TradingMode.LIVE, True, "armed"),
+    (TradingMode.DRY_RUN, False, "dry run"),
+    (TradingMode.LIVE, False, "dry run"),
+])
+def test_decision_reason_label_matches_arming(armed, repo, mode, arm_flag, label):
+    armed.config = replace(armed.config, mode=mode, arm_flag_present=arm_flag)
+    result = armed.run()
+    decision = repo.get_decision(result.session_id)
+    assert decision.reason == (
+        f"phase A, pre-settlement, buy intents provisional; {label}: offline decision"
+    )
+    report = session.format_session_report(
+        result, trading_date=DAY, environment="demo", next_run_at="next session",
+    )
+    if label == "armed":
+        assert result.status == "executed"
+        assert "armed: " in report and "dry run" not in report
+        assert "dry run" not in decision.reason
+    else:
+        assert result.status == "would_have_done"
+        armed.execute.assert_not_called()
+
+
 def test_armed_fill_saves_before_post_execution_snapshot(armed, repo, host):
     result = armed.run()
     row = repo.get_session(result.session_id)

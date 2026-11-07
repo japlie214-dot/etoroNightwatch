@@ -669,7 +669,7 @@ def _run_session_core(
             drawdown=inputs.spy.drawdown, tier=inputs.spy.tier, budget=d.new_state.budget,
             order_size=d.new_state.order_size, cash_target=d.new_state.cash_target,
             equity=inputs.equity, cash=inputs.cash,
-            reason="phase A, pre-settlement, buy intents provisional; dry run: " + d.reason,
+            reason=f"phase A, pre-settlement, buy intents provisional; {'armed' if armed else 'dry run'}: " + d.reason,
         ))
         refusals = arming_refusals(config)
         groups = {}
