@@ -183,7 +183,11 @@ def run(
     out = Path(output_dir)
     client = None
     stage = "output setup"
+    from nightwatch.host import DesktopHost, get_host, set_host
+
+    previous_host = get_host()
     try:
+        set_host(DesktopHost(Path(config_dir)))
         out.mkdir(parents=True, exist_ok=True)
         attempt_path = out / "submit_attempt.json"
         if attempt_path.exists():
@@ -363,7 +367,10 @@ def run(
         except Exception:
             _log(lines, "could not save failure report")
     finally:
-        if client is not None:
-            client.close()
+        try:
+            if client is not None:
+                client.close()
+        finally:
+            set_host(previous_host)
     _log(lines, f"finished; artifacts={out}; any filled position remains open")
     return "\n".join(lines)

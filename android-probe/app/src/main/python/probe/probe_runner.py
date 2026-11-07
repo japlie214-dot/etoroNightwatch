@@ -142,10 +142,9 @@ def run_default(config_dir: str, output_dir: str, sections: str | None = None) -
             raise their own timeout accordingly.
         config_dir: a directory containing a ``config/`` subfolder with
             ``config.toml`` and ``.secrets.env`` (pushed onto the device by
-            the operator beforehand -- see the runbook). Passed through as
-            ``NIGHTWATCH_HOME`` so :func:`nightwatch.host.repo_root` resolves
-            to it instead of trying to compute a desktop repo path that does
-            not exist on-device.
+            the operator beforehand -- see the runbook). Bound explicitly
+            as the host for this run; ``NIGHTWATCH_HOME`` is also retained
+            for compatibility.
         output_dir: where every raw payload and report this run produces is
             written, so the operator can ``adb pull`` it back afterward.
 
@@ -164,39 +163,38 @@ def run_default(config_dir: str, output_dir: str, sections: str | None = None) -
     _p(buf, f"NIGHTWATCH_HOME set to {config_dir!r}")
     _p(buf, f"output_dir={out}")
     resolved_sections = _sanitize_sections(buf, sections)
-    _p(
-        buf,
-        "NOTE: NIGHTWATCH_HOME is only read the first time nightwatch.host is "
-        "imported in this process. If you need to point at a different "
-        "config_dir, force-stop and relaunch the app first so a fresh "
-        "process picks up the new value.",
-    )
+    from nightwatch.host import DesktopHost, get_host, set_host
 
+    previous_host = get_host()
     try:
-        import probe_live_2026_09_11 as probe
-    except Exception as e:
-        _p(buf, f"FATAL: cannot import copied probe_live_2026_09_11: {e!r}")
-        _p(buf, traceback.format_exc())
+        set_host(DesktopHost(Path(config_dir)))
+        try:
+            import probe_live_2026_09_11 as probe
+        except Exception as e:
+            _p(buf, f"FATAL: cannot import copied probe_live_2026_09_11: {e!r}")
+            _p(buf, traceback.format_exc())
+            return "\n".join(buf)
+
+        _p(buf, f"=== sections {resolved_sections} (E2 never runs from here; --e2 is never passed) ===")
+        try:
+            probe.main(["--output-dir", str(out), "--sections", resolved_sections])
+        except SystemExit as e:
+            _p(buf, f"probe_live_2026_09_11.main() exited with code {e.code!r} (argparse error or explicit return)")
+        except Exception as e:
+            _p(buf, f"probe_live_2026_09_11.main() raised: {e!r}")
+            _p(buf, traceback.format_exc())
+
+        _p(buf, "=== E1-plus: full per-trade fee audit (nightwatch.probes.fee_audit) ===")
+        try:
+            _run_fee_audit_plus(buf, out)
+        except Exception as e:
+            _p(buf, f"E1-plus FAILED: {e!r}")
+            _p(buf, traceback.format_exc())
+
+        _p(buf, "=== run_default finished -- see output_dir for every saved file ===")
         return "\n".join(buf)
-
-    _p(buf, f"=== sections {resolved_sections} (E2 never runs from here; --e2 is never passed) ===")
-    try:
-        probe.main(["--output-dir", str(out), "--sections", resolved_sections])
-    except SystemExit as e:
-        _p(buf, f"probe_live_2026_09_11.main() exited with code {e.code!r} (argparse error or explicit return)")
-    except Exception as e:
-        _p(buf, f"probe_live_2026_09_11.main() raised: {e!r}")
-        _p(buf, traceback.format_exc())
-
-    _p(buf, "=== E1-plus: full per-trade fee audit (nightwatch.probes.fee_audit) ===")
-    try:
-        _run_fee_audit_plus(buf, out)
-    except Exception as e:
-        _p(buf, f"E1-plus FAILED: {e!r}")
-        _p(buf, traceback.format_exc())
-
-    _p(buf, "=== run_default finished -- see output_dir for every saved file ===")
-    return "\n".join(buf)
+    finally:
+        set_host(previous_host)
 
 
 def _run_fee_audit_plus(buf: list[str], output_dir: Path) -> None:

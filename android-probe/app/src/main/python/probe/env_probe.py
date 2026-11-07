@@ -117,61 +117,66 @@ def run(config_dir: str, output_dir: str) -> str:
     try:
         from nightwatch.config import load_config
         from nightwatch.etoro.client import EtoroClient
-        from nightwatch.host import get_host
+        from nightwatch.host import DesktopHost, get_host, set_host
     except Exception as e:
         _p(buf, f"FATAL: cannot import nightwatch: {e!r}")
         _p(buf, traceback.format_exc())
         return "\n".join(buf)
 
+    previous_host = get_host()
     try:
-        config = load_config(host=get_host())
-    except Exception as e:
-        _p(buf, f"FATAL: load_config failed: {e!r}")
-        _p(buf, traceback.format_exc())
-        return "\n".join(buf)
+        set_host(DesktopHost(Path(config_dir)))
+        try:
+            config = load_config(host=get_host())
+        except Exception as e:
+            _p(buf, f"FATAL: load_config failed: {e!r}")
+            _p(buf, traceback.format_exc())
+            return "\n".join(buf)
 
-    env = config.etoro.environment.value
-    seg = config.etoro.path_segment
-    _p(buf, f"config: {config.describe()}")
-    _p(buf, f"environment={env!r} path_segment={seg!r}")
+        env = config.etoro.environment.value
+        seg = config.etoro.path_segment
+        _p(buf, f"config: {config.describe()}")
+        _p(buf, f"environment={env!r} path_segment={seg!r}")
 
-    # role="read": the read-scoped credential, never the write one. repo=None
-    # (default) so no sqlite file is opened.
-    client = EtoroClient(config.etoro, role="read")
-    captured: dict[str, Any] = {
-        "configured_environment": env,
-        "configured_path_segment": seg,
-        "captured_at_utc": datetime.now(timezone.utc).isoformat(),
-        "endpoints": {},
-    }
-    try:
-        for name, template in _READ_PATHS:
-            path = template.format(seg=seg, env=env)
-            entry: dict[str, Any] = {"path": path}
-            try:
-                response = client._request("GET", path, request_class="read")
-                entry["status_code"] = response.status_code
+        # role="read": the read-scoped credential, never the write one. repo=None
+        # (default) so no sqlite file is opened.
+        client = EtoroClient(config.etoro, role="read")
+        captured: dict[str, Any] = {
+            "configured_environment": env,
+            "configured_path_segment": seg,
+            "captured_at_utc": datetime.now(timezone.utc).isoformat(),
+            "endpoints": {},
+        }
+        try:
+            for name, template in _READ_PATHS:
+                path = template.format(seg=seg, env=env)
+                entry: dict[str, Any] = {"path": path}
                 try:
-                    body = response.json()
-                except Exception:
-                    body = {"__non_json_body__": response.text[:2000]}
-                entry["body"] = body
-                _save_json(out, name, {"path": path, "status_code": response.status_code, "body": body})
-                _p(buf, f"GET {path} -> {response.status_code}, saved {name}.json")
-                if isinstance(body, dict):
-                    _p(buf, f"    top-level keys: {sorted(body.keys())!r}")
-            except Exception as e:
-                # A rejection is DATA, not a failure of this probe: it is
-                # precisely the signal a path-segment-based detector would key
-                # on. Record it and keep going.
-                entry["error"] = f"{type(e).__name__}: {e}"
-                _p(buf, f"GET {path} -> ERROR {type(e).__name__}: {e}")
-            captured["endpoints"][name] = entry
+                    response = client._request("GET", path, request_class="read")
+                    entry["status_code"] = response.status_code
+                    try:
+                        body = response.json()
+                    except Exception:
+                        body = {"__non_json_body__": response.text[:2000]}
+                    entry["body"] = body
+                    _save_json(out, name, {"path": path, "status_code": response.status_code, "body": body})
+                    _p(buf, f"GET {path} -> {response.status_code}, saved {name}.json")
+                    if isinstance(body, dict):
+                        _p(buf, f"    top-level keys: {sorted(body.keys())!r}")
+                except Exception as e:
+                    # A rejection is DATA, not a failure of this probe: it is
+                    # precisely the signal a path-segment-based detector would key
+                    # on. Record it and keep going.
+                    entry["error"] = f"{type(e).__name__}: {e}"
+                    _p(buf, f"GET {path} -> ERROR {type(e).__name__}: {e}")
+                captured["endpoints"][name] = entry
 
-        _save_json(out, "env_probe_summary", captured)
-        _p(buf, "saved env_probe_summary.json")
+            _save_json(out, "env_probe_summary", captured)
+            _p(buf, "saved env_probe_summary.json")
+        finally:
+            client.close()
+
+        _p(buf, "env_probe.run finished -- GETs only, no order placed, no DB opened")
+        return "\n".join(buf)
     finally:
-        client.close()
-
-    _p(buf, "env_probe.run finished -- GETs only, no order placed, no DB opened")
-    return "\n".join(buf)
+        set_host(previous_host)

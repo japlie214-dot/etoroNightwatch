@@ -3,6 +3,7 @@
 import ast
 import importlib.util
 import inspect
+import os
 from pathlib import Path
 import sys
 import threading
@@ -178,3 +179,132 @@ def test_section_failure_does_not_print_exception_chain_or_notes(probe, capsys):
 
 def test_probe_copies_stay_identical():
     assert PROBES[0].read_bytes() == PROBES[1].read_bytes()
+
+
+RUNNER_ENTRIES = (
+    ("probe_runner", "run_default"),
+    ("probe_runner", "run_sections"),
+    ("adopt_fetch", "run"),
+    ("env_probe", "run"),
+    ("order_latency_runner", "run"),
+    ("demo_cleanup", "run"),
+    ("payload_gaps", "run"),
+    ("take_profit_probe", "run"),
+)
+
+
+@pytest.mark.parametrize("module_name,entry_name", RUNNER_ENTRIES)
+@pytest.mark.parametrize("config_valid", (True, False), ids=("loaded", "invalid"))
+def test_runner_binds_home_after_host_was_resolved(
+    monkeypatch, tmp_path, config_path, module_name, entry_name, config_valid,
+):
+    import nightwatch.config as config_module
+    import nightwatch.host as host_module
+
+    # Simulate the diagnostic bridge resolving the host before any runner call.
+    previous = host_module.get_host()
+    monkeypatch.setenv("NIGHTWATCH_HOME", "unused-before-runner")
+    assert host_module.get_host() is previous
+    monkeypatch.syspath_prepend(str(ROOT / "android-probe/app/src/main/python"))
+    module = importlib.import_module(f"probe.{module_name}")
+    loaded = []
+    active_roots = []
+    real_load_config = config_module.load_config
+    if not config_valid:
+        config_path.write_text("[invalid", encoding="utf-8")
+    # No real dotenv access, even if a broken runner resolves the wrong home.
+    monkeypatch.setattr(config_module, "read_dotenv", lambda path: {})
+
+    def load_then_stop(*args, **kwargs):
+        active_roots.append(host_module.get_host().config_dir())
+        config = real_load_config(*args, **kwargs)
+        loaded.append(config.config_path)
+        raise ValueError("T067 offline stop after config load")
+
+    monkeypatch.setattr(config_module, "load_config", load_then_stop)
+    try:
+        result = getattr(module, entry_name)(str(tmp_path), str(tmp_path / "output"))
+        assert isinstance(result, str)
+        assert active_roots
+        assert all(path == config_path.parent for path in active_roots)
+        assert loaded == ([config_path] * len(active_roots) if config_valid else [])
+        assert host_module.get_host() is previous
+        assert os.environ["NIGHTWATCH_HOME"] == str(tmp_path)
+    finally:
+        host_module.set_host(previous)
+
+
+@pytest.mark.parametrize("module_name,entry_name", RUNNER_ENTRIES)
+def test_runner_restores_host_when_interrupted(
+    monkeypatch, tmp_path, module_name, entry_name,
+):
+    import nightwatch.config as config_module
+    import nightwatch.host as host_module
+
+    previous = host_module.get_host()
+    monkeypatch.setenv("NIGHTWATCH_HOME", "unused-before-runner")
+    monkeypatch.syspath_prepend(str(ROOT / "android-probe/app/src/main/python"))
+    module = importlib.import_module(f"probe.{module_name}")
+
+    def interrupt(*args, **kwargs):
+        assert host_module.get_host().config_dir() == tmp_path / "config"
+        raise KeyboardInterrupt("T067 offline interruption")
+
+    monkeypatch.setattr(config_module, "load_config", interrupt)
+    try:
+        with pytest.raises(KeyboardInterrupt, match="T067 offline interruption"):
+            getattr(module, entry_name)(str(tmp_path), str(tmp_path / "output"))
+        assert host_module.get_host() is previous
+    finally:
+        host_module.set_host(previous)
+
+
+def test_live_runner_keeps_home_through_sections_and_fee_audit(
+    monkeypatch, tmp_path, config_path,
+):
+    import nightwatch.config as config_module
+    import nightwatch.etoro.client as client_module
+    import nightwatch.host as host_module
+
+    previous = host_module.get_host()
+    monkeypatch.setenv("NIGHTWATCH_HOME", "unused-before-runner")
+    monkeypatch.syspath_prepend(str(ROOT / "android-probe/app/src/main/python"))
+    from probe import probe_runner
+
+    monkeypatch.setattr(config_module, "read_dotenv", lambda path: {})
+    seen = []
+
+    def sections(argv):
+        config = config_module.load_config()
+        assert config.config_path == config_path
+        assert argv[-1] == "A,C,D,E1,F"
+        seen.append("sections")
+        return 0
+
+    class OfflineClient:
+        def __init__(self, config, *, role):
+            assert role == "read"
+            assert config.environment.value == "demo"
+            assert host_module.get_host().config_dir() == config_path.parent
+            seen.append("fee audit")
+
+        def resolve_instrument_id(self, symbol):
+            return {"SCHG": 1084, "UPRO": 3244}[symbol]
+
+        def get_trade_history(self, **kwargs):
+            return []
+
+        def close(self):
+            assert host_module.get_host().config_dir() == config_path.parent
+            seen.append("closed")
+
+    monkeypatch.setitem(sys.modules, "probe_live_2026_09_11", SimpleNamespace(main=sections))
+    monkeypatch.setattr(client_module, "EtoroClient", OfflineClient)
+    try:
+        result = probe_runner.run_default(str(tmp_path), str(tmp_path / "output"))
+        assert "run_default finished" in result
+        assert "E1-plus FAILED" not in result
+        assert seen == ["sections", "fee audit", "closed"]
+        assert host_module.get_host() is previous
+    finally:
+        host_module.set_host(previous)

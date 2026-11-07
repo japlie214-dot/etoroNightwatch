@@ -101,67 +101,72 @@ def run(config_dir: str, output_dir: str) -> str:
     try:
         from nightwatch.config import load_config
         from nightwatch.etoro.client import EtoroClient
-        from nightwatch.host import get_host
+        from nightwatch.host import DesktopHost, get_host, set_host
     except Exception as e:
         _p(buf, f"FATAL: cannot import nightwatch: {e!r}")
         _p(buf, traceback.format_exc())
         return "\n".join(buf)
 
+    previous_host = get_host()
     try:
-        config = load_config(host=get_host())
-    except Exception as e:
-        _p(buf, f"FATAL: load_config failed: {e!r}")
-        _p(buf, traceback.format_exc())
-        return "\n".join(buf)
-
-    _p(buf, f"config: {config.describe()}")
-    if config.etoro.environment.value != "real":
-        _p(
-            buf,
-            "WARNING: etoro.environment is not 'real' -- this will fetch the "
-            "DEMO portfolio, not the 209 real positions the migration is "
-            "about. See doc/RUNBOOK_DEVICE_PROBE.md step 3 for the "
-            "device-config-copy trick (never edit the committed config.toml).",
-        )
-
-    # role="read": the read-scoped credential (ETORO_READ_PRIVATE_KEY), never
-    # the write one -- and repo=None (the default) so this process never
-    # opens or touches any sqlite file, live sidecar included.
-    client = EtoroClient(config.etoro, role="read")
-    try:
+        set_host(DesktopHost(Path(config_dir)))
         try:
-            positions = client.get_portfolio()
+            config = load_config(host=get_host())
         except Exception as e:
-            _p(buf, f"FATAL: get_portfolio() failed: {e!r}")
+            _p(buf, f"FATAL: load_config failed: {e!r}")
             _p(buf, traceback.format_exc())
             return "\n".join(buf)
 
-        _p(buf, f"fetched {len(positions)} open positions (READ-ONLY, nothing placed/modified)")
-        raw_positions = [dict(p.raw) for p in positions]
-        _save_json(out, "adopt_portfolio_raw", raw_positions)
-        _p(buf, f"saved {len(raw_positions)} raw position records -> adopt_portfolio_raw.json")
+        _p(buf, f"config: {config.describe()}")
+        if config.etoro.environment.value != "real":
+            _p(
+                buf,
+                "WARNING: etoro.environment is not 'real' -- this will fetch the "
+                "DEMO portfolio, not the 209 real positions the migration is "
+                "about. See doc/RUNBOOK_DEVICE_PROBE.md step 3 for the "
+                "device-config-copy trick (never edit the committed config.toml).",
+            )
 
-        distinct_ids = sorted({p.instrument_id for p in positions})
-        _p(buf, f"distinct instrument_ids in portfolio: {distinct_ids}")
-
-        managed_ids: dict[str, int] = {}
-        for symbol in ("SCHG", "UPRO"):
+        # role="read": the read-scoped credential (ETORO_READ_PRIVATE_KEY), never
+        # the write one -- and repo=None (the default) so this process never
+        # opens or touches any sqlite file, live sidecar included.
+        client = EtoroClient(config.etoro, role="read")
+        try:
             try:
-                managed_ids[symbol] = client.resolve_instrument_id(symbol)
-                _p(buf, f"resolved {symbol} -> instrument_id {managed_ids[symbol]}")
+                positions = client.get_portfolio()
             except Exception as e:
-                _p(buf, f"could not resolve {symbol}: {e!r}")
-        _save_json(out, "adopt_managed_instrument_ids", managed_ids)
+                _p(buf, f"FATAL: get_portfolio() failed: {e!r}")
+                _p(buf, traceback.format_exc())
+                return "\n".join(buf)
 
-        if distinct_ids:
-            try:
-                instruments_meta = client.get_instruments(distinct_ids)
-                _save_json(out, "adopt_instruments_meta_raw", instruments_meta)
-                _p(buf, f"saved metadata for {len(instruments_meta)} instrument rows")
-            except Exception as e:
-                _p(buf, f"get_instruments FAILED (non-fatal, PC side falls back to placeholder symbols for unresolved ids): {e!r}")
+            _p(buf, f"fetched {len(positions)} open positions (READ-ONLY, nothing placed/modified)")
+            raw_positions = [dict(p.raw) for p in positions]
+            _save_json(out, "adopt_portfolio_raw", raw_positions)
+            _p(buf, f"saved {len(raw_positions)} raw position records -> adopt_portfolio_raw.json")
+
+            distinct_ids = sorted({p.instrument_id for p in positions})
+            _p(buf, f"distinct instrument_ids in portfolio: {distinct_ids}")
+
+            managed_ids: dict[str, int] = {}
+            for symbol in ("SCHG", "UPRO"):
+                try:
+                    managed_ids[symbol] = client.resolve_instrument_id(symbol)
+                    _p(buf, f"resolved {symbol} -> instrument_id {managed_ids[symbol]}")
+                except Exception as e:
+                    _p(buf, f"could not resolve {symbol}: {e!r}")
+            _save_json(out, "adopt_managed_instrument_ids", managed_ids)
+
+            if distinct_ids:
+                try:
+                    instruments_meta = client.get_instruments(distinct_ids)
+                    _save_json(out, "adopt_instruments_meta_raw", instruments_meta)
+                    _p(buf, f"saved metadata for {len(instruments_meta)} instrument rows")
+                except Exception as e:
+                    _p(buf, f"get_instruments FAILED (non-fatal, PC side falls back to placeholder symbols for unresolved ids): {e!r}")
+        finally:
+            client.close()
+
+        _p(buf, "adopt_fetch.run finished -- read-only throughout, no order placed, no DB opened")
+        return "\n".join(buf)
     finally:
-        client.close()
-
-    _p(buf, "adopt_fetch.run finished -- read-only throughout, no order placed, no DB opened")
-    return "\n".join(buf)
+        set_host(previous_host)

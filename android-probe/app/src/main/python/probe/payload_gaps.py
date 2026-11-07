@@ -212,7 +212,11 @@ def run(config_dir: str, output_dir: str) -> str:
     submit_started = False
     report: dict[str, Any] = {"status": "REFUSED", "reason": "not started"}
     stage = "output setup"
+    from nightwatch.host import DesktopHost, get_host, set_host
+
+    previous_host = get_host()
     try:
+        set_host(DesktopHost(Path(config_dir)))
         out.mkdir(parents=True, exist_ok=True)
         attempt_path = out / "submit_attempt.json"
         if attempt_path.exists():
@@ -414,7 +418,10 @@ def run(config_dir: str, output_dir: str) -> str:
         _log(lines, traceback.format_exc())
         _try_save(out, "probe_report.json", report, lines)
     finally:
-        if client is not None:
-            client.close()
+        try:
+            if client is not None:
+                client.close()
+        finally:
+            set_host(previous_host)
     _log(lines, f"finished; status={report.get('status')}; artifacts={out}")
     return "\n".join(lines)
