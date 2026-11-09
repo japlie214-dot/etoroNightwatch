@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Final, Iterable
 
@@ -138,6 +139,27 @@ def log_path_for_today(host: Host | None = None) -> Path:
     return active_host.logs_dir() / f"log_{today}.txt"
 
 
+def _prune_old_logs(directory: Path, today: date, keep_days: int = 90) -> None:
+    """Remove only dated daily logs strictly older than the retention window."""
+    logger = logging.getLogger(__name__)
+    cutoff = today - timedelta(days=keep_days)
+    try:
+        for path in directory.iterdir():
+            if not re.fullmatch(r"log_\d{4}-\d{2}-\d{2}\.txt", path.name):
+                continue
+            try:
+                log_date = date.fromisoformat(path.name[4:-4])
+            except ValueError:
+                continue
+            if log_date < cutoff:
+                try:
+                    path.unlink()
+                except OSError as exc:
+                    logger.warning("Could not prune daily log %s: %s", path.name, exc)
+    except OSError as exc:
+        logger.warning("Could not scan daily logs for retention: %s", exc)
+
+
 def configure_logging(
     level: int = logging.INFO,
     host: Host | None = None,
@@ -239,6 +261,7 @@ def configure_logging(
     # before configure_logging() ran, or a fresh one from a library that
     # calls logging.basicConfig() late).
     harden_third_party_logging()
+    _prune_old_logs(log_path.parent, date.fromisoformat(log_path.name[4:-4]))
 
     return logger
 

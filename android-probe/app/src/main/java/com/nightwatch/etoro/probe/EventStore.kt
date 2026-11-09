@@ -24,6 +24,12 @@ class EventStore(context: Context) :
     companion object {
         private const val DB_NAME = "nightwatch_probe_events.db"
         private const val DB_VERSION = 1
+        internal const val RETENTION_DAYS = 90
+        private var retentionPruned = false
+
+        internal fun retentionCutoff(nowEpochMs: Long): Long =
+            nowEpochMs - RETENTION_DAYS * 24L * 60 * 60 * 1000
+
         private val TS_FORMAT =
             SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS z", Locale.US)
 
@@ -67,8 +73,15 @@ class EventStore(context: Context) :
     @Synchronized
     fun log(type: String, detail: String) {
         val db = writableDatabase
+        val now = System.currentTimeMillis()
+        synchronized(Companion) {
+            if (!retentionPruned) {
+                db.delete("events", "ts_epoch_ms < ?", arrayOf(retentionCutoff(now).toString()))
+                retentionPruned = true
+            }
+        }
         val cv = ContentValues().apply {
-            put("ts_epoch_ms", System.currentTimeMillis())
+            put("ts_epoch_ms", now)
             put("type", type)
             put("detail", redactedDetail(type, detail) { PyBridge.redactDiagnostic(appContext, it) })
         }
