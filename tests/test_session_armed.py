@@ -257,7 +257,8 @@ def test_recovery_tp_failure_skips_execution_and_still_snapshots(armed, repo, ho
     limits.assert_not_called()
     armed.execute.assert_not_called()
     armed.save.assert_not_called()
-    assert repo.get_strategy_state() == before
+    after = repo.get_strategy_state()
+    assert after == replace(before, bars=1, updated_at=after.updated_at)
     assert armed.calls.count("balance") == 1 and "snapshot" in armed.calls
     snap = repo.latest_snapshot()
     assert snap.raw["phase"] == "post_execution" and snap.available_cash == 1000
@@ -288,7 +289,8 @@ def test_execution_tp_failure_halt_and_persistence_error(armed, repo, host, monk
     before = repo.get_strategy_state()
     result = armed.run()
     armed.save.assert_not_called()
-    assert repo.get_strategy_state() == before
+    after = repo.get_strategy_state()
+    assert after == replace(before, bars=1, updated_at=after.updated_at)
     assert "strategy state not saved: take-profit not cleared" in result.reason
     assert "followups 1: inspect TP" in result.reason
     row = repo.get_session(result.session_id)
@@ -389,7 +391,8 @@ def test_real_limits_drop_prevents_state_save(armed, repo):
     assert result.status == "executed" and "accepted 1, dropped 1" in result.reason
     assert armed.execute.call_args.kwargs["intents"] == [BUY]
     armed.save.assert_not_called()
-    assert repo.get_strategy_state() == before
+    after = repo.get_strategy_state()
+    assert after == replace(before, bars=1, updated_at=after.updated_at)
     assert "strategy state not saved: limits dropped intents" in result.reason
 
 

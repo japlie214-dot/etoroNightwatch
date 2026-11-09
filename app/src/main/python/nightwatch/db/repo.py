@@ -2246,6 +2246,24 @@ class Repo:
             sale_batch_date=row["sale_batch_date"], updated_at=row["updated_at"],
         )
 
+    def save_market_state(
+        self, *, bars: int, ath: float | None, below_streak: int,
+        expired_bucket_ids: Sequence[str], trading_date: str,
+    ) -> None:
+        """Checkpoint observed facts without committing simulated spending or fills."""
+        with self.conn:
+            self.conn.execute("BEGIN")
+            self.conn.execute(
+                "UPDATE strategy_state SET bars = ?, ath = ?, below_streak = ?, "
+                "updated_at = ? WHERE id = 1",
+                (bars, ath, below_streak, utcnow()),
+            )
+            self.conn.executemany(
+                "UPDATE buckets SET is_active = 0, expired_at = ? "
+                "WHERE bucket_id = ? AND is_active = 1",
+                [(trading_date, bucket_id) for bucket_id in expired_bucket_ids],
+            )
+
     def save_strategy_state(self, state: StrategyState) -> None:
         """Write the singleton state row.
 

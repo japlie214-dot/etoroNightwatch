@@ -502,7 +502,8 @@ def test_run_session_finalization_failure_halts_and_vetoes_final_save(
     assert "strategy state not saved" in result.reason
     assert ("annotation insert failed" if failure == "annotation" else "no position id") in result.reason
     armed.save.assert_not_called()
-    assert repo.get_strategy_state() == before
+    after = repo.get_strategy_state()
+    assert after == replace(before, bars=1, updated_at=after.updated_at)
     saved, = repo.get_intents(result.session_id)
     assert saved.status == "filled_unannotated" and saved.resolved_at is None
     assert repo.get_lot_annotation("P1") is None

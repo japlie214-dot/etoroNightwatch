@@ -20,7 +20,7 @@ from typing import Callable, Mapping, Sequence
 import httpx
 
 from ..config import Config, TradingMode
-from ..db.repo import Bucket, Decision, PortfolioSnapshot, PriceWindowFingerprint, Repo, SnapshotPosition, utcnow
+from ..db.repo import Decision, PortfolioSnapshot, PriceWindowFingerprint, Repo, SnapshotPosition, utcnow
 from ..etoro.client import EtoroClient
 from ..etoro.models import Balance, Candle, Position, Rate
 from ..host import Host, get_host
@@ -900,13 +900,28 @@ def _run_session_core(
                                                 - d.new_state.recyclable_cash)
                         final_state = replace(d.new_state, recyclable_cash=_floor_cents(
                             load(repo).recyclable_cash - consumed))
-                        filled_buckets = {r.intent.bucket_id for r in report.results if r.outcome == "filled"}
-                        for b in inputs.buckets:
-                            if b.bucket_id not in {x.bucket_id for x in d.updated_buckets} and b.bucket_id not in filled_buckets:
-                                repo.upsert_bucket(Bucket(**asdict(b), is_active=False, expired_at=iso))
                         save(repo, final_state)
                     else:
                         reason += "; strategy state not saved: " + not_saved
+            # A hard crash must leave market time unadvanced so remaining cash can be retried.
+            try:
+                repo.save_market_state(
+                    bars=d.new_state.bars, ath=d.new_state.ath,
+                    below_streak=d.new_state.below_streak,
+                    expired_bucket_ids=[b.bucket_id for b in inputs.buckets
+                                        if d.new_state.bars - b.created_bar >= config.strategy.bucket_expiry_bars],
+                    trading_date=iso,
+                )
+            except Exception as exc:
+                failure = _redact_reason(
+                    f"market facts persistence failed: {type(exc).__name__}: {exc}",
+                    config=config, fallback="market facts persistence failed")
+                logging.getLogger(__name__).warning("%s", failure)
+                reason += "; " + failure
+                if status == "executed":
+                    status = "executed_partial"
+            else:
+                reason += "; market facts saved"
         reason += recovery_text + halt_text
         if notes:
             reason += f"; inputs: {'; '.join(notes)}"

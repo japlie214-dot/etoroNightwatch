@@ -266,7 +266,7 @@ def test_confirmed_sale_checkpoint_survives_buy_failure(two, repo):
     assert result.status == "executed"
     assert "strategy state not saved: non-filled result" in result.reason
     assert two.save.call_count == 1
-    assert repo.get_strategy_state().bars == 0
+    assert repo.get_strategy_state().bars == 1
     assert repo.get_strategy_state().recyclable_cash == 200
     session.reconcile_effects(repo)
     assert repo.get_strategy_state().recyclable_cash == 200
@@ -294,15 +294,17 @@ def test_reentry_filled_with_other_buy_failed_is_applied_without_final_save(two,
 
 
 @pytest.mark.parametrize("complete", [False, True])
-def test_expired_bucket_deactivated_only_on_final_save(two, repo, complete):
+def test_expired_bucket_deactivated_even_when_final_save_vetoed(two, repo, complete):
     bucket(repo)
+    two.decision.new_state = replace(two.decision.new_state, bars=20)
     two.decision.intents = [BUY]
     if not complete:
         two.report = ExecutionReport((filled(outcome="rejected"),), None, (), (), ())
     assert two.run().status == "executed"
     b = repo.get_bucket("b")
-    assert b.is_active == (not complete)
-    assert b.expired_at == (DAY.isoformat() if complete else None)
+    assert not b.is_active
+    assert b.expired_at == DAY.isoformat()
+    assert b.tranches_bought == 0 and b.last_reference_spy == 110
 
 
 def test_limits_receive_fresh_sleeve_cash_and_live_lot_count(two, repo, monkeypatch):
@@ -392,7 +394,7 @@ def test_application_failure_halts_and_snapshots(two, repo, host, monkeypatch, w
     if where != "bucket":
         two.execute.assert_not_called()
     assert "snapshot" in two.calls
-    assert repo.get_strategy_state().bars == 0
+    assert repo.get_strategy_state().bars == 1
 
 
 def test_confirmed_prefix_applies_even_when_second_close_unresolved(two, repo):
@@ -403,7 +405,7 @@ def test_confirmed_prefix_applies_even_when_second_close_unresolved(two, repo):
     result = two.run()
     assert result.status == "executed_partial"
     assert repo.get_strategy_state().recyclable_cash == 200
-    assert repo.get_strategy_state().bars == 0
+    assert repo.get_strategy_state().bars == 1
     two.execute.assert_not_called()
     pending = repo.get_intents(result.session_id)[-1]
     confirm(repo, pending.id, "v")
@@ -685,7 +687,7 @@ def test_schg_then_buy_tp_veto_preserves_close_evidence_and_bucket_fill(schg, re
     result = schg.run()
     assert result.status == "executed"
     assert schg.save.call_count == int(upro) + int(not tp_failed)
-    assert repo.get_strategy_state().bars == int(not tp_failed)
+    assert repo.get_strategy_state().bars == 1
     assert repo.get_strategy_state().recyclable_cash == (200 if upro else 0)
     if upro:
         checkpoint = schg.save.call_args_list[0].args[1]
@@ -732,7 +734,7 @@ def test_bucket_persistence_failure_precedes_tp_save_veto(two, repo, host, monke
     assert "sale-effect persistence failed: RuntimeError: apply failed" in result.reason
     assert host.halt_flag_path().exists()
     two.save.assert_not_called()
-    assert repo.get_strategy_state().bars == 0
+    assert repo.get_strategy_state().bars == 1
 
 
 @pytest.mark.parametrize("bad", [replace(SELL, amount=float("inf")), replace(SELL, amount=float("nan")),
@@ -779,7 +781,7 @@ def test_schg_fresh_portfolio_failure_blocks_without_schg_send(schg, repo, upro)
     assert "SCHG sell portfolio read failed: RuntimeError: fresh unavailable" in result.reason
     schg.schg.assert_not_called()
     schg.execute.assert_not_called()
-    assert schg.save.call_count == int(upro) and repo.get_strategy_state().bars == 0
+    assert schg.save.call_count == int(upro) and repo.get_strategy_state().bars == 1
     assert schg.client.close_position.call_count == int(upro)
 
 
@@ -804,7 +806,7 @@ def test_schg_shortfall_always_blocks_final_save(schg, repo, case, stopped, send
     assert schg.client.close_position.call_count == sends
     schg.execute.assert_not_called()
     schg.save.assert_not_called()
-    assert repo.get_strategy_state().bars == 0
+    assert repo.get_strategy_state().bars == 1
     assert repo.get_strategy_state().recyclable_cash == 0
 
 
@@ -839,7 +841,7 @@ def test_schg_uncertainty_never_resends_or_saves_final(schg, repo, host, monkeyp
         assert f"SCHG close s: {failure}" in result.reason
     assert schg.calls.count("balance") == 2
     assert "snapshot" in schg.calls
-    assert schg.save.call_count == int(upro) and repo.get_strategy_state().bars == 0
+    assert schg.save.call_count == int(upro) and repo.get_strategy_state().bars == 1
     schg.execute.assert_not_called()
     sends = schg.client.close_position.call_count
     assert sends == 1 + int(upro)
@@ -854,7 +856,7 @@ def test_schg_uncertainty_never_resends_or_saves_final(schg, repo, host, monkeyp
     assert result2.status == "halted_before_execution"
     assert "unresolved close at recovery" in result2.reason
     assert schg.client.close_position.call_count == sends and schg.schg.call_count == 1
-    assert schg.save.call_count == int(upro) and repo.get_strategy_state().bars == 0
+    assert schg.save.call_count == int(upro) and repo.get_strategy_state().bars == 1
     schg.execute.assert_not_called()
 
 
@@ -928,7 +930,7 @@ def test_real_upro_close_uses_ceiling_before_buys_and_vetoes_final_save(two, rep
     two.client.close_position.assert_called_once()
     two.client.place_buy_order.assert_not_called()
     assert two.save.call_count == 1  # confirmed-sale checkpoint only
-    assert repo.get_strategy_state().bars == 0
+    assert repo.get_strategy_state().bars == 1
     assert repo.get_strategy_state().recyclable_cash == 200
     sent, = repo.get_intents(result.session_id)
     assert sent.side == "close" and sent.sent_at is not None
@@ -945,7 +947,7 @@ def test_upro_exhausted_budget_defers_schg_without_saving_final(schg, repo):
     assert "strategy state not saved" in result.reason
     schg.client.close_position.assert_called_once()
     schg.execute.assert_not_called()
-    assert schg.save.call_count == 1 and repo.get_strategy_state().bars == 0
+    assert schg.save.call_count == 1 and repo.get_strategy_state().bars == 1
     assert repo.pending_partial_closes() == []
     assert len(repo.get_intents(result.session_id)) == 1
 
