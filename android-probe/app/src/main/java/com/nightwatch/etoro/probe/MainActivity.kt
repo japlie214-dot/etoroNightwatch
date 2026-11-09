@@ -17,6 +17,7 @@ import android.widget.TextView
 import android.widget.ToggleButton
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.view.ViewCompat
@@ -47,6 +48,7 @@ class MainActivity : AppCompatActivity() {
     private var pickedMinute = 30
     private var currentFilter: String = "ALL"
     private var countdownRunning = false
+    private var adoptionPlanId: String? = null
 
     private val dayToggles: List<Pair<ToggleButton, Int>> by lazy {
         listOf(
@@ -182,6 +184,18 @@ class MainActivity : AppCompatActivity() {
         binding.btnRunLiveProbe.setOnClickListener { runLiveProbeNow() }
 
         binding.btnWindowBench.setOnClickListener { runWindowBenchNow() }
+
+        binding.btnPlanAdoption.setOnClickListener { runAdoptionNow(null) }
+        binding.btnApplyAdoption.setOnClickListener {
+            val planId = adoptionPlanId ?: return@setOnClickListener
+            AlertDialog.Builder(this)
+                .setTitle("Apply adoption (demo)?")
+                .setMessage("Adopt the reviewed SCHG/UPRO positions into this demo home's local book? " +
+                    "No broker orders are placed. Stop recurring DCA before continuing.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Apply adoption") { _, _ -> runAdoptionNow(planId) }
+                .show()
+        }
 
         binding.btnShareLog.setOnClickListener { shareLog() }
 
@@ -743,6 +757,35 @@ class MainActivity : AppCompatActivity() {
             store.log("WINDOW_BENCH_DONE", summary.take(4000))
             binding.txtWindowBenchStatus.text = "Window bench: DONE -- see event log + adb pull $outputDir"
             refreshEventList()
+        }
+    }
+
+    // UI taps only: no intent-extra, command, session or alarm route.
+    private fun runAdoptionNow(planId: String?) {
+        val home = File(filesDir, "nightwatch_demo").absolutePath
+        adoptionPlanId = null
+        binding.btnPlanAdoption.isEnabled = false
+        binding.btnApplyAdoption.isEnabled = false
+        binding.txtAdoptionStatus.text = "Adoption: running; keep the app open"
+        lifecycleScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    if (planId == null) PyBridge.planAdoption(this@MainActivity, home)
+                    else PyBridge.applyAdoption(this@MainActivity, home, planId)
+                }
+                val envelope = org.json.JSONObject(result)
+                val status = envelope.getString("status")
+                binding.txtAdoptionStatus.text = "Adoption: $status\n${envelope.getString("report")}"
+                if (status == "planned") adoptionPlanId = envelope.getString("plan_id")
+                store.log("ADOPTION_RESULT", "trigger=manual status=$status")
+            } catch (e: Exception) {
+                binding.txtAdoptionStatus.text = "Adoption failed (${e.javaClass.simpleName}); plan again"
+                store.log("ADOPTION_RESULT", "trigger=manual error=${e.javaClass.simpleName}")
+            } finally {
+                binding.btnPlanAdoption.isEnabled = true
+                binding.btnApplyAdoption.isEnabled = adoptionPlanId != null
+                refreshEventList()
+            }
         }
     }
 

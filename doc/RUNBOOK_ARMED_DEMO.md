@@ -64,6 +64,46 @@ adb shell "run-as com.nightwatch.etoro sh -c 'cat > files/nightwatch_demo/config
 Clean up the staged file afterwards. Do not use a text-reading PowerShell pipeline
 for this transfer. Do not copy a production DB into the demo home.
 
+## Adopt existing demo positions (T068, operator only)
+
+Before the first session, stop the broker's recurring SCHG DCA. Keep alarms stopped
+and do not run another probe or session while adopting. Provision the dedicated
+`files/nightwatch_demo` home above, including its existing Tiingo configuration.
+No production DB is copied, and no real-account adoption button is provided.
+
+1. Open the app and tap **Plan adoption (demo)**. The phone fetches its portfolio
+   using the read role, resolves instruments, and fetches full SPY history from
+   Tiingo. It does not place orders or write lot annotations during planning.
+2. Read the on-screen report: symbol counts, tiers, exclusions and any date
+   resolutions. A weekend/holiday open date uses the **preceding NYSE trading
+   day**, requiring that exact SPY bar; the raw broker entry date is preserved.
+   Missing history or any unresolved position refuses the entire adoption.
+3. The home stores `adoption_plan.json`: plan ID, UTC creation time, resolved
+   absolute home and DB paths, environment, non-secret CID account marker,
+   position/database fingerprints, resolved rows and report. Copying a plan into
+   another home does not authorize adoption there. All positions must carry the
+   same CID. An empty portfolio says **nothing to adopt**, because it cannot
+   establish that marker. Planning stages instrument metadata in memory.
+4. Within 30 minutes, tap **Apply adoption (demo)** and accept the confirmation
+   dialog. The runner validates the home/DB binding before opening the DB. A
+   missing or outdated DB is refused without creating or migrating it; initialize
+   or migrate separately and plan again. It re-reads the portfolio and SPY history
+   and refuses account, environment, position, cache, annotation or resolved-plan
+   changes. A refusal requires a new plan; it never silently applies different rows.
+5. Confirm **applied** and the adopted count in the report. Only after all checks
+   pass, apply takes one write transaction, rechecks the live snapshot, and writes
+   missing local instruments plus `lot_annotations` together. An annotation-write
+   failure rolls both back. No broker orders are placed. Re-plan and confirm again
+   for a safe idempotent re-run: already
+   annotated lots are skipped. After an app restart, plan again before applying.
+6. PM/QA must observe the demo annotations on-device, then run the next eligible
+   Monday-style session and verify gate 11 passes. Offline/JVM tests do not prove
+   phone connectivity, adoption of actual demo holdings, or the session gate.
+
+Adoption has no alarm, intent-extra or command trigger and never runs inside a
+session. The bridge serializes it with sessions; per-home session locking refuses
+an already-running invocation. A real config in the demo home is refused.
+
 ## Arm, verify connectivity, and schedule
 
 1. Keep the Z10 charging with Wi-Fi on. Power permits a session only while charging

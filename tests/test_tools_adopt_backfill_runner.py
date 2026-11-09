@@ -148,19 +148,19 @@ def test_verify_open_dates_covered_all_covered() -> None:
     assert all(r.covered for r in results)
 
 
-def test_verify_open_dates_covered_flags_non_trading_day_with_no_fallback() -> None:
-    """The central finding this task asked to verify: adopt.py has NO
-    fallback to a nearby bar for a date the SPY series has no exact bar
-    for. 2024-01-06 is a Saturday, absent from ``SPY_BARS`` (which only has
-    weekday bars 01-02..01-05) but well after ``window_start`` -- this must
-    be reported UNCOVERED, not silently rounded to the nearest prior bar.
-    """
+def test_verify_open_dates_covered_resolves_weekend_to_exact_preceding_session() -> None:
     positions = [EtoroPositionStub("weekend-open", "2024-01-06T10:00:00Z")]
     results = verify_open_dates_covered(positions, SPY_BARS)
     assert len(results) == 1
-    assert results[0].covered is False
-    assert "non-trading day" in results[0].reason
-    assert "NO fallback" in results[0].reason  # reason names the real risk explicitly
+    assert results[0].covered is True
+    assert results[0].trading_date == "2024-01-05"
+    assert results[0].open_date == "2024-01-06T10:00:00Z"
+    assert "2024-01-06 -> preceding NYSE trading date 2024-01-05" in results[0].reason
+    # Missing Friday is not repaired by using Thursday's available bar.
+    missing = verify_open_dates_covered(positions, SPY_BARS[:-1])[0]
+    assert missing.covered is False
+    assert missing.trading_date == "2024-01-05"
+    assert "no fallback" in missing.reason
 
 
 def test_verify_open_dates_covered_flags_before_window() -> None:
@@ -234,8 +234,8 @@ def test_run_dry_run_raises_and_writes_nothing_when_unresolved(tmp_path: Path) -
     """
     raw = [
         _raw_position(1, SCHG_ID, units=0.09, open_rate=111.1, amount=10.0, open_date="2024-01-02T10:00:00Z"),
-        # Saturday -- no SPY bar, no fallback.
-        _raw_position(2, SCHG_ID, units=0.1, open_rate=100.0, amount=10.0, open_date="2024-01-06T10:00:00Z"),
+        # Missing Monday bar -- T068 rolls non-trading dates back, never a missing weekday.
+        _raw_position(2, SCHG_ID, units=0.1, open_rate=100.0, amount=10.0, open_date="2024-01-08T10:00:00Z"),
     ]
     positions = load_positions_from_raw(raw)
     instruments = load_instruments_from_meta([{"instrumentID": SCHG_ID, "symbolFull": "SCHG"}])

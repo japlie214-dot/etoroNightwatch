@@ -228,8 +228,11 @@ def test_adopted_upro_reference_is_open_date_close_and_feeds_decision(repo: Repo
     assert inputs.equity == 155.0
 
 
-@pytest.mark.parametrize("open_date", ["2023-01-01", "2024-06-04", "2025-02-11"])
-def test_uncovered_upro_date_stays_unresolved_not_adopted(open_date: str) -> None:
+@pytest.mark.parametrize("open_date,trading_date", [
+    ("2023-01-01", "2022-12-30"), ("2024-06-04", "2024-06-04"),
+    ("2025-02-11", "2025-02-11"),
+])
+def test_uncovered_upro_date_stays_unresolved_not_adopted(open_date: str, trading_date: str) -> None:
     position = _position(
         "UPRO-UNCOVERED", UPRO_ID, units=1.0, entry_price=50.0,
         amount=50.0, open_date=f"{open_date}T10:00:00+00:00",
@@ -241,7 +244,8 @@ def test_uncovered_upro_date_stays_unresolved_not_adopted(open_date: str) -> Non
     assert plan.to_adopt == []
     unresolved, = plan.unresolved
     assert unresolved.position_id == position.position_id
-    assert f"SPY series does not cover {open_date!r}" in unresolved.reason
+    assert f"SPY series does not cover {trading_date!r}" in unresolved.reason
+    assert open_date in unresolved.reason
 
 
 def test_dry_run_plans_every_managed_position_and_excludes_unmanaged(repo: Repo) -> None:
@@ -358,6 +362,42 @@ def test_backfill_handles_a_straggler_fill_landing_after_the_first_run(repo: Rep
     assert [a.position_id for a in plan.to_adopt] == ["SCHG-STRAGGLER"]
     assert len(repo.list_lot_annotations()) == 9
     assert repo.get_lot_annotation("SCHG-STRAGGLER") is not None
+
+
+@pytest.mark.parametrize("open_date,trading_date", [
+    ("2024-07-06", "2024-07-05"),  # Saturday
+    ("2024-07-07", "2024-07-05"),  # Sunday
+    ("2024-07-04", "2024-07-03"),  # Independence Day
+    ("2024-09-02", "2024-08-30"),  # Labor Day
+])
+def test_nontrading_open_date_uses_exact_preceding_session(repo, open_date, trading_date):
+    _seed_instruments(repo)
+    position = _position("SCHG-NONTRADING", SCHG_ID, units=1.0, entry_price=50.0,
+                         amount=50.0, open_date=f"{open_date}T12:00:00Z")
+    bars = [_spy_bar("2024-01-02", 110.0), _spy_bar(trading_date, 90.0)]
+    plan = run_adoption_backfill(repo, [position], bars, dry_run=False)
+    row = repo.get_lot_annotation(position.position_id)
+    assert row.entry_date == position.open_date
+    assert row.entry_spy_ath == 110.0
+    assert row.entry_spy_close == row.entry_reference_spy == 90.0
+    assert row.entry_tier == 2
+    assert f"{open_date} -> preceding NYSE trading date {trading_date}" in plan.report()
+    assert position.position_id in plan.report()
+
+
+def test_nontrading_date_missing_exact_preceding_bar_halts_all(repo):
+    _seed_instruments(repo)
+    positions = [
+        _position("SCHG-OK", SCHG_ID, units=1.0, entry_price=50.0,
+                  amount=50.0, open_date="2024-07-03T12:00:00Z"),
+        _position("SCHG-GAP", SCHG_ID, units=1.0, entry_price=50.0,
+                  amount=50.0, open_date="2024-07-07T12:00:00Z"),
+    ]
+    # No arbitrary nearest-bar lookup: July 5 is missing between supplied bars.
+    bars = [_spy_bar("2024-07-03", 100.0), _spy_bar("2024-07-08", 90.0)]
+    with pytest.raises(AdoptionError, match="SPY series does not cover '2024-07-05'"):
+        run_adoption_backfill(repo, positions, bars, dry_run=False)
+    assert repo.list_lot_annotations() == []
 
 
 # -- fail loudly and atomically -----------------------------------------------

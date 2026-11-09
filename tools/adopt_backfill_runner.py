@@ -20,9 +20,9 @@ halves:
 * :func:`verify_open_dates_covered` -- the correctness check this task's
   brief cares about most: does every position's entry date resolve to a
   REAL SPY bar, or would ``build_adoption_plan`` mark it unresolved?
-  ``nightwatch.market.adopt`` has **no fallback to a nearby bar** for a
-  position opened on a non-trading day (weekend/holiday) -- an exact-date
-  miss is treated exactly like "predates the window": unresolved, and
+  ``nightwatch.market.adopt`` resolves a non-trading open date to the
+  preceding NYSE trading day (T068), requiring that exact bar. A missing
+  trading-date bar is treated exactly like "predates the window": unresolved, and
   ``run_adoption_backfill`` halts the ENTIRE migration (writes nothing) if
   even one position is unresolved. This function surfaces that risk BEFORE
   the dry run halts opaquely, by classifying every date as
@@ -63,6 +63,7 @@ from nightwatch.market.adopt import (  # noqa: E402
     AdoptionError,
     AdoptionPlan,
     build_spy_context_index,
+    _entry_trading_date,
     run_adoption_backfill,
 )
 from nightwatch.market.source import EodBar, TiingoClient  # noqa: E402
@@ -186,17 +187,11 @@ def verify_open_dates_covered(
 ) -> list[OpenDateCoverage]:
     """Classify every position's entry date against the fetched SPY series.
 
-    ``nightwatch.market.adopt._entry_trading_date`` takes only the first 10
-    characters of ``openDateTime`` (a UTC timestamp) -- there is NO fallback
-    to a nearby trading day anywhere in ``adopt.py``. A position whose
-    ``openDateTime`` truncates to a date the Tiingo daily series has no bar
-    for (most plausibly a weekend, if a Friday-evening-ET fill lands after
-    UTC midnight, or a US market holiday) is therefore treated by
-    ``build_adoption_plan`` exactly like "predates the window": an
-    ``UnresolvedPosition``, and ``run_adoption_backfill`` refuses to write
-    ANYTHING if even one position is unresolved. This function exists to
-    surface that risk explicitly, position by position, rather than letting
-    the dry run's own halt message be the first anyone hears of it.
+    Uses adoption's shared date resolution: weekends and holidays roll to
+    the preceding NYSE trading day, whose exact SPY bar is required. A
+    missing trading-day bar or a date outside history remains unresolved;
+    there is no nearest-available-bar fallback. The report names any date
+    resolution without changing the raw broker open date.
     """
     index = build_spy_context_index(spy_bars)
     window_start = min(index) if index else None
@@ -213,7 +208,11 @@ def verify_open_dates_covered(
                 )
             )
             continue
-        trading_date = position.open_date[:10]
+        trading_date = _entry_trading_date(position.open_date)
+        resolution = (
+            f"open date {position.open_date[:10]} -> preceding NYSE trading date {trading_date}; "
+            if trading_date != position.open_date[:10] else ""
+        )
         if trading_date in index:
             results.append(
                 OpenDateCoverage(
@@ -221,7 +220,7 @@ def verify_open_dates_covered(
                     open_date=position.open_date,
                     trading_date=trading_date,
                     covered=True,
-                    reason="exact SPY bar found for this date",
+                    reason=resolution + "exact SPY bar found for this trading date",
                 )
             )
         elif window_start is not None and trading_date < window_start:
@@ -231,7 +230,7 @@ def verify_open_dates_covered(
                     open_date=position.open_date,
                     trading_date=trading_date,
                     covered=False,
-                    reason=f"predates the fetched window (earliest bar {window_start})",
+                    reason=resolution + f"predates the fetched window (earliest bar {window_start})",
                 )
             )
         else:
@@ -241,11 +240,10 @@ def verify_open_dates_covered(
                     open_date=position.open_date,
                     trading_date=trading_date,
                     covered=False,
-                    reason=(
-                        "no SPY bar for this exact date -- likely a non-trading "
-                        "day (weekend/holiday); adopt.py has NO fallback to a "
-                        "nearby bar, this position would be UNRESOLVED and halt "
-                        "the whole migration"
+                    reason=resolution + (
+                        "no SPY bar for this exact trading date; no fallback to a "
+                        "nearby available bar -- this position is UNRESOLVED and "
+                        "halts the whole migration"
                     ),
                 )
             )

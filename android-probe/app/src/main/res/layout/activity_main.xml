@@ -259,6 +259,28 @@
 
         <View style="@style/Divider" />
 
+        <Button
+            android:id="@+id/btnPlanAdoption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Plan adoption (demo)" />
+
+        <Button
+            android:id="@+id/btnApplyAdoption"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:enabled="false"
+            android:text="Apply adoption (demo)" />
+
+        <TextView
+            android:id="@+id/txtAdoptionStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:text="Adoption: plan first; apply requires confirmation" />
+
+        <View style="@style/Divider" />
+
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"

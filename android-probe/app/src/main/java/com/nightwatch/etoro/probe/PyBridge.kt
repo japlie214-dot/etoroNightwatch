@@ -269,6 +269,27 @@ object PyBridge {
         return module.callAttr("run", configDir, outputDir).toString()
     }
 
+    /** Manual adoption only; share the session monitor to avoid changing its active host. */
+    fun planAdoption(context: Context, home: String): String {
+        ensureStarted(context)
+        return synchronized(sessionLock) {
+            synchronized(this) {
+                Python.getInstance().getModule("probe.adopt_apply")
+                    .callAttr("plan", home).toString()
+            }
+        }
+    }
+
+    fun applyAdoption(context: Context, home: String, planId: String): String {
+        ensureStarted(context)
+        return synchronized(sessionLock) {
+            synchronized(this) {
+                Python.getInstance().getModule("probe.adopt_apply")
+                    .callAttr("apply", home, planId).toString()
+            }
+        }
+    }
+
     /** One-off real $10 SCHG TP probe. Python enforces the exact confirmation and
      * positively verifies the real:write credential before its sole order submission. */
     @Synchronized

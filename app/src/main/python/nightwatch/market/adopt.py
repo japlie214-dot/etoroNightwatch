@@ -69,12 +69,14 @@ LEVELS, not returns; see :class:`SpyContext`'s docstring.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Mapping, Sequence
 
 from ..config import SymbolConfig
 from ..db.repo import Instrument, LotAnnotation, Repo
 from ..etoro.models import Position
 from ..strategy.params import tier_for_drawdown
+from .calendar import is_trading_day
 from .source import EodBar
 
 __all__ = [
@@ -191,6 +193,7 @@ class AdoptionPlan:
     already_annotated: list[str] = field(default_factory=list)
     excluded: list[ExcludedPosition] = field(default_factory=list)
     unresolved: list[UnresolvedPosition] = field(default_factory=list)
+    trading_date_resolutions: dict[str, str] = field(default_factory=dict)
 
     @property
     def per_symbol_counts(self) -> dict[str, int]:
@@ -230,6 +233,8 @@ class AdoptionPlan:
             lines.append("tier distribution (of positions to adopt):")
             for tier in sorted(self.tier_distribution):
                 lines.append(f"  tier {tier}: {self.tier_distribution[tier]}")
+        for position_id, resolution in sorted(self.trading_date_resolutions.items()):
+            lines.append(f"  position_id={position_id!r}: {resolution}")
         if self.unresolved:
             lines.append("UNRESOLVED -- the backfill halts on these, writes nothing:")
             for item in self.unresolved:
@@ -271,8 +276,15 @@ def build_spy_context_index(spy_bars: Sequence[EodBar]) -> dict[str, SpyContext]
 
 
 def _entry_trading_date(open_date: str) -> str:
-    """Extract the ``'YYYY-MM-DD'`` trading date from a broker ``openDateTime``."""
-    return open_date[:10]
+    """T068: non-trading open dates use the preceding NYSE trading date."""
+    raw_date = open_date[:10]
+    try:
+        trading_date = date.fromisoformat(raw_date)
+    except ValueError:
+        return raw_date  # Invalid dates remain unresolved by the exact history lookup.
+    while not is_trading_day(trading_date):
+        trading_date -= timedelta(days=1)
+    return trading_date.isoformat()
 
 
 def build_adoption_plan(
@@ -378,6 +390,10 @@ def build_adoption_plan(
             continue
 
         trading_date = _entry_trading_date(position.open_date)
+        if trading_date != position.open_date[:10]:
+            plan.trading_date_resolutions[position.position_id] = (
+                f"open date {position.open_date[:10]} -> preceding NYSE trading date {trading_date}"
+            )
         context = spy_context.get(trading_date)
         if context is None:
             if window_start is not None and trading_date < window_start:
@@ -486,17 +502,14 @@ def run_adoption_backfill(
     the plan's ``to_adopt`` rows in one transaction via
     :meth:`Repo.insert_lot_annotations`.
 
-    **Neither this function nor its caller performs any network I/O.**
-    ``positions`` (from ``EtoroClient.get_portfolio()``) and ``spy_bars``
-    (from ``TiingoClient.get_eod_history('SPY', ...)``) must both already be
-    fetched by the caller. This keeps the migration itself trivially
-    testable offline and keeps this module honest about the hard
-    constraint it was built under: **no network call to eToro from this
-    codepath, ever** -- the dev machine cannot reach eToro at all
-    (board nightwatch/handoff-2026-09-04-market-data.md §2.8), and actually running this
-    backfill against the live account is an explicit, separate,
-    operator-supervised on-device step, not something this function or its
-    tests do.
+    **This function performs no network I/O.** ``positions`` (from
+    ``EtoroClient.get_portfolio_strict()``) and ``spy_bars`` (from
+    ``TiingoClient.get_eod_history('SPY', ...)``) must both already be fetched
+    by the caller. The T068 ``probe.adopt_apply`` runner does that only in an
+    explicit operator-supervised on-device step; it is never session or
+    alarm work. This module and its tests remain entirely offline. The dev
+    machine must never call eToro from this codepath (board nightwatch/
+    handoff-2026-09-04-market-data.md §2.8).
 
     Args:
         repo: An open, migrated :class:`Repo`.
