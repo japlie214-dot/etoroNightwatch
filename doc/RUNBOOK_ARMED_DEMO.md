@@ -64,6 +64,29 @@ adb shell "run-as com.nightwatch.etoro sh -c 'cat > files/nightwatch_demo/config
 Clean up the staged file afterwards. Do not use a text-reading PowerShell pipeline
 for this transfer. Do not copy a production DB into the demo home.
 
+## Open manual demo SCHG positions (T079, operator only)
+
+With Boss approval, keep alarms stopped and recurring DCA off. In the app, enter
+1–10 positions and USD 50–15000 per position, then tap **Open demo SCHG positions**.
+Review the confirmation's count, USD each and total before accepting. The dedicated
+`files/nightwatch_demo` config and gate-7 credential detection must both confirm demo;
+real, unknown and mismatched environments refuse before any order submission.
+The resolved home must be named `nightwatch_demo`; other homes refuse before config load.
+Orders are submitted sequentially, stopping at the first error. The selectable report
+shows accepted order IDs only when they are 1–20 ASCII digits; other values are shown
+as unavailable, never echoed. Acceptance is not a confirmed fill. Check the demo portfolio
+before any retry: an error can leave earlier orders (or the failing order) accepted.
+The runner opens no database and writes no instruments, intents or lot annotations;
+these positions remain unmanaged until T068 adoption. There is no session, alarm,
+Telegram, FCM or intent-extra trigger. A busy session, adoption, probe or manual buy
+refuses immediately rather than queueing another buy. A second confirmation dialog
+is blocked while one is open or a manual buy is in flight; cancel and tap again only
+when idle. Existing sessions/adoption retain their blocking serialization.
+
+Device proof is PM/Boss-only: approve and confirm 5 × approximately USD 11000, observe
+five SCHG positions in the demo portfolio, then Plan/review/Apply adoption and verify
+gate 11 in the next eligible armed-demo session. Offline tests do not prove fills.
+
 ## Adopt existing demo positions (T068, operator only)
 
 Before the first session, stop the broker's recurring SCHG DCA. Keep alarms stopped

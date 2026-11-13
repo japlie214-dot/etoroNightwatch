@@ -19,8 +19,8 @@ class AdoptionWiringTest {
         assertTrue(plan.contains("getModule(\"probe.adopt_apply\")"))
         assertTrue(plan.contains(".callAttr(\"plan\", home)"))
         assertTrue(apply.contains(".callAttr(\"apply\", home, planId)"))
-        assertTrue(plan.contains("synchronized(sessionLock)"))
-        assertTrue(apply.contains("synchronized(sessionLock)"))
+        assertTrue(plan.contains("sessionLock.withLock"))
+        assertTrue(apply.contains("sessionLock.withLock"))
     }
 
     @Test

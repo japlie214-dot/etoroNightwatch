@@ -49,6 +49,8 @@ class MainActivity : AppCompatActivity() {
     private var currentFilter: String = "ALL"
     private var countdownRunning = false
     private var adoptionPlanId: String? = null
+    private var demoBuyDialogOpen = false
+    private var demoBuyRunning = false
 
     private val dayToggles: List<Pair<ToggleButton, Int>> by lazy {
         listOf(
@@ -184,6 +186,30 @@ class MainActivity : AppCompatActivity() {
         binding.btnRunLiveProbe.setOnClickListener { runLiveProbeNow() }
 
         binding.btnWindowBench.setOnClickListener { runWindowBenchNow() }
+
+        binding.btnDemoManualBuy.setOnClickListener {
+            if (demoBuyDialogOpen || demoBuyRunning || PyBridge.isDemoManualBuyBusy()) {
+                binding.txtDemoBuyStatus.text = PyBridge.DEMO_BUY_BUSY
+                return@setOnClickListener
+            }
+            val count = binding.editDemoBuyCount.text.toString().toIntOrNull()
+            val usdEach = binding.editDemoBuyUsd.text.toString().toDoubleOrNull()
+            if (count == null || count !in 1..10 || usdEach == null ||
+                !usdEach.isFinite() || usdEach !in 50.0..15000.0) {
+                binding.txtDemoBuyStatus.text = "Demo buy refused: count 1–10; USD each 50–15000"
+                return@setOnClickListener
+            }
+            demoBuyDialogOpen = true
+            AlertDialog.Builder(this)
+                .setTitle("Open demo SCHG positions?")
+                .setMessage("DEMO only: $count SCHG market buys, USD $usdEach each, " +
+                    "total USD ${count * usdEach}. These remain unmanaged until adoption. " +
+                    "Stop alarms and recurring DCA; check the portfolio before retrying.")
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Open demo positions") { _, _ -> runDemoManualBuyNow(count, usdEach) }
+                .setOnDismissListener { demoBuyDialogOpen = false }
+                .show()
+        }
 
         binding.btnPlanAdoption.setOnClickListener { runAdoptionNow(null) }
         binding.btnApplyAdoption.setOnClickListener {
@@ -757,6 +783,31 @@ class MainActivity : AppCompatActivity() {
             store.log("WINDOW_BENCH_DONE", summary.take(4000))
             binding.txtWindowBenchStatus.text = "Window bench: DONE -- see event log + adb pull $outputDir"
             refreshEventList()
+        }
+    }
+
+    // Only the confirmation dialog calls this; no intent-extra or automatic route.
+    private fun runDemoManualBuyNow(count: Int, usdEach: Double) {
+        if (demoBuyRunning || PyBridge.isDemoManualBuyBusy()) {
+            binding.txtDemoBuyStatus.text = PyBridge.DEMO_BUY_BUSY
+            return
+        }
+        demoBuyRunning = true
+        val home = File(filesDir, "nightwatch_demo").absolutePath
+        binding.btnDemoManualBuy.isEnabled = false
+        binding.txtDemoBuyStatus.text = "Demo buy: running; keep the app open"
+        lifecycleScope.launch {
+            try {
+                binding.txtDemoBuyStatus.text = withContext(Dispatchers.IO) {
+                    PyBridge.runDemoManualBuy(this@MainActivity, home, count, usdEach)
+                }
+            } catch (e: Exception) {
+                binding.txtDemoBuyStatus.text = "Demo buy failed (${e.javaClass.simpleName}); " +
+                    "check demo portfolio before retrying; an order may have been accepted"
+            } finally {
+                demoBuyRunning = false
+                binding.btnDemoManualBuy.isEnabled = true
+            }
         }
     }
 

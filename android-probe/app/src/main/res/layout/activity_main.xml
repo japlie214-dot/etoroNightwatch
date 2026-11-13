@@ -259,6 +259,35 @@
 
         <View style="@style/Divider" />
 
+        <EditText
+            android:id="@+id/editDemoBuyCount"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="Demo SCHG position count (1–10)"
+            android:inputType="number" />
+
+        <EditText
+            android:id="@+id/editDemoBuyUsd"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="USD per demo SCHG position (50–15000)"
+            android:inputType="numberDecimal" />
+
+        <Button
+            android:id="@+id/btnDemoManualBuy"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="Open demo SCHG positions" />
+
+        <TextView
+            android:id="@+id/txtDemoBuyStatus"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:textIsSelectable="true"
+            android:text="Demo buy: confirmation required; no local DB writes" />
+
+        <View style="@style/Divider" />
+
         <Button
             android:id="@+id/btnPlanAdoption"
             android:layout_width="match_parent"

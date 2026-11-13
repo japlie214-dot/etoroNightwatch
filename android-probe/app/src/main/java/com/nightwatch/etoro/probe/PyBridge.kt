@@ -4,6 +4,8 @@ import android.content.Context
 import com.chaquo.python.Python
 import com.chaquo.python.Kwarg
 import java.io.File
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 import com.chaquo.python.android.AndroidPlatform
 
 /**
@@ -14,7 +16,25 @@ import com.chaquo.python.android.AndroidPlatform
 object PyBridge {
     private var started = false
     private var callCounter = 0
-    private val sessionLock = Any()
+    private val sessionLock = ReentrantLock()
+    private val bridgeLock = ReentrantLock()
+    internal const val DEMO_BUY_BUSY = "Demo buy refused: session, adoption, probe or demo buy already running"
+
+    fun isDemoManualBuyBusy(): Boolean = sessionLock.isLocked || bridgeLock.isLocked
+
+    internal fun withDemoManualBuyLocks(block: () -> String): String {
+        if (sessionLock.isHeldByCurrentThread || !sessionLock.tryLock()) return DEMO_BUY_BUSY
+        try {
+            if (bridgeLock.isHeldByCurrentThread || !bridgeLock.tryLock()) return DEMO_BUY_BUSY
+            try {
+                return block()
+            } finally {
+                bridgeLock.unlock()
+            }
+        } finally {
+            sessionLock.unlock()
+        }
+    }
 
     /** No foreign text survives a missing config or unavailable sanitizer. */
     fun redactDiagnostic(context: Context, text: String): String? = try {
@@ -43,7 +63,7 @@ object PyBridge {
     // interpreter contention remains: probes during a session may run slower.
     fun runSessionDry(context: Context, baseDir: String): String {
         ensureStarted(context)
-        return synchronized(sessionLock) {
+        return sessionLock.withLock {
             Python.getInstance().getModule("nightwatch.android_entry")
                 .callAttr("run_session_dry", baseDir).toString()
         }
@@ -51,7 +71,7 @@ object PyBridge {
 
     fun runSessionArmedDemo(context: Context, baseDir: String): String {
         ensureStarted(context)
-        return synchronized(sessionLock) {
+        return sessionLock.withLock {
             Python.getInstance().getModule("nightwatch.android_entry")
                 .callAttr("run_session_armed_demo", baseDir).toString()
         }
@@ -64,8 +84,7 @@ object PyBridge {
             .callAttr("next_session_wake_epoch_ms").toLong()
     }
 
-    @Synchronized
-    fun ensureStarted(context: Context) {
+    fun ensureStarted(context: Context) = bridgeLock.withLock {
         if (!started) {
             if (!Python.isStarted()) {
                 Python.start(AndroidPlatform(context.applicationContext))
@@ -74,41 +93,37 @@ object PyBridge {
         }
     }
 
-    @Synchronized
-    fun smoke(context: Context): String {
+    fun smoke(context: Context): String = bridgeLock.withLock {
         ensureStarted(context)
         callCounter++
         val py = Python.getInstance()
         val module = py.getModule("probe.checks")
-        return module.callAttr("smoke", callCounter).toString()
+        module.callAttr("smoke", callCounter).toString()
     }
 
-    @Synchronized
-    fun tzCheck(context: Context): String {
+    fun tzCheck(context: Context): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.checks")
-        return module.callAttr("tz_check").toString()
+        module.callAttr("tz_check").toString()
     }
 
     /** v2 check 4: numpy/pandas — 260-bar rolling std on synthetic data, the actual operation the
      * strategy performs (DESIGN §1.4 cone_5_z uses a 260-bar rolling stdev). */
-    @Synchronized
-    fun numpyPandasCheck(context: Context): String {
+    fun numpyPandasCheck(context: Context): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.checks")
-        return module.callAttr("numpy_pandas_check").toString()
+        module.callAttr("numpy_pandas_check").toString()
     }
 
     /** v2 check 5: Python's own sqlite3 module works inside Chaquopy (the real app's DB layer is
      * Python, DESIGN §2/§3). */
-    @Synchronized
-    fun pythonSqliteCheck(context: Context): String {
+    fun pythonSqliteCheck(context: Context): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.checks")
-        return module.callAttr("python_sqlite_check", context.cacheDir.absolutePath).toString()
+        module.callAttr("python_sqlite_check", context.cacheDir.absolutePath).toString()
     }
 
     /**
@@ -127,12 +142,11 @@ object PyBridge {
      * credential itself. `outputDir` is where every raw payload and report this run produces is
      * written, for a later `adb pull`.
      */
-    @Synchronized
-    fun runLiveProbe(context: Context, configDir: String, outputDir: String): String {
+    fun runLiveProbe(context: Context, configDir: String, outputDir: String): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.probe_runner")
-        return module.callAttr("run_default", configDir, outputDir).toString()
+        module.callAttr("run_default", configDir, outputDir).toString()
     }
 
     /**
@@ -150,12 +164,11 @@ object PyBridge {
      * callers must size their own timeout well above that (see MainActivity's
      * maybeRunLiveProbeFromIntent, which allows 60).
      */
-    @Synchronized
-    fun runLiveProbeSections(context: Context, configDir: String, outputDir: String, sections: String): String {
+    fun runLiveProbeSections(context: Context, configDir: String, outputDir: String, sections: String): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.probe_runner")
-        return module.callAttr("run_sections", configDir, outputDir, sections).toString()
+        module.callAttr("run_sections", configDir, outputDir, sections).toString()
     }
 
     /**
@@ -176,12 +189,11 @@ object PyBridge {
      * positive value overrides it. Nothing here can widen what the harness is allowed to do --
      * repeats only changes how many times the same demo-gated cycle runs.
      */
-    @Synchronized
-    fun runOrderLatency(context: Context, configDir: String, outputDir: String, repeats: Int = 0): String {
+    fun runOrderLatency(context: Context, configDir: String, outputDir: String, repeats: Int = 0): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.order_latency_runner")
-        return if (repeats > 0) {
+        if (repeats > 0) {
             module.callAttr("run", configDir, outputDir, repeats).toString()
         } else {
             module.callAttr("run", configDir, outputDir).toString()
@@ -198,7 +210,6 @@ object PyBridge {
      *
      * MUST be called from a background thread/coroutine.
      */
-    @Synchronized
     fun runDemoCleanup(
         context: Context,
         configDir: String,
@@ -206,11 +217,11 @@ object PyBridge {
         closeIds: String,
         lookupCloseIds: String = "",
         lookupOpenIds: String = "",
-    ): String {
+    ): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.demo_cleanup")
-        return module.callAttr("run", configDir, outputDir, closeIds, 2.0, 90.0, lookupCloseIds, lookupOpenIds).toString()
+        module.callAttr("run", configDir, outputDir, closeIds, 2.0, 90.0, lookupCloseIds, lookupOpenIds).toString()
     }
 
     /**
@@ -227,12 +238,11 @@ object PyBridge {
      * `configDir`/`outputDir` follow the same convention as [runAdoptionFetch] above.
      * MUST be called from a background thread/coroutine.
      */
-    @Synchronized
-    fun runEnvProbe(context: Context, configDir: String, outputDir: String): String {
+    fun runEnvProbe(context: Context, configDir: String, outputDir: String): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.env_probe")
-        return module.callAttr("run", configDir, outputDir).toString()
+        module.callAttr("run", configDir, outputDir).toString()
     }
 
     /**
@@ -242,12 +252,11 @@ object PyBridge {
      * this call makes no network request itself, isolating parse/compute cost from fetch
      * latency). See android-probe/app/src/main/python/probe/window_bench.py.
      */
-    @Synchronized
-    fun runWindowBench(context: Context, payload276Path: String, payloadFullPath: String, outputDir: String): String {
+    fun runWindowBench(context: Context, payload276Path: String, payloadFullPath: String, outputDir: String): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.window_bench")
-        return module.callAttr("run", payload276Path, payloadFullPath, outputDir).toString()
+        module.callAttr("run", payload276Path, payloadFullPath, outputDir).toString()
     }
 
     /**
@@ -261,19 +270,26 @@ object PyBridge {
      *
      * `configDir`/`outputDir` follow the same convention as `runLiveProbe` above.
      */
-    @Synchronized
-    fun runAdoptionFetch(context: Context, configDir: String, outputDir: String): String {
+    fun runAdoptionFetch(context: Context, configDir: String, outputDir: String): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.adopt_fetch")
-        return module.callAttr("run", configDir, outputDir).toString()
+        module.callAttr("run", configDir, outputDir).toString()
     }
+
+    /** Operator confirmation only; refuse busy calls rather than queueing a later order. */
+    fun runDemoManualBuy(context: Context, home: String, count: Int, usdEach: Double): String =
+        withDemoManualBuyLocks {
+            ensureStarted(context)
+            Python.getInstance().getModule("probe.demo_manual_buy")
+                .callAttr("run", home, count, usdEach).toString()
+        }
 
     /** Manual adoption only; share the session monitor to avoid changing its active host. */
     fun planAdoption(context: Context, home: String): String {
         ensureStarted(context)
-        return synchronized(sessionLock) {
-            synchronized(this) {
+        return sessionLock.withLock {
+            bridgeLock.withLock {
                 Python.getInstance().getModule("probe.adopt_apply")
                     .callAttr("plan", home).toString()
             }
@@ -282,8 +298,8 @@ object PyBridge {
 
     fun applyAdoption(context: Context, home: String, planId: String): String {
         ensureStarted(context)
-        return synchronized(sessionLock) {
-            synchronized(this) {
+        return sessionLock.withLock {
+            bridgeLock.withLock {
                 Python.getInstance().getModule("probe.adopt_apply")
                     .callAttr("apply", home, planId).toString()
             }
@@ -292,27 +308,25 @@ object PyBridge {
 
     /** One-off real $10 SCHG TP probe. Python enforces the exact confirmation and
      * positively verifies the real:write credential before its sole order submission. */
-    @Synchronized
     fun runTakeProfitProbe(
         context: Context,
         configDir: String,
         outputDir: String,
         confirmation: String,
         approvalToken: String
-    ): String {
+    ): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.take_profit_probe")
-        return module.callAttr("run", configDir, outputDir, confirmation, approvalToken).toString()
+        module.callAttr("run", configDir, outputDir, confirmation, approvalToken).toString()
     }
 
     /** T7 demo-only payload capture. Its Python runner refuses non-demo config/credentials and
      * never retries its single deliberately subminimum order write. */
-    @Synchronized
-    fun runPayloadGaps(context: Context, configDir: String, outputDir: String): String {
+    fun runPayloadGaps(context: Context, configDir: String, outputDir: String): String = bridgeLock.withLock {
         ensureStarted(context)
         val py = Python.getInstance()
         val module = py.getModule("probe.payload_gaps")
-        return module.callAttr("run", configDir, outputDir).toString()
+        module.callAttr("run", configDir, outputDir).toString()
     }
 }
