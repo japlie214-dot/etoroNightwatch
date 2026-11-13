@@ -285,6 +285,17 @@ object PyBridge {
                 .callAttr("run", home, count, usdEach).toString()
         }
 
+    /** Alarm-only unattended demo seed (T080). Blocks behind a running session or adoption. */
+    fun runDemoSeed(context: Context, home: String): String {
+        ensureStarted(context)
+        return sessionLock.withLock {
+            bridgeLock.withLock {
+                Python.getInstance().getModule("probe.demo_seed")
+                    .callAttr("run", home).toString()
+            }
+        }
+    }
+
     /** Manual adoption only; share the session monitor to avoid changing its active host. */
     fun planAdoption(context: Context, home: String): String {
         ensureStarted(context)

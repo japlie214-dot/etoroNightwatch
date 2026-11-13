@@ -127,6 +127,75 @@ Adoption has no alarm, intent-extra or command trigger and never runs inside a
 session. The bridge serializes it with sessions; per-home session locking refuses
 an already-running invocation. A real config in the demo home is refused.
 
+## Unattended demo seed (T080)
+
+The one permitted unattended caller of the manual buy and adoption runners is the
+alarm-only one-shot seed. This narrows the operator-only statements above; the
+operator buttons and their confirmations are unchanged. No command, Telegram,
+FCM, intent-extra, boot or UI path starts the seed.
+
+With Boss approval, the PM/Boss may set `files/nightwatch_demo/SEED_DEMO` before
+the next armed alarm. Its contents must be exactly two whitespace-separated
+base-10 integers: position count (1–10) and USD per position (50–15000), at most
+32 ASCII bytes. For five SCHG positions at USD 11000 each:
+
+```text
+adb shell "run-as com.nightwatch.etoro sh -c 'echo 5 11000 > files/nightwatch_demo/SEED_DEMO'"
+```
+
+The next alarm runs it only when not halted, power is allowed, and `ARM_DEMO`
+also exists. To cancel everything, delete **both** `SEED_DEMO` and
+`SEED_DEMO.adopt` before the alarm (PM/Boss only). Deleting only
+`SEED_DEMO.adopt` while a `SEED_DEMO` is waiting lets that buy run at the next
+alarm. Before any network call, the seed renames the flag to
+`SEED_DEMO.running`: orders are never resent, even after a crash. Immediately
+before calling the buy runner it creates `SEED_DEMO.adopt` (content `0`), so a
+crash or an error at any point after an order may have been accepted still
+leaves a later alarm to adopt; the flag is removed again only when the buy
+runner returns normally with no accepted order, or when adoption is applied. A baseline portfolio-read failure
+burns the flag without buying. Invalid content is consumed as a refusal.
+Do not recreate a consumed flag without checking the demo portfolio first.
+
+The seed buys once through the existing demo checks, waits up to 180 seconds for
+positions to appear, then plans/applies adoption at most three times, with ten
+seconds between attempts. Partial buys are not retried. A visibility timeout
+still attempts adoption of what is visible. Its 600-second budget is checked
+between calls; an in-flight runner/network call is not interrupted. The session
+route follows regardless of the seed result, with its existing halt/power gates.
+
+If at least one order was accepted but adoption was not applied, the buy phase
+returns `bought_adoption_pending`; `SEED_DEMO.adopt` (content `0`) is already in
+place. If the buy step itself fails with an error after an order may have been
+accepted, the status is `error` and the flag is kept all the same.
+At later eligible alarms, that flag takes precedence over any new `SEED_DEMO`,
+which is left untouched. This adopt-only phase never buys or builds its own
+broker client: it calls the existing adoption runner. Before any network call,
+it advances the stored alarm count using a temporary file and replacement.
+Each alarm allows up to three plan/apply attempts under the same 600-second
+between-call budget. Success deletes the flag and reports `adopted`; otherwise
+it keeps the flag and reports `adoption_pending`. Invalid content or a count of
+5 abandons adoption without a network call and renames the flag to
+`SEED_DEMO.adopt.failed` (`adoption_abandoned`). There are at most five
+adopt-only alarms. Each writes `SEED_DEMO.adopt.done`, overwriting that result
+only; `SEED_DEMO.done` is never changed by the adopt-only phase.
+
+**Expected behaviour tonight and on the next trading day:** Tonight's alarm
+buys; adoption is expected to refuse because the SPY end-of-day bar for today's
+position open date is not yet available, leaving `bought_adoption_pending`.
+The following session fails gate 11 on the unadopted positions and is aborted
+without HALT; that failure notice is expected. At the next trading day's alarm,
+adoption is expected to apply because the bar now exists, then the session runs
+with gate 11 passing. The strategy is live from that session. Actual success
+still depends on the runner's existing checks and the phone's connectivity.
+
+Inspect `files/nightwatch_demo/SEED_DEMO.done` for the JSON status, accepted count,
+visibility, adoption attempts, UTC timestamps and redacted steps. Writing that
+result removes `.running`. A crash may leave `.running` without `.done`; it does
+not restore the original flag. The event log records `DEMO_SEED_START` and
+`DEMO_SEED_RESULT status=...` (or `DEMO_SEED_FAILED` on a bridge failure); the
+notification contains only the status. Real demo fills, visibility, adoption
+and alarm delivery still require the PM/Boss to inspect the phone's own record.
+
 ## Arm, verify connectivity, and schedule
 
 1. Keep the Z10 charging with Wi-Fi on. Power permits a session only while charging

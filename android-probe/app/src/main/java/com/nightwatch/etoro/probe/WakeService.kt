@@ -46,6 +46,10 @@ class WakeService : Service() {
                 else dry(File(filesDir, "nightwatch_config").absolutePath)
         }
 
+        internal fun shouldRunDemoSeed(demoHome: File, halted: Boolean, powerAllowed: Boolean): Boolean =
+            !halted && powerAllowed && File(demoHome, "ARM_DEMO").exists() &&
+                (File(demoHome, "SEED_DEMO").exists() || File(demoHome, "SEED_DEMO.adopt").exists())
+
         internal fun acceptsArmed(armedDemo: Boolean, value: Any): Boolean =
             value is Boolean && (armedDemo || !value)
     }
@@ -169,6 +173,11 @@ class WakeService : Service() {
                     store.log("SESSION_SKIPPED_BUSY", "trigger=$trigger")
                 } else {
                     try {
+                        try {
+                            runDemoSeedIfFlagged()
+                        } catch (e: Exception) {
+                            store.log("DEMO_SEED_FAILED", "error=${e.javaClass.simpleName}")
+                        }
                         runSessionDry()
                     } catch (e: Exception) {
                         store.log("SESSION_STEP_FAILED", "error=${e.javaClass.simpleName}")
@@ -183,6 +192,25 @@ class WakeService : Service() {
         } finally {
             if (wakeLock.isHeld) wakeLock.release()
             store.log("WAKE_LOCK_RELEASED", "held_ms=${System.currentTimeMillis() - acquiredAt}")
+        }
+    }
+
+    private fun runDemoSeedIfFlagged() {
+        val home = File(filesDir, "nightwatch_demo")
+        if (!shouldRunDemoSeed(home, HaltFlag.isHalted(this),
+                PowerStatus.shouldRunSession(PowerStatus.isCharging(this), PowerStatus.batteryPercent(this)))) return
+        val lock = newWakeLock("NightwatchProbe:DemoSeed")
+        try {
+            lock.acquire(15 * 60 * 1000L)
+            store.log("DEMO_SEED_START", "flag present")
+            val raw = PyBridge.runDemoSeed(this, home.absolutePath)
+            val status = try { JSONObject(raw).optString("status", "unparsed") } catch (_: Exception) { "unparsed" }
+            store.log("DEMO_SEED_RESULT", "status=$status")
+            NotificationHelper.post(this, "Nightwatch DEMO seed", "status=$status")
+        } catch (e: Exception) {
+            store.log("DEMO_SEED_FAILED", "error=${e.javaClass.simpleName}")
+        } finally {
+            if (lock.isHeld) lock.release()
         }
     }
 

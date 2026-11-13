@@ -162,6 +162,12 @@ class DemoManualBuyWiringTest {
             val automatic = source("java/com/nightwatch/etoro/probe/$file")
             assertFalse(automatic.contains("DemoManualBuy"))
             assertFalse(automatic.contains("demo_manual_buy"))
+            if (file == "WakeService.kt") {
+                for (entry in listOf("planAdoption", "applyAdoption", "adopt_apply")) {
+                    assertFalse(automatic.contains(entry))
+                }
+                assertTrue(automatic.contains("PyBridge.runDemoSeed("))
+            }
         }
         val entry = source("../../../../app/src/main/python/nightwatch/android_entry.py")
         assertFalse(entry.contains("demo_manual_buy"))

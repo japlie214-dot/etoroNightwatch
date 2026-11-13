@@ -1,4 +1,4 @@
-"""Explicit, operator-supervised adoption. Never imported by a session or alarm.
+"""Operator-supervised adoption; only demo_seed may call unattended from an alarm.
 
 Only the broker read role is used; apply writes local lot annotations, not orders.
 The single saved plan belongs to this home and expires after thirty minutes.

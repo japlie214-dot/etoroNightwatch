@@ -1,4 +1,4 @@
-"""Operator-only demo buys for adoption testing; never opens a database."""
+"""Demo buys for adoption testing; only demo_seed may call unattended; never opens a database."""
 
 from __future__ import annotations
 

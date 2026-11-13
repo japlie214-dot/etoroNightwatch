@@ -36,6 +36,12 @@ class AdoptionWiringTest {
             val automatic = source("java/com/nightwatch/etoro/probe/$file")
             assertFalse(automatic.contains("Adoption("))
             assertFalse(automatic.contains("probe.adopt_apply"))
+            if (file == "WakeService.kt") {
+                for (entry in listOf("runDemoManualBuy", "planAdoption", "applyAdoption", "demo_manual_buy", "adopt_apply")) {
+                    assertFalse(automatic.contains(entry))
+                }
+                assertTrue(automatic.contains("PyBridge.runDemoSeed("))
+            }
         }
     }
 }
