@@ -15,9 +15,23 @@ import android.content.Intent
  * service from boot on targetSdk 36; the next alarm wake or schedule command repairs a timeout.
  */
 class BootReceiver : BroadcastReceiver() {
+    companion object {
+        /** Maps a re-arm broadcast to its short reason; anything else is ignored. */
+        internal fun reasonFor(action: String?): String? = when (action) {
+            Intent.ACTION_BOOT_COMPLETED -> "BOOT"
+            Intent.ACTION_MY_PACKAGE_REPLACED -> "UPDATE"
+            Intent.ACTION_TIME_CHANGED -> "TIME_SET"
+            Intent.ACTION_TIMEZONE_CHANGED -> "TIMEZONE"
+            else -> null
+        }
+    }
+
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
-        EventStore.get(context).log("BOOT_COMPLETED", "re-registering alarms")
-        AlarmScheduler.rescheduleFromReceiver(context, goAsync(), "BOOT")
+        val reason = reasonFor(intent.action) ?: return
+        // Android drops alarms on reboot and on app update, and a clock or timezone change moves
+        // the market-time target; all four must re-arm the next session alarm (T075).
+        EventStore.get(context).log(if (reason == "BOOT") "BOOT_COMPLETED" else "ALARM_TRIGGER_$reason",
+            "re-registering alarms")
+        AlarmScheduler.rescheduleFromReceiver(context, goAsync(), reason)
     }
 }

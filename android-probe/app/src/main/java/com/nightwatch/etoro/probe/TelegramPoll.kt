@@ -19,6 +19,9 @@ internal object TelegramPollScheduler {
     const val INTERVAL_MS = 15 * 60 * 1000L // Doze allows about one alarm per 9 minutes per app
     const val FIRST_DELAY_MS = 60_000L
     private const val REQUEST_CODE = 8402
+    private const val PREFS = "nightwatch_probe_telegram_poll"
+    private const val KEY_NEXT = "next_poll_at"
+    const val OVERDUE_GRACE_MS = 2 * 60 * 1000L
 
     private fun pending(context: Context, flags: Int): PendingIntent? = PendingIntent.getBroadcast(
         context, REQUEST_CODE, Intent(context, TelegramPollReceiver::class.java),
@@ -27,12 +30,29 @@ internal object TelegramPollScheduler {
     fun schedule(context: Context, delayMs: Long = INTERVAL_MS) {
         val intent = pending(context, PendingIntent.FLAG_UPDATE_CURRENT) ?: return
         val alarms = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, System.currentTimeMillis() + delayMs, intent)
+        val at = System.currentTimeMillis() + delayMs
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putLong(KEY_NEXT, at).apply()
+        // An inexact alarm drifted up to ~26 minutes on this phone. The exact-alarm permission is
+        // already granted for the session alarm; fall back to inexact if it is ever revoked.
+        val exact = android.os.Build.VERSION.SDK_INT < 31 || alarms.canScheduleExactAlarms()
+        try {
+            if (exact) alarms.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
+            else alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
+        } catch (_: SecurityException) {
+            alarms.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, at, intent)
+        }
     }
+
+    internal fun shouldRearm(pendingExists: Boolean, nextAt: Long, now: Long): Boolean =
+        !pendingExists || nextAt == 0L || now > nextAt + OVERDUE_GRACE_MS
 
     /** Cheap on every process start: arms the chain only when no alarm is pending. */
     fun ensureScheduled(context: Context) {
-        if (pending(context, PendingIntent.FLAG_NO_CREATE) == null) schedule(context, FIRST_DELAY_MS)
+        // The PendingIntent outlives a lost alarm, so also treat an overdue recorded time as lost.
+        val next = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(KEY_NEXT, 0L)
+        if (shouldRearm(pending(context, PendingIntent.FLAG_NO_CREATE) != null, next, System.currentTimeMillis())) {
+            schedule(context, FIRST_DELAY_MS)
+        }
     }
 }
 

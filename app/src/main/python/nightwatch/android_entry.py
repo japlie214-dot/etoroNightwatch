@@ -144,7 +144,13 @@ def poll_telegram(base_dir: str) -> str:
                 notifier = TelegramNotifier(config.telegram, repo, environment=config.environment.value)
                 resources.callback(notifier.close)
                 results = process_pending(notifier, repo, host, config)
-                envelope.update(status="ok", processed=len(results))
+                envelope.update(status="ok", processed=len(results), alerts=0)
+                try:  # T075: a watchdog fault must never break command handling
+                    from .notify.watchdog import run_watchdog
+
+                    envelope["alerts"] = run_watchdog(notifier, repo, host, datetime.now(timezone.utc))
+                except Exception:
+                    envelope["alerts"] = -1
     except Exception as exc:
         envelope.update(status="error", error_type=type(exc).__name__)
     finally:

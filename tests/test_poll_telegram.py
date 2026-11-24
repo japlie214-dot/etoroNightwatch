@@ -41,7 +41,7 @@ def wired(tmp_path, monkeypatch):
 def test_polls_once_closes_resources_and_restores_host(wired):
     before = get_host()
     result = json.loads(entry.poll_telegram(str(wired.home)))
-    assert result == {"status": "ok", "processed": 2}
+    assert result == {"status": "ok", "processed": 2, "alerts": 0}
     assert wired.polled == [1] and wired.closed == [1] and wired.repo_closed == [1]
     assert wired.hosts_seen == [wired.host]
     assert get_host() is before

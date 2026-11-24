@@ -37,4 +37,14 @@ class TelegramPollTest {
         val receiver = src("TelegramPoll.kt")
         assertFalse(receiver.contains("e.message"))
     }
+
+    @Test
+    fun aLostAlarmIsRearmedEvenWhenItsPendingIntentSurvives() {
+        val t = 1_000_000L
+        assertTrue(TelegramPollScheduler.shouldRearm(false, t + 5_000, t))   // no pending intent
+        assertTrue(TelegramPollScheduler.shouldRearm(true, 0L, t))           // never recorded
+        assertTrue(TelegramPollScheduler.shouldRearm(true, t - 3 * 60_000, t)) // overdue: lost
+        assertFalse(TelegramPollScheduler.shouldRearm(true, t + 60_000, t))  // pending, not yet due
+        assertFalse(TelegramPollScheduler.shouldRearm(true, t - 60_000, t))  // slightly late, within grace
+    }
 }
