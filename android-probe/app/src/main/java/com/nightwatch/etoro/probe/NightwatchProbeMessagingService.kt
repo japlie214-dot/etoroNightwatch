@@ -134,6 +134,8 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
                     DemoControlOutcome.Unreceipted("error=${e.javaClass.simpleName}")
                 }
                 store.log("DEMO_CONTROL_OUTCOME", outcome.label)
+                // The event log redacts colon-separated values; this fixed vocabulary is not secret.
+                try { java.io.File(filesDir, "demo_control_last.txt").writeText(System.currentTimeMillis().toString() + " " + outcome.label + "\n") } catch (_: Exception) {}
             }
             return
         }

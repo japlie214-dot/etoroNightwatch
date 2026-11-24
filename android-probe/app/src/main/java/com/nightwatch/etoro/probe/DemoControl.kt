@@ -205,7 +205,8 @@ internal sealed class DemoControlOutcome(val label: String) {
     object Unavailable : DemoControlOutcome("unavailable")
     object Rejected : DemoControlOutcome("rejected")
     object Expired : DemoControlOutcome("expired")
-    object NotApplied : DemoControlOutcome("not_applied")
+    /** Python ran but did not apply; only fixed-vocabulary status/reason are ever logged. */
+    class NotApplied(status: String, reason: String?) : DemoControlOutcome("not_applied:$status${reason?.let { "/$it" } ?: ""}")
     /** Applied or partial on the device, but no verifiable receipt was produced or delivered. */
     class Unreceipted(why: String) : DemoControlOutcome("unreceipted:$why")
     class Receipted(val httpStatus: Int) : DemoControlOutcome("receipted:$httpStatus")
@@ -223,6 +224,8 @@ internal interface DemoControlDeps {
     fun post(body: String): Int?
 }
 
+private fun safeToken(v: String): String = if (Regex("^[a-z_]{1,40}$").matches(v)) v else "other"
+
 internal object DemoControlHandler {
     fun handle(data: Map<String, String>, deps: DemoControlDeps): DemoControlOutcome {
         val secret = deps.dispatchSecret() ?: return DemoControlOutcome.Unavailable
@@ -236,7 +239,7 @@ internal object DemoControlHandler {
         val result = DemoControl.parseResult(deps.apply(DemoControl.requestJson(envelope), deviceId))
         // Python is the authority on duplicate/pause/read; refused, partial and unconfirmed are
         // all deliberately receipt-less, so the cloud keeps showing Requested, never Applied.
-        if (result.status != "applied") return DemoControlOutcome.NotApplied
+        if (result.status != "applied") return DemoControlOutcome.NotApplied(safeToken(result.status), result.reasonCode?.let(::safeToken))
         val signer = deps.signer() ?: return DemoControlOutcome.Unreceipted("signer_unavailable")
         val receipt = DemoControl.signableReceipt(signer.keyId, envelope, result)
             ?: return DemoControlOutcome.Unreceipted("evidence_incomplete")

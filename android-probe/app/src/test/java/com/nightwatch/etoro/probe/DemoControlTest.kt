@@ -74,7 +74,7 @@ class DemoControlTest {
     fun partialRefreshIsNeverSignedOrPosted() {
         val deps = Deps(refreshPartial, signer = signer())
         val outcome = DemoControlHandler.handle(signed("refresh_demo_broker"), deps)
-        assertEquals("not_applied", outcome.label)
+        assertEquals("not_applied:partial/open_orders_unestablished", outcome.label)
         assertEquals(1, deps.applied)
         assertTrue(deps.posted.isEmpty())
     }
@@ -186,7 +186,7 @@ class DemoControlTest {
             """{"status":"unconfirmed","reasonCode":"guard_not_enforced"}""",
             """{"status":"expired_unconfirmed"}""")) {
             val deps = Deps(response, signer = signer())
-            assertEquals("not_applied", DemoControlHandler.handle(signed("pause_demo_orders"), deps).label)
+            assertTrue(DemoControlHandler.handle(signed("pause_demo_orders"), deps).label.startsWith("not_applied"))
             assertTrue(deps.posted.isEmpty())
         }
     }
