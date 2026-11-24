@@ -2313,6 +2313,86 @@ class Repo:
         )
         self.conn.commit()
 
+    def schg_sample_count(self, year: int) -> int:
+        """Number of SCHG daily values stored for a calendar year (evidence only)."""
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM schg_daily_values WHERE date >= ? AND date <= ?",
+            (f"{year:04d}-01-01", f"{year:04d}-12-31"),
+        ).fetchone()
+        return int(row["n"]) if row is not None else 0
+
+    def record_schg_sample(self, trading_date: str, session_id: int, value: float) -> None:
+        """Write the day's validated SCHG value and its log row in one transaction."""
+        now = utcnow()
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO schg_daily_values (date, value, created_at) VALUES (?, ?, ?)
+                ON CONFLICT (date) DO UPDATE SET value = excluded.value
+                """,
+                (trading_date, value, now),
+            )
+            self.conn.execute(
+                """
+                INSERT INTO schg_sampling_log (trading_date, session_id, status, reason, value, recorded_at)
+                VALUES (?, ?, 'recorded', NULL, ?, ?)
+                ON CONFLICT (trading_date) DO UPDATE SET session_id = excluded.session_id,
+                    status = 'recorded', reason = NULL, value = excluded.value,
+                    recorded_at = excluded.recorded_at
+                """,
+                (trading_date, session_id, value, now),
+            )
+
+    def skip_schg_sample(self, trading_date: str, session_id: int | None, reason: str) -> None:
+        """Log why no value was written. Never touches a recorded day or a stored value."""
+        with self.conn:
+            self.conn.execute(
+                """
+                INSERT INTO schg_sampling_log (trading_date, session_id, status, reason, value, recorded_at)
+                VALUES (?, ?, 'skipped', ?, NULL, ?)
+                ON CONFLICT (trading_date) DO UPDATE SET session_id = excluded.session_id,
+                    reason = excluded.reason, recorded_at = excluded.recorded_at
+                WHERE schg_sampling_log.status = 'skipped'
+                """,
+                (trading_date, session_id, reason, utcnow()),
+            )
+
+    def get_schg_sampling(self, trading_date: str) -> dict | None:
+        row = self.conn.execute(
+            "SELECT trading_date, status, reason, value, recorded_at FROM schg_sampling_log "
+            "WHERE trading_date = ?", (trading_date,)).fetchone()
+        return dict(row) if row else None
+
+    _BUDGET_EVAL_COLUMNS = (
+        "session_id", "trading_date", "evaluated_at", "source_path", "state_budget_year",
+        "target_year", "history_year", "sample_count", "sample_mean", "sleeve_equity",
+        "core_fraction", "rounding_step", "sizing_floor", "order_divisor", "budget",
+        "order_size", "cash_target",
+    )
+
+    def insert_budget_evaluation(self, session_id: int, trading_date: str, evaluation: dict) -> None:
+        """Persist the engine's own budget evaluation for a session (once per session)."""
+        values = {"session_id": session_id, "trading_date": trading_date,
+                  "evaluated_at": utcnow(), **evaluation}
+        cols = self._BUDGET_EVAL_COLUMNS
+        with self.conn:
+            self.conn.execute(
+                f"INSERT OR IGNORE INTO budget_evaluations ({', '.join(cols)}) "
+                f"VALUES ({', '.join('?' for _ in cols)})",
+                tuple(values[c] for c in cols),
+            )
+
+    def latest_budget_evaluation(self) -> dict | None:
+        """The most recent evaluation by trading date, whichever session produced it."""
+        row = self.conn.execute(
+            "SELECT * FROM budget_evaluations ORDER BY trading_date DESC, id DESC LIMIT 1").fetchone()
+        return dict(row) if row else None
+
+    def get_budget_evaluation(self, session_id: int) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM budget_evaluations WHERE session_id = ?", (session_id,)).fetchone()
+        return dict(row) if row else None
+
     def mean_schg_value(self, year: int) -> float | None:
         """Return the mean SCHG value over a calendar year, or ``None``.
 

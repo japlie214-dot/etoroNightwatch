@@ -284,6 +284,7 @@ def build_ladder_inputs(
             tranches_bought=b.tranches_bought, last_reference_spy=b.last_reference_spy,
         ))
     mean = repo.mean_schg_value(year - 1)
+    sample_count = 0 if mean is None else repo.schg_sample_count(year - 1)
     if mean is None:
         notes.append("no prior-year SCHG values")
     return LadderInputs(
@@ -292,7 +293,33 @@ def build_ladder_inputs(
         equity=cash + sum(lot.units * prices["UPRO"] for lot in lots) + schg_value,
         schg_position_value=schg_value, open_lots=lots, buckets=buckets,
         prior_year_schg_values=() if mean is None else (mean,),
+        prior_year_schg_sample_count=sample_count,
     ), notes
+
+
+def _record_schg_sample(repo, session_id: int, trading_date: str, inputs: LadderInputs) -> str:
+    """Record the pre-decision managed SCHG value, or log why not. Never raises, never writes zero
+    for a missing or invalid input; a verified empty managed SCHG book is a real zero."""
+    value, price = inputs.schg_position_value, inputs.schg_price
+    valid = (
+        isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        and value >= 0 and isinstance(price, (int, float)) and math.isfinite(price) and price > 0
+    )
+    try:
+        if valid:
+            repo.record_schg_sample(trading_date, session_id, float(value))
+            return "recorded"
+        repo.skip_schg_sample(trading_date, session_id, "invalid_value")
+        return "skipped (invalid value)"
+    except Exception as exc:
+        return f"not written ({type(exc).__name__})"
+
+
+def _skip_schg_sample(repo, session_id: int, trading_date: str, reason: str) -> None:
+    try:
+        repo.skip_schg_sample(trading_date, session_id, reason)
+    except Exception:
+        pass
 
 
 def arming_refusals(config: Config) -> list[str]:
@@ -671,6 +698,13 @@ def _run_session_core(
             equity=inputs.equity, cash=inputs.cash,
             reason=f"phase A, pre-settlement, buy intents provisional; {'armed' if armed else 'dry run'}: " + d.reason,
         ))
+        budget_evidence_note = ""
+        evaluation = getattr(d, "budget_evaluation", None)
+        if isinstance(evaluation, dict) and evaluation:
+            try:
+                repo.insert_budget_evaluation(s.id, iso, evaluation)
+            except Exception as exc:  # evidence must never stop a session that is otherwise sound
+                budget_evidence_note = f"; budget evidence not recorded ({type(exc).__name__})"
         refusals = arming_refusals(config)
         groups = {}
         for i in d.intents:
@@ -950,6 +984,7 @@ def _run_session_core(
                 phase="post_execution" if armed else "post_decision",
             )
             sid = repo.insert_snapshot(snap)
+            reason += f"; schg sample {_record_schg_sample(repo, s.id, iso, inputs)}"
             reason += f"; snapshot {sid}: {len(snap.positions)} position(s), equity={snap.equity}, complete={snap.raw['complete']}"
             interval = _interval_for(
                 prev, snap, repo=repo, client=client,
@@ -977,7 +1012,9 @@ def _run_session_core(
                     halt_error = _redact_reason(str(e), config=config, fallback=type(e).__name__)
                     halt_failure = f"{type(e).__name__}: {halt_error}"
         except Exception as e:
+            _skip_schg_sample(repo, s.id, iso, "snapshot_failed")
             reason += f"; snapshot failed: {type(e).__name__}: {e}"
+        reason += budget_evidence_note
         reason = _redact_reason(
             reason + tp_uncleared_text, config=config,
             fallback=status + recovery_counts + ("; HALT details omitted" if halt_text else ""),

@@ -18,6 +18,51 @@ def _number(value):
     return value if type(value) in (int, float) and math.isfinite(value) else None
 
 
+BUDGET_PATHS = ("bootstrap", "prior_year_mean", "missing_history_fallback", "retained")
+SAMPLING_REASONS = ("snapshot_failed", "invalid_value")
+
+
+def _count(value):
+    return value if type(value) is int and value >= 0 else None
+
+
+def _annual_budget(repo, session) -> dict:
+    """Project the engine's persisted budget evidence, never recomputing the rule.
+
+    Only the newest stored evaluation is shown, and ``session_matches`` says whether the latest
+    session produced it, so a session that never reached the decision cannot borrow an older
+    verdict. Missing records stay "not evaluated"; nothing is inferred from empty fields.
+    """
+    ev = repo.latest_budget_evaluation()
+    if ev is None or ev.get("source_path") not in BUDGET_PATHS:
+        out = {"evaluated": False}
+    else:
+        out = {
+            "evaluated": True, "source_path": ev["source_path"],
+            "session_matches": ev["trading_date"] == session.trading_date,
+            "trading_date": ev["trading_date"], "evaluated_at": ev["evaluated_at"],
+            "state_budget_year": _count(ev["state_budget_year"]),
+            "target_year": _count(ev["target_year"]), "history_year": _count(ev["history_year"]),
+            "sample_count": _count(ev["sample_count"]), "sample_mean_usd": _number(ev["sample_mean"]),
+            "sleeve_equity_usd": _number(ev["sleeve_equity"]),
+            "core_fraction": _number(ev["core_fraction"]), "rounding_step_usd": _number(ev["rounding_step"]),
+            "sizing_floor_usd": _number(ev["sizing_floor"]), "order_divisor": _number(ev["order_divisor"]),
+            "budget_usd": _number(ev["budget"]), "order_size_usd": _number(ev["order_size"]),
+            "cash_target_usd": _number(ev["cash_target"]),
+        }
+    sampling = repo.get_schg_sampling(session.trading_date)
+    if sampling is None:
+        out["sampling"] = {"status": "not_evaluated", "trading_date": session.trading_date}
+    else:
+        out["sampling"] = {
+            "status": sampling["status"] if sampling["status"] in ("recorded", "skipped") else "not_evaluated",
+            "trading_date": session.trading_date,
+            "reason": sampling["reason"] if sampling["reason"] in SAMPLING_REASONS else None,
+            "value_usd": _number(sampling["value"]), "recorded_at": sampling["recorded_at"],
+        }
+    return out
+
+
 def _reason(value):
     return RedactionFilter.redact(value)[:300] if isinstance(value, str) else None
 
@@ -40,6 +85,7 @@ def dashboard_snapshot(repo: Repo, *, history: int = 30) -> dict:
         }
         result = {"environment": "demo", "trading_date": session.trading_date,
                   "last_session": last, "recent_sessions": []}
+        result["annual_budget"] = _annual_budget(repo, session)
         if decision is not None:
             result["last_decision"] = {
                 "reason": _reason(decision.reason), "intents": len(decision.intents),

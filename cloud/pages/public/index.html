@@ -72,6 +72,26 @@
         </dl>
         <p class="hint source-note">Cloud receipt time does not establish portfolio source freshness.</p>
       </section>
+
+      <section class="panel" aria-labelledby="budget-heading">
+        <h2 id="budget-heading">Annual budget</h2>
+        <p id="budget-status" class="hint">Not evaluated</p>
+        <dl class="kv">
+          <dt>Source path</dt><dd id="budget-source">&mdash;</dd>
+          <dt>Evaluated</dt><dd id="budget-time">Unknown</dd>
+          <dt>Target / history year</dt><dd id="budget-years">&mdash;</dd>
+          <dt>Prior-year SCHG samples</dt><dd id="budget-samples">&mdash;</dd>
+          <dt>Sleeve equity used</dt><dd id="budget-equity">&mdash;</dd>
+          <dt>Core fraction / rounding step</dt><dd id="budget-rule">&mdash;</dd>
+          <dt>Budget</dt><dd id="budget-value">&mdash;</dd>
+          <dt>Order size / sizing floor</dt><dd id="budget-order">&mdash;</dd>
+          <dt>Cash target</dt><dd id="budget-cash">&mdash;</dd>
+          <dt>Daily SCHG sample (latest session)</dt><dd id="budget-sampling">Not evaluated</dd>
+        </dl>
+        <p class="hint">Values are what the engine stored when it chose the budget; this page does not
+          recompute the rule. Sizing is not an order or a fill. Observed samples do not prove complete
+          calendar coverage.</p>
+      </section>
       <section class="panel-group">
         <div class="panel">
           <h2>Account</h2>

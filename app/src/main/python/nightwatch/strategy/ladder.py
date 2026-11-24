@@ -406,6 +406,8 @@ class LadderInputs:
     open_lots: Sequence[LadderLot]
     buckets: Sequence[ReentryBucket]
     prior_year_schg_values: Sequence[float] = ()
+    #: Samples behind ``prior_year_schg_values`` (which carries only their mean). Evidence only.
+    prior_year_schg_sample_count: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +471,8 @@ class LadderDecision:
     reason: str
     warnings: list[str] = field(default_factory=list)
     diagnostics: dict = field(default_factory=dict)
+    #: What the engine did about the annual budget this call (T073); empty only if not evaluated.
+    budget_evaluation: dict = field(default_factory=dict)
 
 
 def _floor_cents(amount: float) -> float:
@@ -480,37 +484,58 @@ def _floor_cents(amount: float) -> float:
 # ---------------------------------------------------------------------------
 
 
+ROUNDING_STEP = 20.0
+
+
 def _ensure_budget(
     *, year: int, state: LadderState, prior_year_schg_values: Sequence[float],
-    equity: float, config: LadderConfig,
-) -> tuple[float, float, float, int, str | None]:
+    equity: float, config: LadderConfig, sample_count: int = 0,
+) -> tuple[float, float, float, int, str | None, dict]:
     """Roll the annual budget over on a calendar-year change.
 
-    Returns ``(budget, order_size, cash_target, budget_year, warning)``.
-    Fix #4: falls back to ``core_fraction * equity`` with a warning instead
-    of raising when the prior year has no recorded SCHG history (the Jan-2
-    restart crash).
+    Returns ``(budget, order_size, cash_target, budget_year, warning, evaluation)``.
+    ``evaluation`` records which path the engine actually took and its inputs, so a
+    dashboard never has to infer it. Fix #4: falls back to ``core_fraction * equity``
+    with a warning instead of raising when the prior year has no recorded SCHG history
+    (the Jan-2 restart crash).
     """
+    mean = (sum(prior_year_schg_values) / len(prior_year_schg_values)) if prior_year_schg_values else None
+
+    def evaluation(path: str, budget: float, order_size: float, cash_target: float) -> dict:
+        return {
+            "source_path": path, "state_budget_year": state.budget_year, "target_year": year,
+            "history_year": year - 1, "sample_count": int(sample_count), "sample_mean": mean,
+            "sleeve_equity": equity, "core_fraction": config.core_fraction,
+            "rounding_step": ROUNDING_STEP, "sizing_floor": config.min_order_size,
+            "order_divisor": config.order_divisor, "budget": budget,
+            "order_size": order_size, "cash_target": cash_target,
+        }
+
     if state.budget_year == year:
-        return state.budget or 0.0, state.order_size or 0.0, state.cash_target or 0.0, year, None
+        budget, order_size, cash_target = state.budget or 0.0, state.order_size or 0.0, state.cash_target or 0.0
+        return budget, order_size, cash_target, year, None, evaluation(
+            "retained", budget, order_size, cash_target)
 
     warning: str | None = None
     if state.budget_year is None:
         raw = config.core_fraction * equity
+        path = "bootstrap"
     else:
         if not prior_year_schg_values:
             raw = config.core_fraction * equity
+            path = "missing_history_fallback"
             warning = (
                 f"budget rollover {state.budget_year}->{year}: no prior-year SCHG "
                 f"history recorded; falling back to core_fraction * current equity "
                 f"(fix #4 -- the source strategy raises here)"
             )
         else:
-            raw = config.core_fraction * (sum(prior_year_schg_values) / len(prior_year_schg_values))
-    budget = math.floor(max(0.0, raw) / 20.0) * 20.0
+            raw = config.core_fraction * mean
+            path = "prior_year_mean"
+    budget = math.floor(max(0.0, raw) / ROUNDING_STEP) * ROUNDING_STEP
     order_size = max(budget / config.order_divisor, config.min_order_size)
     cash_target = config.cash_target_multiplier * order_size
-    return budget, order_size, cash_target, year, warning
+    return budget, order_size, cash_target, year, warning, evaluation(path, budget, order_size, cash_target)
 
 
 # ---------------------------------------------------------------------------
@@ -791,9 +816,9 @@ def decide(inputs: LadderInputs, state: LadderState, config: LadderConfig) -> La
     warnings: list[str] = []
     bars = state.bars + 1
 
-    budget, order_size, cash_target, budget_year, budget_warning = _ensure_budget(
+    budget, order_size, cash_target, budget_year, budget_warning, budget_evaluation = _ensure_budget(
         year=inputs.year, state=state, prior_year_schg_values=inputs.prior_year_schg_values,
-        equity=inputs.equity, config=config,
+        equity=inputs.equity, config=config, sample_count=inputs.prior_year_schg_sample_count,
     )
     if budget_warning:
         warnings.append(budget_warning)
@@ -821,6 +846,7 @@ def decide(inputs: LadderInputs, state: LadderState, config: LadderConfig) -> La
             closed_lots=[], new_state=base_state, reason=reason,
             warnings=warnings,
             diagnostics={"bars": bars, "ath": ath, "new_ath_bar": new_ath_bar, "warmup": True},
+            budget_evaluation=budget_evaluation,
         )
 
     cone_z = inputs.cone_z
@@ -905,7 +931,7 @@ def decide(inputs: LadderInputs, state: LadderState, config: LadderConfig) -> La
         return LadderDecision(
             intents=intents, new_lots=new_lots, updated_buckets=updated_buckets,
             closed_lots=closed_lots, new_state=new_state, reason=reason,
-            warnings=warnings, diagnostics=diagnostics,
+            warnings=warnings, diagnostics=diagnostics, budget_evaluation=budget_evaluation,
         )
 
     # No same-day sale batch: SCHG steps may run.
@@ -942,5 +968,5 @@ def decide(inputs: LadderInputs, state: LadderState, config: LadderConfig) -> La
     return LadderDecision(
         intents=intents, new_lots=new_lots, updated_buckets=updated_buckets,
         closed_lots=closed_lots, new_state=new_state, reason=reason,
-        warnings=warnings, diagnostics=diagnostics,
+        warnings=warnings, diagnostics=diagnostics, budget_evaluation=budget_evaluation,
     )

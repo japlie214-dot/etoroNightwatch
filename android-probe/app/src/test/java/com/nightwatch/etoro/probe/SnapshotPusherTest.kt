@@ -23,12 +23,12 @@ class SnapshotPusherTest {
     }
 
     @Test
-    fun mergeHasNineKeysReasonSanitizationAndUtf8Fallback() {
+    fun mergeHasTenKeysReasonSanitizationAndUtf8Fallback() {
         val merge = source("SnapshotPusher.kt").substringAfter("internal fun mergeDashboard(")
             .substringBefore("internal fun snapshotFields(")
         val keys = merge.substringAfter("for (key in listOf(").substringBefore(")) {")
         assertEquals(listOf("environment", "trading_date", "account", "sleeve", "positions",
-            "last_session", "last_decision", "recent_sessions", "seed"),
+            "last_session", "last_decision", "recent_sessions", "seed", "annual_budget"),
             Regex("\"([^\"]+)\"").findAll(keys).map { it.groupValues[1] }.toList())
         assertTrue(merge.contains("extra.opt(\"environment\") != \"demo\""))
         assertTrue(merge.contains("reason?.let(redact)?.take(300)"))

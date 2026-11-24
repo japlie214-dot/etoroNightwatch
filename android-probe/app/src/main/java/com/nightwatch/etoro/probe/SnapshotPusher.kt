@@ -68,7 +68,7 @@ object SnapshotPusher {
             }
             val merged = JSONObject(original.toString())
             for (key in listOf("environment", "trading_date", "account", "sleeve", "positions",
-                    "last_session", "last_decision", "recent_sessions", "seed")) {
+                    "last_session", "last_decision", "recent_sessions", "seed", "annual_budget")) {
                 if (extra.has(key)) merged.put(key, extra.get(key))
             }
             if (merged.toString().toByteArray(Charsets.UTF_8).size > 256 * 1024) {

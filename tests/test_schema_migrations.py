@@ -149,7 +149,7 @@ def test_migration_012_accepts_unannotated_fill_and_preserves_references(tmp_pat
             with pytest.raises(sqlite3.IntegrityError):
                 repo.set_intent_status(iid, "filled_unannotated")
             conn.rollback()
-        assert migrations.migrate(conn) == 12
+        assert migrations.migrate(conn) == 13
         repo = Repo(conn)
         if upgrade:
             assert dict(conn.execute("SELECT * FROM intents WHERE id = ?", (iid,)).fetchone()) == original
@@ -191,7 +191,7 @@ def test_migration_012_failure_rolls_back_and_can_retry(tmp_path, monkeypatch):
         assert "filled_unannotated" not in conn.execute("SELECT sql FROM sqlite_master WHERE name = 'intents'").fetchone()[0]
         conn.execute("DROP TRIGGER reject_v12")
         conn.commit()
-        assert migrations.migrate(conn) == 12
+        assert migrations.migrate(conn) == 13
     finally:
         conn.close()
 

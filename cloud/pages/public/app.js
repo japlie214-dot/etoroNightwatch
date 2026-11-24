@@ -204,6 +204,54 @@ function renderSessions(snapshot) {
   }
 }
 
+const BUDGET_PATHS = {
+  bootstrap: "Bootstrap: first budget, set from sleeve equity",
+  prior_year_mean: "Rollover: prior-year observed SCHG mean",
+  missing_history_fallback: "Rollover FALLBACK: no prior-year history, used sleeve equity",
+  retained: "Retained: kept for the year; any history did not drive it",
+};
+const SAMPLING_REASONS = { snapshot_failed: "snapshot failed", invalid_value: "invalid value" };
+
+function renderBudget(snapshot) {
+  const b = snapshot.annual_budget;
+  const set = (id, value) => { document.getElementById(id).textContent = value ?? "—"; };
+  const text = (value) => (typeof value === "string" ? Array.from(value).slice(0, 40).join("") : "—");
+  const evaluated = b && b.evaluated === true && Object.hasOwn(BUDGET_PATHS, b.source_path);
+  if (!evaluated) {
+    set("budget-status", b ? "Not evaluated: no stored budget evaluation." :
+      "Not evaluated: this snapshot carries no budget evidence.");
+    for (const id of ["budget-source", "budget-years", "budget-samples", "budget-equity", "budget-rule",
+      "budget-value", "budget-order", "budget-cash"]) set(id, "—");
+    set("budget-time", "Unknown");
+  } else {
+    set("budget-status", b.session_matches === false ?
+      `Evaluation is from ${text(b.trading_date)}; the latest session did not evaluate the budget.` :
+      `Evaluated in the latest session (${text(b.trading_date)}).`);
+    set("budget-source", BUDGET_PATHS[b.source_path]);
+    const age = classifyStaleness(b.evaluated_at);
+    set("budget-time", age.level === "none" ? "Unknown" :
+      `${new Date(b.evaluated_at).toLocaleString()} (${formatAge(age.ageMs)}; ${age.level})`);
+    set("budget-years", `${b.target_year ?? "—"} / ${b.history_year ?? "—"}`);
+    const n = b.sample_count;
+    set("budget-samples",
+      b.source_path === "prior_year_mean" ?
+        `${n ?? "—"} observed, mean ${fmtUsd(b.sample_mean_usd)} — Observed history; coverage not established` :
+      b.source_path === "missing_history_fallback" ? `${n ?? "—"} — fallback warning: no history recorded` :
+        `${n ?? "—"} available, not used for this budget`);
+    set("budget-equity", fmtUsd(b.sleeve_equity_usd));
+    set("budget-rule", `${fmtNum(b.core_fraction)} / ${fmtUsd(b.rounding_step_usd)}`);
+    set("budget-value", fmtUsd(b.budget_usd));
+    set("budget-order", `${fmtUsd(b.order_size_usd)} / ${fmtUsd(b.sizing_floor_usd)}`);
+    set("budget-cash", fmtUsd(b.cash_target_usd));
+  }
+  const sampling = b?.sampling;
+  set("budget-sampling",
+    sampling?.status === "recorded" ? `Recorded ${fmtUsd(sampling.value_usd)} (${text(sampling.trading_date)})` :
+    sampling?.status === "skipped" ?
+      `Skipped: ${SAMPLING_REASONS[sampling.reason] ?? "reason unavailable"} (${text(sampling.trading_date)})` :
+      "Not evaluated");
+}
+
 function showState(name) {
   els.emptyState.hidden = name !== "empty";
   els.errorState.hidden = name !== "error";
@@ -239,6 +287,7 @@ async function loadSnapshot() {
     }
 
     renderSessions(snapshot);
+    renderBudget(snapshot);
     renderAccountAndSleeve(snapshot);
     renderPositions(snapshot);
     showState("data");

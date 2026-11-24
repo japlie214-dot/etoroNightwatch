@@ -132,6 +132,83 @@ test("live-source labeling never promises fresh data and empty has no fixture fa
   assert.equal(empty.get("data").hidden, true);
 });
 
+const usd = (n) => Number(n).toLocaleString(undefined, { style: "currency", currency: "USD" });
+const budgetBase = { evaluated: true, session_matches: true, trading_date: "2026-10-02",
+  evaluated_at: new Date().toISOString(), state_budget_year: 2025, target_year: 2026, history_year: 2025,
+  sample_count: 3, sample_mean_usd: 20000, sleeve_equity_usd: 9000, core_fraction: 0.4,
+  rounding_step_usd: 20, sizing_floor_usd: 10, order_divisor: 20, budget_usd: 8000,
+  order_size_usd: 400, cash_target_usd: 2800,
+  sampling: { status: "recorded", trading_date: "2026-10-02", reason: null, value_usd: 1234.5 } };
+
+test("budget panel: stub shows an observed rollover with the coverage caveat", async () => {
+  const nodes = await render(stub, "budget-stub");
+  assert.match(nodes.get("budget-source").textContent, /^Rollover: prior-year observed SCHG mean/);
+  assert.match(nodes.get("budget-samples").textContent, /3 observed, mean .*Observed history; coverage not established/);
+  assert.equal(nodes.get("budget-value").textContent, usd(1200));
+  assert.equal(nodes.get("budget-years").textContent, "2026 / 2025");
+  assert.match(nodes.get("budget-status").textContent, /^Evaluated in the latest session/);
+  assert.equal(nodes.get("budget-sampling").textContent, `Recorded ${usd(1234.5)} (2026-09-02)`);
+});
+
+for (const [path, sourceText, samplesText] of [
+  ["bootstrap", /^Bootstrap: first budget/, /available, not used for this budget$/],
+  ["retained", /^Retained: kept for the year; any history did not drive it/, /available, not used for this budget$/],
+  ["missing_history_fallback", /^Rollover FALLBACK: no prior-year history/, /fallback warning: no history recorded$/],
+]) {
+  test(`budget panel: ${path} is labeled as the engine stored it, even when history exists`, async () => {
+    const nodes = await render({ environment: "demo", last_session: {},
+      annual_budget: { ...budgetBase, source_path: path, sample_count: path === "missing_history_fallback" ? 0 : 5 } }, `budget-${path}`);
+    assert.match(nodes.get("budget-source").textContent, sourceText);
+    assert.match(nodes.get("budget-samples").textContent, samplesText);
+    assert.doesNotMatch(nodes.get("budget-samples").textContent, /coverage not established/);
+  });
+}
+
+test("budget panel: older payloads and missing evaluations say not evaluated, never a value", async () => {
+  for (const [snapshot, tag, status] of [
+    [{ environment: "demo", last_session: {} }, "no-section", /no budget evidence/],
+    [{ environment: "demo", annual_budget: { evaluated: false, sampling: { status: "not_evaluated" } } }, "unevaluated", /no stored budget evaluation/],
+  ]) {
+    const nodes = await render(snapshot, `budget-${tag}`);
+    assert.match(nodes.get("budget-status").textContent, status);
+    for (const id of ["budget-source", "budget-years", "budget-samples", "budget-equity", "budget-rule",
+      "budget-value", "budget-order", "budget-cash"]) assert.equal(nodes.get(id).textContent, "—");
+    assert.equal(nodes.get("budget-time").textContent, "Unknown");
+    assert.equal(nodes.get("budget-sampling").textContent, "Not evaluated");
+  }
+});
+
+test("budget panel: a verdict from an older session is named, not passed off as current", async () => {
+  const nodes = await render({ environment: "demo", last_session: {}, annual_budget: {
+    ...budgetBase, source_path: "retained", session_matches: false, trading_date: "2026-09-29",
+    sampling: { status: "not_evaluated", trading_date: "2026-10-02" } } }, "budget-older");
+  assert.match(nodes.get("budget-status").textContent, /from 2026-09-29; the latest session did not evaluate/);
+  assert.equal(nodes.get("budget-sampling").textContent, "Not evaluated");
+});
+
+test("budget panel: skipped sampling shows its reason and no value; unknown reasons stay generic", async () => {
+  const skipped = await render({ environment: "demo", annual_budget: { evaluated: false,
+    sampling: { status: "skipped", reason: "snapshot_failed", trading_date: "2026-10-02", value_usd: null } } }, "budget-skip");
+  assert.equal(skipped.get("budget-sampling").textContent, "Skipped: snapshot failed (2026-10-02)");
+  const odd = await render({ environment: "demo", annual_budget: { evaluated: false,
+    sampling: { status: "skipped", reason: "<img src=x onerror=1>", trading_date: "2026-10-02" } } }, "budget-odd");
+  assert.equal(odd.get("budget-sampling").textContent, "Skipped: reason unavailable (2026-10-02)");
+});
+
+test("budget panel: unknown source path and hostile text render as plain unknowns", async () => {
+  const unknown = await render({ environment: "demo", annual_budget: { ...budgetBase, source_path: "magic" } }, "budget-magic");
+  assert.match(unknown.get("budget-status").textContent, /no stored budget evaluation/);
+  const hostile = await render({ environment: "demo", annual_budget: { ...budgetBase, source_path: "retained",
+    trading_date: "<script>x</script>" + "日".repeat(100), session_matches: false } }, "budget-hostile");
+  assert.ok(Array.from(hostile.get("budget-status").textContent).length < 140);
+});
+
+test("budget panel: the page contains no recompute of the rule", () => {
+  const app = readFileSync(new URL("../public/app.js", import.meta.url), "utf8");
+  const block = app.slice(app.indexOf("function renderBudget"), app.indexOf("function showState"));
+  assert.doesNotMatch(block, /Math\.floor|\*\s*b\.|core_fraction\s*\*|\/ ?20/);
+});
+
 if (process.env.NIGHTWATCH_TEST_EXPORT) {
   test("render the actual seeded SQLite export", async () => {
     const value = JSON.parse(readFileSync(process.env.NIGHTWATCH_TEST_EXPORT, "utf8"));

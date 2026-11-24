@@ -35,6 +35,16 @@
     {"trading_date": "2026-09-02", "armed": false, "state": "finished", "reason": "Hold: no entry signal", "orders": 0},
     {"trading_date": "2026-09-01", "armed": true, "state": "aborted", "reason": "Preflight failed", "orders": 0}
   ],
+  "annual_budget": {
+    "evaluated": true, "source_path": "prior_year_mean", "session_matches": true,
+    "trading_date": "2026-09-02", "evaluated_at": "2026-09-02T19:58:00Z",
+    "state_budget_year": 2025, "target_year": 2026, "history_year": 2025,
+    "sample_count": 3, "sample_mean_usd": 3000.0, "sleeve_equity_usd": 3420.77,
+    "core_fraction": 0.4, "rounding_step_usd": 20.0, "sizing_floor_usd": 10.0,
+    "order_divisor": 20.0, "budget_usd": 1200.0, "order_size_usd": 60.0, "cash_target_usd": 420.0,
+    "sampling": {"status": "recorded", "trading_date": "2026-09-02", "reason": null,
+                 "value_usd": 1234.5, "recorded_at": "2026-09-02T19:59:00Z"}
+  },
   "seed": {"status": "adopted"},
   "positions": [
     {
