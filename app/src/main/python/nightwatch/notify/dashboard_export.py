@@ -33,7 +33,14 @@ def _annual_budget(repo, session) -> dict:
     session produced it, so a session that never reached the decision cannot borrow an older
     verdict. Missing records stay "not evaluated"; nothing is inferred from empty fields.
     """
-    ev = repo.latest_budget_evaluation()
+    try:
+        ev = repo.latest_budget_evaluation()
+        sampling = repo.get_schg_sampling(session.trading_date)
+    except sqlite3.Error:
+        # A database that predates migration 013 has no evidence tables: that is "not evaluated",
+        # and it must never cost the rest of the payload.
+        return {"evaluated": False, "sampling": {"status": "not_evaluated",
+                                                  "trading_date": session.trading_date}}
     if ev is None or ev.get("source_path") not in BUDGET_PATHS:
         out = {"evaluated": False}
     else:
@@ -50,7 +57,6 @@ def _annual_budget(repo, session) -> dict:
             "budget_usd": _number(ev["budget"]), "order_size_usd": _number(ev["order_size"]),
             "cash_target_usd": _number(ev["cash_target"]),
         }
-    sampling = repo.get_schg_sampling(session.trading_date)
     if sampling is None:
         out["sampling"] = {"status": "not_evaluated", "trading_date": session.trading_date}
     else:

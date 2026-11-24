@@ -106,3 +106,16 @@ def test_export_json_carries_the_section_for_the_phone_merge(tmp_path):
     r.insert_budget_evaluation(s.id, "2026-10-01", EVAL)
     r.close()
     assert json.loads(export_json(str(home)))["annual_budget"]["budget_usd"] == 8000.0
+
+
+def test_a_database_without_the_evidence_tables_still_exports_everything_else(repo):
+    s = session(repo, "2026-10-01")
+    repo.insert_decision(__import__("nightwatch.db.repo", fromlist=["Decision"]).Decision(
+        s.id, "2026-10-01", reason="Hold", budget=1200, order_size=50))
+    repo.conn.execute("DROP TABLE budget_evaluations")
+    repo.conn.execute("DROP TABLE schg_sampling_log")
+    repo.conn.commit()
+    value = dashboard_snapshot(repo)
+    assert value["last_decision"]["budget_usd"] == 1200  # the rest of the payload survives
+    assert value["annual_budget"] == {"evaluated": False, "sampling": {
+        "status": "not_evaluated", "trading_date": "2026-10-01"}}
