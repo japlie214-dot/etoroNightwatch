@@ -8,6 +8,7 @@ class NightwatchApp : Application() {
     override fun onCreate() {
         super.onCreate()
         KeystoreCredentials.install(this)
+        TelegramPollScheduler.ensureScheduled(this)
         // Public half only, so it can be pinned on the Worker; never the private key. The event
         // log redacts long values, so the same public text is also kept in a plain file.
         Thread {

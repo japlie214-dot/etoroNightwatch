@@ -206,7 +206,7 @@ class DemoControlTest {
         fun src(n: String) = java.io.File(main, "java/com/nightwatch/etoro/probe/$n").readText()
         val bridge = src("PyBridge.kt")
         assertEquals(1, bridge.split("Kwarg(\"operator_write_authorized\"").size - 1)
-        val applyFn = bridge.substringAfter("fun applyDemoControl(").substringBefore("/** Manual adoption")
+        val applyFn = bridge.substringAfter("fun applyDemoControl(").substringBefore("T084 between-session")
         assertFalse(applyFn.contains("sessionLock"))
         assertFalse(applyFn.contains("bridgeLock"))
         assertTrue(src("NightwatchProbeMessagingService.kt").contains("command == \"demo_control\""))

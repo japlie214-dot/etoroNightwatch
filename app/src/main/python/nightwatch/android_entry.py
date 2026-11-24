@@ -116,6 +116,42 @@ def apply_demo_control(base_dir: str, request_json: str, *, device_id: str | Non
         return json.dumps(dict(status="unconfirmed", reasonCode="device_control_unavailable"))
 
 
+def poll_telegram(base_dir: str) -> str:
+    """Answer pending Telegram commands between sessions (T084). Demo home only.
+
+    Uses exactly the session-start path (``process_pending`` -> ``handle``), so sender,
+    chat and staleness checks are unchanged. Never reads the broker or trades. Holds the
+    session lock, so it cannot overlap a session (which polls for itself).
+    """
+    from .notify.poll import process_pending
+
+    envelope = dict(status="error", processed=0)
+    if Path(base_dir).name != "nightwatch_demo":
+        return json.dumps(dict(status="refused", processed=0, reason_code="wrong_home"))
+    previous_host = get_host()
+    try:
+        host = DesktopHost(Path(base_dir))
+        set_host(host)
+        config = load_config(host=host)
+        if config.environment is not EtoroEnvironment.DEMO or config.etoro.is_real_money:
+            return json.dumps(dict(status="refused", processed=0, reason_code="real_not_allowed"))
+        with _session_lock(host.data_dir() / "session.lock") as acquired:
+            if not acquired:
+                return json.dumps(dict(status="busy", processed=0, reason_code="session_locked"))
+            with ExitStack() as resources:
+                repo = Repo.open(default_db_path(host), host=host)
+                resources.callback(repo.close)
+                notifier = TelegramNotifier(config.telegram, repo, environment=config.environment.value)
+                resources.callback(notifier.close)
+                results = process_pending(notifier, repo, host, config)
+                envelope.update(status="ok", processed=len(results))
+    except Exception as exc:
+        envelope.update(status="error", error_type=type(exc).__name__)
+    finally:
+        set_host(previous_host)
+    return json.dumps(envelope)
+
+
 def _run_entry(base_dir: str, *, armed: bool, now_utc: datetime | None) -> str:
     """Return one sanitized JSON envelope. ``now_utc`` is an aware test hook only."""
     if now_utc is not None and (

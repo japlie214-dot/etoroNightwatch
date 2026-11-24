@@ -323,6 +323,28 @@ object PyBridge {
             null
         }
 
+    /**
+     * T084 between-session Telegram poll. Skips (null) when a session or any probe holds a lock:
+     * a session polls for itself, and a poll must never queue behind or ahead of one.
+     */
+    internal fun pollTelegram(context: Context, home: String): String? {
+        if (!sessionLock.tryLock()) return null
+        try {
+            if (!bridgeLock.tryLock()) return null
+            try {
+                ensureStarted(context)
+                return Python.getInstance().getModule("nightwatch.android_entry")
+                    .callAttr("poll_telegram", home).toString()
+            } catch (_: Exception) {
+                return null
+            } finally {
+                bridgeLock.unlock()
+            }
+        } finally {
+            sessionLock.unlock()
+        }
+    }
+
     /** Manual adoption only; share the session monitor to avoid changing its active host. */
     fun planAdoption(context: Context, home: String): String {
         ensureStarted(context)

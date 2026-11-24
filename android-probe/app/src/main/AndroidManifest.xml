@@ -39,6 +39,11 @@
             android:name=".SessionAlarmReceiver"
             android:exported="false" />
 
+        <!-- T084: repeating inexact alarm that answers pending Telegram commands. -->
+        <receiver
+            android:name=".TelegramPollReceiver"
+            android:exported="false" />
+
         <!-- RECEIVE_BOOT_COMPLETED: re-register the alarm and log the boot event (DESIGN §7.5). -->
         <receiver
             android:name=".BootReceiver"
