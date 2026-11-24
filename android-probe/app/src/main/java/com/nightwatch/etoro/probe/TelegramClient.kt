@@ -11,7 +11,7 @@ import java.util.concurrent.TimeUnit
 /**
  * Check 2 (task Problem 4): "the real app alerts from the device, not the laptop." Sends a real
  * Telegram message directly from the phone's own network connection using the bot token / chat
- * id baked into BuildConfig from local.properties (never hardcoded here, never logged in full).
+ * id supplied by a trusted runtime provider (never hardcoded here).
  * This also gives the user tangible proof the phone has working internet independent of the
  * Worker.
  */
@@ -24,13 +24,13 @@ object TelegramClient {
     data class Result(val success: Boolean, val httpStatus: Int?, val detail: String)
 
     fun sendMessage(text: String): Result {
-        val token = BuildConfig.TELEGRAM_BOT_TOKEN
-        val chatId = BuildConfig.TELEGRAM_CHAT_ID
-        if (token.isBlank() || chatId.isBlank()) {
+        val token = RuntimeCredentials.value(RuntimeCredentials.Key.TELEGRAM_BOT_TOKEN)
+        val chatId = RuntimeCredentials.value(RuntimeCredentials.Key.TELEGRAM_CHAT_ID)
+        if (token == null || chatId == null) {
             return Result(
                 success = false,
                 httpStatus = null,
-                detail = "TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not configured in local.properties"
+                detail = "Telegram authentication unavailable: runtime provisioning required"
             )
         }
         return try {

@@ -4,12 +4,29 @@ import android.content.Context
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
 
+// No provider is installed here: trusted, restart-safe provisioning is a release blocker.
+internal object RuntimeCredentials {
+    enum class Key { PHONE_PUSH_SECRET, COMMAND_HMAC_SECRET, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID }
+
+    fun interface Provider {
+        fun read(key: Key): String?
+    }
+
+    @Volatile
+    var provider: Provider? = null
+
+    fun value(key: Key): String? = try {
+        provider?.read(key)?.takeUnless { it.isBlank() }
+    } catch (_: Exception) {
+        null
+    }
+}
+
 /**
  * DESIGN §8.2: "HMAC-of-(command, counter), with replay rejection by counter." Mirrors
  * cloud/worker/src/commands.js's hmacCommand() exactly: HMAC-SHA256 over "<command>:<counter>",
- * hex-encoded, using the shared COMMAND_HMAC_SECRET (baked from local.properties, sourced from
- * secrets/command_hmac_secret.txt — the same file `wrangler secret put COMMAND_HMAC_SECRET` reads
- * on the Worker side). A counter at or below the last-accepted value is rejected as a replay,
+ * hex-encoded, using the shared COMMAND_HMAC_SECRET from a trusted runtime provider.
+ * A counter at or below the last-accepted value is rejected as a replay,
  * mirroring the Worker's own monotonic KV counter.
  */
 object CommandVerifier {
@@ -42,10 +59,8 @@ object CommandVerifier {
         hmacHex: String?,
         arg: String? = null,
     ): Verdict {
-        val secret = BuildConfig.COMMAND_HMAC_SECRET
-        if (secret.isBlank()) {
-            return Verdict.Rejected("COMMAND_HMAC_SECRET not configured in local.properties")
-        }
+        val secret = RuntimeCredentials.value(RuntimeCredentials.Key.COMMAND_HMAC_SECRET)
+            ?: return Verdict.Rejected("command authentication unavailable: runtime provisioning required")
         val counter = counterStr?.toLongOrNull()
             ?: return Verdict.Rejected("missing or non-numeric counter")
         if (hmacHex.isNullOrBlank()) {

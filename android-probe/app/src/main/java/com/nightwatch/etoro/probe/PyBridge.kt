@@ -59,6 +59,16 @@ object PyBridge {
         null
     }
 
+    fun dashboardSnapshot(context: Context, home: String): String? = bridgeLock.withLock {
+        try {
+            ensureStarted(context)
+            Python.getInstance().getModule("nightwatch.notify.dashboard_export")
+                .callAttr("export_json", home).toString()
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     // Separate monitor keeps probe methods usable during the wait. Python GIL/shared
     // interpreter contention remains: probes during a session may run slower.
     fun runSessionDry(context: Context, baseDir: String): String {
@@ -295,6 +305,23 @@ object PyBridge {
             }
         }
     }
+
+    /**
+     * Demo-only Refresh/Pause. Callers must have verified the dispatch HMAC first: this is the
+     * only place `operator_write_authorized=True` is ever passed. Takes neither session nor
+     * bridge lock on purpose -- a Pause must not queue behind a running session or a
+     * minutes-long probe; Python's SQLite transaction serializes it against the final submission
+     * guard. Returns null if Python could not be reached.
+     */
+    internal fun applyDemoControl(context: Context, home: String, requestJson: String, deviceId: String): String? =
+        try {
+            if (!Python.isStarted()) ensureStarted(context)
+            Python.getInstance().getModule("nightwatch.android_entry").callAttr(
+                "apply_demo_control", home, requestJson,
+                Kwarg("device_id", deviceId), Kwarg("operator_write_authorized", true)).toString()
+        } catch (_: Exception) {
+            null
+        }
 
     /** Manual adoption only; share the session monitor to avoid changing its active host. */
     fun planAdoption(context: Context, home: String): String {

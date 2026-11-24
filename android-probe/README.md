@@ -1,5 +1,22 @@
 # android-probe — etoroNightwatch minimal proof APK
 
+## T083 credential-free build slice — NOT update-ready
+
+The build no longer imports the four authentication inputs into `BuildConfig`.
+`RuntimeCredentials` (in `CommandVerifier.kt`) defines a runtime provider boundary;
+no provider is installed. Missing, blank or failed provision reads reject signed
+commands, snapshot upload, token registration and Telegram sends before transmission.
+The existing HMAC/replay checks and FCM refresh/cron dispatch are unchanged.
+There is no fallback to local files, environment variables, embedded credentials or
+unsigned-command acceptance. No readiness is implied by compilation or an FCM token.
+
+**Release blocker:** a trusted, restart-safe provisioning adapter must be designed,
+wired and verified before this can replace the installed app. A null provider is
+not a way to ship an update with disabled unattended demo operation. Do not install
+this slice. It does not prove upgrade signing, runtime delivery or device parity.
+
+The v1/v2 sections below are historical evidence, not verification of this slice.
+
 **Status: v2, build order step 4 (DESIGN.md §11), upgrading v1 already installed on the phone.**
 This is still the gate-zero artifact whose only job is to prove the Android platform behaves the
 way DESIGN.md assumes, on the real device, on battery, overnight — **it is not the real app**, no
@@ -119,29 +136,115 @@ asked for. **`cloud/` was explicitly out of scope for this build** ("Do NOT touc
 
 ## Build
 
-From this directory (`android-probe/`), with the environment set explicitly — **this session's
-processes hold a stale environment, so set these every time, do not rely on inherited state**:
+Never invoke Gradle in this workspace for a credential-free build: Gradle and its
+plugins can automatically read private local/user properties, init scripts,
+signing state and caches even when this build script does not request them.
 
-```bash
-export JAVA_HOME="C:\Users\10102721\Android\jdk-17"
-export ANDROID_HOME="C:\Users\10102721\Android\Sdk"
-export PATH="$JAVA_HOME/bin:$PATH"
+`../tools/credential_free_stage.py` provides the source staging step only. It does
+not run Gradle, fetch tooling, infer approvals, scan directories or read runtime
+values. Supply an individually reviewed **public-source-only** approval JSON,
+containing exact repository-relative paths and SHA-256 hashes of approved bytes:
 
-./gradlew assembleDebug --stacktrace
+```json
+[{"path":"android-probe/settings.gradle.kts","sha256":"<64 lowercase hex digits of reviewed bytes>"}]
 ```
 
-**Before the first build**, copy `local.properties.example` to `local.properties` and fill in:
-- `sdk.dir` — your Android SDK path.
-- `PHONE_PUSH_SECRET` — from `../secrets/phone_push_secret.txt`.
-- `COMMAND_HMAC_SECRET` — from `../secrets/command_hmac_secret.txt` (must match the Worker's
-  `COMMAND_HMAC_SECRET`, `RUNBOOK_INFRA.md` §B / `wrangler secret put COMMAND_HMAC_SECRET`).
-- `TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID` — from `../config/.secrets.env`.
+Run with an isolated Python interpreter (`-I -B`), `--root` pointing at this
+repository, `--approvals` at that approved manifest, and `--destination` at a new
+directory inside the session scratchpad, outside the repository. The tool allows
+only the three build scripts, explicitly named Kotlin/XML/Python sources, and
+`app/src/main/python/nightwatch/db/schema.sql` plus numbered SQL migrations in
+that package's `db/migrations/` directory. SQL support preserves package inputs;
+it does not approve their contents or permit arbitrary database/runtime files.
+It rejects private/configuration/generated paths, path escapes, duplicate names,
+links/junctions/hardlinks and hash changes. A hash alone is not a public-data
+classification: approval of every input's content remains mandatory.
 
-All four are injected into `BuildConfig` at build time; none is ever hardcoded into a committed
-`.kt` file, and `local.properties` is gitignored (verified below).
+No real-source approval manifest was supplied or staged in T083. The synthetic
+checks run without Gradle or pytest's project fixtures:
 
-`app/google-services.json` must be present (already copied here from `../app/google-services.json`,
-project `etoronightwatch`, package `com.nightwatch.etoro`) — also gitignored, never committed.
+```text
+python -I -B tests/test_credential_free_stage.py --scratch <absolute existing session scratchpad> -v
+```
+
+### Metadata-only preflight — no approvals or contents
+
+```text
+python -I -B C:/ClaudeHubFun/hq/repos/etoroNightwatch/tools/credential_free_stage.py --root C:/ClaudeHubFun/hq/repos/etoroNightwatch --inventory
+```
+
+This command runs only `git ls-files -z -- android-probe app/src/main/python`
+for path discovery. It does not open those paths, inspect user configuration,
+calculate hashes, read approvals, stage contents or execute a build. Inventory
+mode rejects `--approvals` and `--destination`. Its JSON includes each exact
+candidate source path, missing required groups/paths, staging-rule rejections,
+required tool versions and separate unsigned/signing/runtime gates. Tracked
+presence is not disk verification, a dependency-closure proof or public-content
+approval; untracked files and newly added untracked tests are not discovered.
+
+The T083 dry-run found these indexed candidate groups, with **no missing group,
+required anchor path or staging-rule rejection** after the SQL-path fix:
+
+| Group | Indexed paths |
+|---|---:|
+| Build definitions | 3 |
+| Android manifest | 1 |
+| Android Kotlin | 18 |
+| Android XML resources | 6 |
+| Probe Python | 14 |
+| Nightwatch Python | 49 |
+| Nightwatch SQL schema | 1 |
+| Nightwatch SQL migrations | 11 |
+| Optional indexed Kotlin tests | 8 |
+
+Before unsigned compilation, resolve these exact outstanding inputs:
+
+- Review all listed source contents individually; only then supply an approval
+  manifest with hashes. The inventory supplies neither approvals nor hashes.
+- Supply approved isolated tools: Gradle **8.11.1**, JDK **17**, Android platform
+  **36**, host Python **3.13**, AGP **8.9.0**, Kotlin plugin **2.0.21**, Chaquopy
+  **17.0.0**, Google Services plugin **4.4.2**, Firebase BOM **33.5.1**. These are
+  required versions, not installed-version attestations. Android build-tools
+  are not pinned in the reviewed definitions; approve the AGP-selected version.
+- Approve the resolved public Maven and pip dependency inputs from the build
+  scripts. `httpx==0.27.2` and `exchange_calendars==4.11.1` are pinned;
+  `tzdata`, `numpy` and `pandas` are not. Do not substitute existing caches.
+- Independently supply reviewed public Firebase build configuration. The existing
+  `android-probe/app/google-services.json` remains unread and excluded. The
+  staging tool deliberately does not provision this JSON.
+- Approve minimal clean-room AndroidX project configuration; the tracked
+  `android-probe/gradle.properties` remains unread and excluded. Do not assume
+  its contents or copy it. The staging tool does not provision properties.
+- Preserve the `android-probe/` and `app/` sibling layout for the extra Chaquopy
+  source set. Approve selection of the isolated Python interpreter instead of
+  using the historical absolute `buildPython` path unchanged.
+
+PATH lookup found Java at the documented JDK location but did not run its version;
+`kotlinc` and `gradle` were unavailable on PATH. No cache or installation search
+was performed, so the Kotlin provider tests were not executed. The isolated
+synthetic preflight/staging/source-wiring suite passed **16 tests**.
+
+Unsigned compilation needs no signing credential. Compatible external signing is
+a separate authorized operation that must preserve the installed certificate,
+package and upgrade version without exporting or inspecting private signing
+material. Restart-safe runtime provisioning and Firebase delivery are another
+separate release gate. Neither an inventory, an unsigned APK nor a renamed
+credential establishes protection or a usable replacement.
+
+**Unsigned APK build remains blocked.** A separately approved isolated Gradle
+8.11.1/JDK 17/Android SDK 36/Python 3.13 toolchain and public dependency inputs are
+required, with a fresh home, Gradle user home and project cache, no inherited
+credential/proxy/pip configuration, and no access to private source/user paths.
+The build script still names the historical host `buildPython` path; select an
+approved interpreter in the isolated build before execution. Do not reuse the
+workspace wrapper, generated files, credential-bearing caches or signing stores.
+The Google Services plugin is deliberately retained: an explicitly approved
+public Firebase configuration is also required; do not copy or read the existing
+`google-services.json`. Removing Firebase just to compile would not preserve
+unattended delivery. Build only an unsigned release in that approved isolation;
+never use debug signing or claim install compatibility from an unsigned artifact.
+No Gradle execution, APK, toolchain isolation or Firebase provisioning is verified
+by the staging tests.
 
 ### Actual v2 build result (this run)
 
@@ -444,3 +547,29 @@ v2 did not touch tzdata handling; `TzCheck.kt` and `probe/checks.py`'s `tz_check
   `TELEGRAM_CHAT_ID`) appear anywhere else.
 - **Signing is still debug-only**, unchanged from v1 — this remains a sideloaded proof artifact,
   not a release build.
+
+## Demo control (Refresh / Pause) device bridge
+
+FCM data message: `command=demo_control`, `envelope` (compact JSON: `version:1, requestId, action,
+deviceId, environment:"demo", issuedAt, deadlineAt = issuedAt + 120000`), `hmac`. The `hmac` is
+lowercase-hex HMAC-SHA256, keyed with the runtime `COMMAND_HMAC_SECRET`, over these UTF-8 lines, each
+ending in LF:
+
+```
+nightwatch.demo-control.dispatch.v1
+version=1
+requestId=<uuid>
+action=refresh_demo_broker|pause_demo_orders
+deviceId=<id>
+environment=demo
+issuedAt=<ms>
+deadlineAt=<ms>
+```
+
+Only after that check does `PyBridge.applyDemoControl` pass write authority to Python. A signed
+receipt (`POST /demo-control/ack`, RS256 bytes per `cloud/worker/README.md`) is produced only when
+Python returns `status: "applied"` with complete matching evidence. **Refresh is never receipted
+while Python returns `partial`** (open-order coverage unproved, `observedAt` null), so the cloud keeps
+showing Requested. No device identity/signing key is provisioned yet: until
+`DemoControlIdentity.identity` and the runtime secret exist, nothing is applied or acknowledged.
+Not installed or exercised on Z10.

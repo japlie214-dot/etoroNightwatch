@@ -185,6 +185,11 @@ class WakeService : Service() {
                     } finally {
                         sessionRunning.set(false)
                     }
+                    try {
+                        SnapshotPusher.pushNow(this, checkResults)
+                    } catch (e: Exception) {
+                        store.log("SNAPSHOT_PUSH_FAILED", "error=${e.javaClass.simpleName}")
+                    }
                 }
             }
             store.log("WAKE_END", "trigger=$trigger wake_lock_held_ms=${System.currentTimeMillis() - acquiredAt}")

@@ -124,6 +124,20 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
             return
         }
 
+        if (command == "demo_control") {
+            // Its own HMAC (over the canonical envelope, not a counter) is checked in the handler.
+            store.log("DEMO_CONTROL_RECEIVED", messageDetail(data))
+            scope.launch {
+                val outcome = try {
+                    DemoControlHandler.handle(data, AndroidDemoControlDeps(this@NightwatchProbeMessagingService))
+                } catch (e: Exception) {
+                    DemoControlOutcome.Unreceipted("error=${e.javaClass.simpleName}")
+                }
+                store.log("DEMO_CONTROL_OUTCOME", outcome.label)
+            }
+            return
+        }
+
         val verdict = CommandVerifier.verify(this, command, counter, hmac, arg)
         when (verdict) {
             is CommandVerifier.Verdict.Accepted -> {
@@ -153,14 +167,18 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
         TokenHolder.set(token)
 
         // POST the token to the Worker's /device-token endpoint so real pushes can be sent.
-        // PHONE_PUSH_SECRET comes from BuildConfig, injected from local.properties (gitignored)
-        // at build time — never hardcoded here.
+        // Registration requires a trusted runtime credential provider.
         scope.launch {
             postTokenToWorker(token, store)
         }
     }
 
     private fun postTokenToWorker(token: String, store: EventStore) {
+        val secret = RuntimeCredentials.value(RuntimeCredentials.Key.PHONE_PUSH_SECRET)
+        if (secret == null) {
+            store.log("FCM_TOKEN_POST_FAILED", "registration authentication unavailable: runtime provisioning required")
+            return
+        }
         try {
             val body = JSONObject().apply {
                 put("token", token)
@@ -170,7 +188,7 @@ class NightwatchProbeMessagingService : FirebaseMessagingService() {
 
             val request = Request.Builder()
                 .url("${BuildConfig.WORKER_BASE_URL}/device-token")
-                .header("x-phone-push-secret", BuildConfig.PHONE_PUSH_SECRET)
+                .header("x-phone-push-secret", secret)
                 .post(body)
                 .build()
 

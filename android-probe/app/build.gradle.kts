@@ -1,6 +1,3 @@
-import java.io.FileInputStream
-import java.util.Properties
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -8,17 +5,7 @@ plugins {
     id("com.google.gms.google-services")
 }
 
-// local.properties is gitignored — holds the Android SDK path and PHONE_PUSH_SECRET.
-// See local.properties.example / README.md for what must be filled in before building.
-val localProps = Properties()
-val localPropsFile = rootProject.file("local.properties")
-if (localPropsFile.exists()) {
-    localProps.load(FileInputStream(localPropsFile))
-}
-val phonePushSecret: String = localProps.getProperty("PHONE_PUSH_SECRET", "")
-val commandHmacSecret: String = localProps.getProperty("COMMAND_HMAC_SECRET", "")
-val telegramBotToken: String = localProps.getProperty("TELEGRAM_BOT_TOKEN", "")
-val telegramChatId: String = localProps.getProperty("TELEGRAM_CHAT_ID", "")
+// Authentication requires a trusted runtime provider; no credentials belong in BuildConfig.
 
 android {
     namespace = "com.nightwatch.etoro.probe"
@@ -51,10 +38,6 @@ android {
             "WORKER_BASE_URL",
             "\"https://etoro-nightwatch-worker.japlie214.workers.dev\""
         )
-        buildConfigField("String", "PHONE_PUSH_SECRET", "\"$phonePushSecret\"")
-        buildConfigField("String", "COMMAND_HMAC_SECRET", "\"$commandHmacSecret\"")
-        buildConfigField("String", "TELEGRAM_BOT_TOKEN", "\"$telegramBotToken\"")
-        buildConfigField("String", "TELEGRAM_CHAT_ID", "\"$telegramChatId\"")
     }
 
     signingConfigs {
@@ -158,6 +141,7 @@ chaquopy {
 
 dependencies {
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20160810") // JVM runtime; android.jar's org.json is stubbed
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("com.google.android.material:material:1.12.0")
