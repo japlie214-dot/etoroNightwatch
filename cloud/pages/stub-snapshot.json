@@ -9,11 +9,10 @@
     "broker_available_cash_usd": 2210.00
   },
   "sleeve": {
-    "cash_allocation_usd": 2000.00,
+    "cash_reserve_usd": 2000.00,
     "sleeve_cash_usd": 1180.32,
     "sleeve_equity_usd": 3420.77,
     "sleeve_unrealized_pnl_usd": 245.11,
-    "sleeve_realized_pnl_usd": 88.40,
     "budget_usd": 1200.00,
     "order_size_usd": 20.00,
     "cash_target_usd": 160.00,
@@ -22,6 +21,21 @@
     "spy_drawdown": -0.08,
     "tier": 0
   },
+  "last_session": {
+    "trading_date": "2026-09-02", "state": "finished", "armed": false,
+    "preflight": "passed", "failed_gate": null, "next_run_at": "2026-09-03T19:30:00Z",
+    "snapshot_taken_at": "2026-09-02T19:59:00Z", "snapshot_complete": true,
+    "omitted_managed_positions": 0
+  },
+  "last_decision": {
+    "reason": "Hold: no entry signal", "intents": 0, "cone_z": -1.42,
+    "spy_drawdown": -0.08, "tier": 0, "budget_usd": 1200, "order_size_usd": 20
+  },
+  "recent_sessions": [
+    {"trading_date": "2026-09-02", "armed": false, "state": "finished", "reason": "Hold: no entry signal", "orders": 0},
+    {"trading_date": "2026-09-01", "armed": true, "state": "aborted", "reason": "Preflight failed", "orders": 0}
+  ],
+  "seed": {"status": "adopted"},
   "positions": [
     {
       "symbol": "UPRO",

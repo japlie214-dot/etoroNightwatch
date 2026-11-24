@@ -81,6 +81,41 @@ def run_session_armed_demo(base_dir: str, *, now_utc: datetime | None = None) ->
     return _run_entry(base_dir, armed=True, now_utc=now_utc)
 
 
+def apply_demo_control(base_dir: str, request_json: str, *, device_id: str | None = None,
+                       operator_write_authorized: bool = False) -> str:
+    """Bridge seam only: authentication must come from a verified device adapter.
+
+    No generic FCM/Telegram command is wired here. Unauthenticated calls cannot
+    load configuration, read the broker, or set pause. Runtime keys stay on device.
+    """
+    from .engine.demo_control import handle_demo_control
+
+    if operator_write_authorized is not True or not isinstance(device_id, str) or not device_id.strip():
+        return json.dumps(dict(status="refused", reasonCode="write_authority_required"))
+    if Path(base_dir).name != "nightwatch_demo":
+        return json.dumps(dict(status="refused", reasonCode="wrong_home"))
+    try:
+        request = json.loads(request_json)
+        if not isinstance(request, dict) or request.get("action") not in {
+            "refresh_demo_broker", "pause_demo_orders"
+        } or request.get("environment") != "demo" or request.get("deviceId") != device_id:
+            return json.dumps(dict(status="refused", reasonCode="invalid_demo_request"))
+        host = DesktopHost(Path(base_dir))
+        config = load_config(host=host)
+        if config.environment is not EtoroEnvironment.DEMO or config.etoro.is_real_money:
+            return json.dumps(dict(status="refused", reasonCode="real_not_allowed"))
+        if request["action"] == "refresh_demo_broker":
+            with EtoroClient(config.etoro, role="read", host=host) as client:
+                result = handle_demo_control(request, host=host, device_id=device_id,
+                                             operator_write_authorized=True, broker=client)
+        else:
+            result = handle_demo_control(request, host=host, device_id=device_id,
+                                         operator_write_authorized=True)
+        return json.dumps(result)
+    except Exception:
+        return json.dumps(dict(status="unconfirmed", reasonCode="device_control_unavailable"))
+
+
 def _run_entry(base_dir: str, *, armed: bool, now_utc: datetime | None) -> str:
     """Return one sanitized JSON envelope. ``now_utc`` is an aware test hook only."""
     if now_utc is not None and (

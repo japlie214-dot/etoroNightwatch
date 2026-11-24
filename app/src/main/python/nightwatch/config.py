@@ -346,6 +346,7 @@ class TelegramConfig:
     poll_interval_seconds: int = 3600
     send_heartbeat: bool = True
     timeout_seconds: float = 15.0
+    dashboard_url: str | None = None
     secrets: Mapping[str, str] = field(default_factory=dict, repr=False)
 
     @property
@@ -859,6 +860,7 @@ def load_config(
         poll_interval_seconds=int(tg.get("poll_interval_seconds", 3600)),
         send_heartbeat=bool(tg.get("send_heartbeat", True)),
         timeout_seconds=float(tg.get("timeout_seconds", 15.0)),
+        dashboard_url=tg.get("dashboard_url"),
         secrets=secrets,
     )
 

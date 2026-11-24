@@ -6,6 +6,91 @@ page) and §4.5 (sleeve accounting). The user-facing setup walkthrough (creating
 project, setting secrets, enabling Cloudflare Access) lives in `doc/RUNBOOK_INFRA.md` Part F —
 this file is developer-focused only and does not repeat that.
 
+## T083 local protected demo controls — not deployed
+
+This source supersedes T081's unchanged-Functions/no-controls inventory below. The
+public asset inventory is still five files; `app.js` and `index.html` now expose only
+read-only demo broker reconciliation and pause-new-demo-orders requests, not legacy
+stored-upload refresh. Server status is loaded again on reopen or explicit reload.
+Send acceptance is not device application; expiry is not proof of non-execution.
+
+New `functions/_middleware.js` fails closed for every asset, alias and API until a
+trusted `DEMO_CONTROL_AUTH` service binding verifies visitor credentials/ACL and returns
+an explicit operator read or write grant. An arbitrary identity header is not a grant.
+All protected responses disable caching. This is local source, not Access attestation.
+
+New `functions/api/demo-control.js` uses only a `DEMO_CONTROL_WORKER` service binding;
+it never injects `WEB_READ_TOKEN` or accepts an arbitrary upstream route. It preserves
+visitor credentials for independent Worker authorization. POST requires same-origin
+Origin/Fetch Metadata and JSON. The Worker's `DEMO_CONTROL_ORIGIN` must match this
+protected Pages origin. No device acknowledgment route is exposed through Pages.
+
+The exact verifier/dispatch bindings, envelope and device obligations are documented
+in `../worker/README.md`, section T083. No configuration, authentication deployment,
+transport, device or broker change is made here. Missing bindings explicitly disable
+controls (or return protected-monitor unavailable); do not deploy this source assuming
+existing snapshot credentials are sufficient. Retain the separate anonymous-denial,
+verified APK and observed device-round-trip release gates.
+
+## T081 local release candidate — private demo only
+
+This is release preparation, not a deployment or current Access attestation.
+Use the protected site's root `/` as the single Telegram `/dashboard` landing:
+
+- `/` (`public/index.html`, `style.css`, `app.js`, `staleness.js`) is the existing
+  live-source snapshot monitor. It reads the latest stored `/api/snapshot` response,
+  not a streaming feed. Environment (DEMO / REAL / UNKNOWN), ARMED / DRY, cloud
+  receipt time and portfolio source freshness remain separate. A response explicitly
+  marked `stub: true` is labeled **API FIXTURE**, never live evidence. Missing/error
+  responses do not fall back to synthetic values.
+- `/station.html` is the approved standalone synthetic Market station design.
+  The always-visible mode banner and return link distinguish it from the monitor;
+  charts, capital map, receipts, example orders and optional what-if lab are fictional.
+  Its scripts/data, bundled Lightweight Charts 4.2.3 and embedded Apache 2.0 license
+  are retained unchanged. No CDN or API dependency is added. Its resource policy
+  denies network connections; the existing TradingView attribution links remain.
+- Both views link prominently to each other without JavaScript. Station values are
+  never imported into the monitor or uploaded to the Worker. `stub-snapshot.json`
+  stays outside `public/`; it is test input, not a served asset or rollout payload.
+- Release static contents are exactly those five files in `public/`. Keep the existing
+  three Pages Functions (`functions/api/snapshot.js`, `functions/api/refresh.js`,
+  `functions/_shared/proxy.js`) in the Pages project unchanged. This is not a new
+  route, backend, remote-pause control or Telegram polling implementation.
+
+Safe, dependency-free local check (from this directory):
+
+```sh
+node --test test/dashboard.node-check.mjs
+```
+
+This exercises rendering against mocked responses, legacy/missing/incomplete snapshots,
+fixture labeling, view links, the static asset inventory and station script syntax.
+It does not execute chart interactions in a browser or verify deployed protection.
+The separate Vitest suite requires its already-installed dependencies; do not install
+packages or run Wrangler as part of this offline release-prep check.
+
+### Deployment gates (for the separately authorized rollout)
+
+- Deploy from this Pages directory with `public/` as static output and the existing
+  sibling `functions/` included. A static-only upload omits the protected proxy.
+  Never publish the repository root, scratch source, tests, stub or local secret files.
+- Verify present-day anonymous denial for `/`, `/station.html` (including Pages'
+  extensionless `/station` alias) and `/api/snapshot`, including any alternate hostname
+  or preview URL being shared, before sending any demo data. The Worker read token
+  alone is not visitor authentication. If protection is missing, stop; this candidate
+  neither changes authentication nor authorizes an authentication change.
+- Verify authorized synthetic rendering without overwriting the live snapshot.
+  Then reconcile the approved demo-only unattended post-session upload and Telegram
+  `/dashboard` reply against the same Z10 session. Source time, completeness and
+  execution mode must be checked, not inferred from a recent cloud receipt.
+- Telegram's configured address must be the protected absolute HTTPS root URL, with
+  no embedded credentials, controls/whitespace, query or fragment. Do not put a token
+  in the link. Bot settings and phone configuration are not changed here. Replies can
+  be delayed until the phone's next eligible session; no faster polling is added.
+- Real-account data, secret/config changes, APK build/install, device access and live
+  API calls are not part of this local candidate. The historical commands below are
+  background developer documentation, not steps executed or authorization to run them.
+
 ## Why a Function, not a purely static page
 
 `GET /snapshot` and `POST /refresh` on the Worker both require the `x-web-read-token` header. A
@@ -33,7 +118,8 @@ cloud/pages/
                       (Pages ignores `_`-prefixed paths for routing, so this is never itself
                       a reachable route)
   public/            static assets served as-is, no build step
-    index.html
+    index.html       Telegram landing / live-source stored snapshot monitor
+    station.html     disconnected synthetic Market station, self-contained
     style.css
     app.js           renders the dashboard from /api/snapshot; calls /api/refresh
     staleness.js     pure staleness-classification function, imported by app.js AND by tests

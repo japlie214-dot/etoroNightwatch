@@ -26,8 +26,10 @@ a config value can be wrong in a way no amount of local type-checking catches.
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 import logging
 import math
+import sqlite3
 import time
 from dataclasses import dataclass
 from functools import wraps
@@ -37,6 +39,8 @@ import httpx
 
 from ..config import Credentials, EtoroConfig
 from ..db.repo import Instrument, Repo
+from ..engine.demo_control import DemoSubmissionPaused, demo_submission_guard
+from ..host import Host, get_host
 from .contracts import ContractReport, check_payload
 from . import auth
 from .errors import (
@@ -172,6 +176,7 @@ class EtoroClient:
         config: EtoroConfig,
         *,
         role: str = "write",
+        host: Host | None = None,
         transport: httpx.BaseTransport | None = None,
         client: httpx.Client | None = None,
         repo: Repo | None = None,
@@ -187,6 +192,7 @@ class EtoroClient:
             raise ValueError(f"role must be 'write' or 'read', got {role!r}")
         self._config = config
         self._role = role
+        self._submission_host = host or get_host()
         # Structural safety: the ONLY way this object ever gets credentials is
         # by asking `config` for them, which derives the pair from
         # `config.environment`. There is no constructor parameter through
@@ -252,6 +258,10 @@ class EtoroClient:
     @property
     def is_demo(self) -> bool:
         return self._config.environment.value == "demo"
+
+    @property
+    def read_only(self) -> bool:
+        return self._role == "read"
 
     # -- core transport --------------------------------------------------------
 
@@ -341,6 +351,8 @@ class EtoroClient:
         order, so retrying could duplicate it. Every other 4xx is also raised
         immediately.
         """
+        if request_class == "write" and self.read_only:
+            raise EtoroValidationError("tool refused broker write: read-only client")
         if request_class == "write":
             self.last_write_request_body = json_body
             self.last_write_response_body = None
@@ -357,10 +369,19 @@ class EtoroClient:
             headers = auth.build_headers(self._credentials, request_id)
             self._check_deadline()
             response = None
+            guarded = self.is_demo and request_class == "write" and method == "POST"
             try:
-                response = self._http.request(
-                    method, path, params=params, json=json_body, headers=headers
-                )
+                guard = demo_submission_guard(self._submission_host) if guarded else nullcontext()
+                with guard:
+                    # Capacity waits and preparation must precede this final admission.
+                    self._check_deadline()
+                    response = self._http.request(
+                        method, path, params=params, json=json_body, headers=headers
+                    )
+            except (DemoSubmissionPaused, OSError, sqlite3.Error):
+                if not guarded:
+                    raise
+                last_error = EtoroValidationError("tool refused demo submission: pause, HALT, or guard storage unavailable")
             except httpx.TimeoutException:
                 last_error = EtoroTimeoutError(f"timed out calling {path} endpoint={endpoint}")
             except httpx.RequestError:

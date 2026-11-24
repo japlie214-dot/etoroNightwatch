@@ -8,6 +8,155 @@ trigger), and §8 (Telegram / FCM inbound). The user-facing setup walkthrough
 dashboard, etc.) lives in `doc/RUNBOOK_INFRA.md` — this file is
 developer-focused only and does not repeat that.
 
+## T083 local control boundary — unavailable until separately wired
+
+This source adds `GET/POST /demo-control` and device-only `POST /demo-control/ack`.
+It does not configure or deploy any binding, verifier or device transport. Historical
+legacy `/refresh`, `/command` and snapshot routes below are unchanged and are not this
+control protocol. A snapshot reader credential grants no authority on these new routes.
+
+Required integration boundaries (configuration changes need separate approval):
+
+- `DEMO_CONTROL_STORE`: dedicated Durable Object namespace exporting `DemoControlStore`
+  from `src/index.js`, with its own migration/storage. All callers use the same
+  `demo-control-v1` object. Never substitute eventually consistent snapshot KV.
+- `DEMO_CONTROL_AUTH`: trusted service binding whose `fetch(Request)` verifies the
+  original credentials, issuer/audience, expiry and operator ACL or device identity.
+  It returns 401/403 for denied credentials, non-2xx for unavailable verification,
+  or JSON containing server-owned `deviceId`, `environment: "demo"`, `capabilities`
+  (the supported actions), and explicit `operatorReadAuthorized` and
+  `operatorWriteAuthorized` booleans. Never derive these from caller identity headers,
+  snapshot credentials, capability claims or receipt JSON flags.
+- For `/demo-control/ack`, AUTH must verify the **v1 canonical receipt signature**, bind all
+  evidence to that identity/execution, and return `proof` with `authenticated: true`,
+  matching `deviceId` and `environment: "demo"`, signed `issuedAt`/`deadlineAt`, plus verified
+  action-specific evidence below. Merely authenticating a phone session is not evidence
+  verification. The inactive cryptographic adapter and exact Kotlin contract are below.
+- `DEMO_CONTROL_DISPATCH`: trusted service binding accepting only POST `/dispatch`
+  with the version-1 JSON envelope below. It must authenticate/sign the complete
+  envelope for the designated demo-capable device, not forward a generic command.
+  A 2xx means transport acceptance only. Non-2xx is `send_failed`; transport exceptions
+  or a crash leave `unconfirmed`. Neither establishes non-execution.
+- `DEMO_CONTROL_ORIGIN`: exact protected Pages HTTPS origin, without trailing slash.
+  Operator writes require that Origin, `Sec-Fetch-Site: same-origin` and JSON. Device
+  acknowledgments instead require the independently verified signed device proof.
+
+Browser POST body (no caller timestamps/authority/extra fields):
+
+```json
+{"requestId":"12345678-1234-4234-8234-123456789abc","action":"refresh_demo_broker","deviceId":"synthetic-device","environment":"demo"}
+```
+
+Dispatch envelope (timestamps are integer Unix milliseconds, deadline = issue + 120000):
+
+```json
+{"version":1,"requestId":"12345678-1234-4234-8234-123456789abc","action":"refresh_demo_broker","deviceId":"synthetic-device","environment":"demo","issuedAt":1000000,"deadlineAt":1120000}
+```
+
+Device acknowledgment JSON carries the same requestId/action/deviceId/environment and
+`executedAt`. Refresh additionally carries signed `brokerObservation` evidence:
+`{observedAt, account:true, positions:true, openOrders:true}`; observation must be strictly
+post-issue and no later than execution. Pause uses `action: "pause_demo_orders"` with
+signed `pausePersisted:true` and `finalSubmissionGuard:true` evidence. AUTH, not the
+payload, supplies the verified proof to the reducer. No raw broker records are stored.
+
+Device bridge must persist UUID replay protection across restart **before effects**,
+verify demo mode/capability and deadline before execution, perform refresh through
+read-only reconciliation (never strategy execution), and persist pause at the actual
+final new-order guard. Execution at/after deadline is rejected; a timely execution may
+be reported later. No resume, order submission, cancellation or position closing exists
+in this protocol. Z10 restart/guard proof and a correlated demo round trip remain release gates.
+
+UUID reservations and accepted receipts are atomic and permanent. A crash between
+reservation and dispatch deliberately does not auto-resend. Status reads derive
+`pending`, `expired_unconfirmed` or immutable `applied` separately from delivery.
+`GET /demo-control` returns latest records per action for the authorized device;
+`?requestId=<UUID>` retrieves an older record with the same device authorization.
+Missing verification, storage or transport is explicit unavailability, never applied state.
+
+### Device receipt cryptographic adapter v1 — inactive
+
+`src/demo-control-device-verifier.js` exports:
+
+- `deviceReceiptSigningBytes(payload)` for the canonical unsigned payload;
+- `verifyDeviceReceipt(envelope, { pins, now })` for verification and reducer-compatible
+  device proof (integer server milliseconds for `now`);
+- `createDeviceReceiptVerifier({ pins, now: () => serverMilliseconds })`, an AUTH-compatible
+  `fetch(Request)` adapter restricted to POST `/demo-control/ack`. It grants neither
+  operator read nor write authority. Compose it with independent operator authentication;
+  it is not a new deployed endpoint and is not activated by importing this module.
+
+`pins` is a **server-owned Map**, indexed by keyId. Each pin must contain a public Web
+Crypto `CryptoKey` in `publicKey`, the bound `deviceId`, `environment: "demo"`, an explicit
+supported-action `capabilities` array, and `revoked: false`. No pin/key/certificate is
+accepted from the receipt. The key must be RSA at least 2048 bits, algorithm
+`RSASSA-PKCS1-v1_5` with SHA-256, with verify usage. Private CryptoKeys are rejected.
+Provisioning/import of an approved public SPKI key and composing the auth service remain
+separately authorized integration work. No real pin, key, secret file or binding is read,
+created or configured here. Pins are checked each call and again after verification to
+reject an in-flight revocation/replacement.
+
+For Kotlin use `Signature.getInstance("SHA256withRSA")`: PKCS#1 v1.5, **not RSA-PSS**.
+Sign the following exact UTF-8 bytes, using ASCII LF (`0x0a`) after **every** line,
+including the final line; no CR, BOM, spaces or blank lines:
+
+```text
+nightwatch.demo-control.receipt.v1
+alg=RS256
+keyId=synthetic-pin-v1
+requestId=12345678-1234-4234-8234-123456789abc
+action=refresh_demo_broker
+deviceId=synthetic-device
+environment=demo
+issuedAt=1000000
+deadlineAt=1120000
+executedAt=1001000
+observedAt=1000500
+account=true
+positions=true
+openOrders=true
+```
+
+For pause, replace the action line with `action=pause_demo_orders` and replace the four
+refresh-evidence lines with exactly `pausePersisted=true` then
+`finalSubmissionGuard=true`, again with a final LF. Evidence booleans are literal
+lowercase `true`/`false`, not `1`/`0`; a correctly signed false/partial claim still cannot
+establish an applied transition. Field order is fixed in **signing bytes**, independent
+of JSON property order. Domain/version and fixed algorithm are part of the signed bytes.
+
+HTTP envelope example (signature placeholder, not a usable fixture):
+
+```json
+{"version":1,"keyId":"synthetic-pin-v1","requestId":"12345678-1234-4234-8234-123456789abc","action":"refresh_demo_broker","deviceId":"synthetic-device","environment":"demo","issuedAt":1000000,"deadlineAt":1120000,"executedAt":1001000,"brokerObservation":{"observedAt":1000500,"account":true,"positions":true,"openOrders":true},"signature":"<unpadded-base64url-signature>"}
+```
+
+The signature is unpadded base64url (`A-Z a-z 0-9 - _`), with no wrapping. HTTP body must
+be compact UTF-8 JSON: no whitespace, BOM, duplicate/escaped field aliases, alternate
+number encodings or trailing bytes. Property order may vary. The adapter requires JSON
+content type and enforces the existing 8192-byte body limit before parsing/verification.
+Only the exact shown top-level fields and exact action-specific evidence fields are
+recognized; pause uses its two top-level boolean evidence fields, not brokerObservation.
+No `alg`, publicKey, receivedAt, raw broker data or authority claims are accepted.
+UUIDs must be lowercase. keyId/deviceId are 1–128 ASCII characters from
+`A-Z a-z 0-9 . _ : -`. Timestamps are nonnegative safe integer decimal milliseconds,
+not strings, fractional/exponential values or negative zero, and must leave room for
+the 120000-ms deadline arithmetic.
+
+**Issue time is server authority.** The device echoes the issuedAt/deadlineAt it received;
+it does not choose them. After signature verification, `DemoControlStore` atomically
+compares proof.issuedAt and proof.deadlineAt with its stored server-created request.
+Even a valid device signature over a shifted deadline is rejected there. Execution must
+be within that original window, refresh observation must be strictly post-issue and no
+later than execution, and future device times are rejected against the server clock.
+Timely execution can still be reported after expiry. Cloud receivedAt is created only by
+the server and never accepted as a signed device field.
+
+Synthetic test keys are generated in memory only. From repository root:
+
+```sh
+node --test cloud/worker/test/demo-control-device-verifier.node.mjs
+```
+
 ## Layout
 
 ```

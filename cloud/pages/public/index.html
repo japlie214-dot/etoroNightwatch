@@ -13,16 +13,40 @@
   </header>
 
   <main>
+    <section class="panel landing" aria-labelledby="monitor-heading">
+      <p id="source-mode" class="mode-label" role="status">SOURCE NOT LOADED</p>
+      <h2 id="monitor-heading">Snapshot monitor</h2>
+      <p>Latest stored upload, not a streaming feed. Check the environment, execution mode,
+         portfolio source time and completeness below before interpreting any figures.</p>
+      <p class="hint">Private demo rollout only. Cloud receipt freshness is not device health or proof of a broker fill.</p>
+      <nav aria-label="Dashboard views">
+        <a class="view-link" href="/station.html">Open synthetic station</a>
+      </nav>
+      <p class="hint">The station is a separate, disconnected design demo with fictional data.
+         Its charts and what-if examples never populate this monitor.</p>
+    </section>
+    <noscript><p class="panel">JavaScript is required to load the snapshot. The synthetic station link remains available above.</p></noscript>
     <section id="asof-row" class="asof-row">
       <span id="asof-dot" class="dot dot-none"></span>
       <span id="asof-text">Loading&hellip;</span>
-      <button id="refresh-btn" type="button">Refresh</button>
+      <button id="refresh-btn" type="button" disabled>Check demo broker (read only)</button>
       <span id="refresh-status" class="refresh-status" role="status" aria-live="polite"></span>
     </section>
 
+    <section class="panel" aria-labelledby="control-heading">
+      <h2 id="control-heading">Demo controls</h2>
+      <button id="pause-demo-btn" type="button" disabled>Pause new demo orders</button>
+      <button id="control-reload-btn" type="button">Reload control status</button>
+      <p id="control-status" role="status" aria-live="polite">Demo control unavailable until verified.</p>
+      <ul id="control-records"></ul>
+      <p class="hint">Requests expire after 120 seconds. Pending, send failure or expired/unconfirmed
+        does not prove non-execution. Pause does not cancel open or in-flight orders, close positions
+        or resume trading. Broker observation time is separate from cloud receipt time.</p>
+    </section>
+
     <section id="empty-state" class="panel" hidden>
-      <p>No snapshot has been pushed yet. The phone pushes one after every session, or on
-         demand via the Refresh button above.</p>
+      <p>No snapshot has been pushed yet. The phone uploads after sessions. The demo broker
+         check above requires a separately authenticated device receipt; it is not a stored-upload refresh.</p>
     </section>
 
     <section id="error-state" class="panel panel-error" hidden>
@@ -30,6 +54,24 @@
     </section>
 
     <div id="data" hidden>
+      <section class="panel" aria-labelledby="last-session-heading">
+        <h2 id="last-session-heading">Last session</h2>
+        <p id="session-empty" class="hint">No sessions yet</p>
+        <dl class="kv">
+          <dt>Trading date</dt><dd id="session-date">&mdash;</dd>
+          <dt>Environment</dt><dd id="session-environment">&mdash;</dd>
+          <dt>Execution</dt><dd id="session-armed">&mdash;</dd>
+          <dt>State</dt><dd id="session-state">&mdash;</dd>
+          <dt>Preflight / failed gate</dt><dd id="session-preflight">&mdash;</dd>
+          <dt>Decision reason</dt><dd id="session-reason">&mdash;</dd>
+          <dt>Intents</dt><dd id="session-intents">&mdash;</dd>
+          <dt>Seed status</dt><dd id="session-seed">&mdash;</dd>
+          <dt>Portfolio source time</dt><dd id="session-source">Unknown</dd>
+          <dt>Portfolio completeness</dt><dd id="session-complete">Unknown</dd>
+          <dt>Omitted managed positions</dt><dd id="session-omitted">&mdash;</dd>
+        </dl>
+        <p class="hint source-note">Cloud receipt time does not establish portfolio source freshness.</p>
+      </section>
       <section class="panel-group">
         <div class="panel">
           <h2>Account</h2>
@@ -45,7 +87,7 @@
           <h2>etoroNightwatch sleeve</h2>
           <p class="hint">Only the slice of the account this app manages (DESIGN §4.5).</p>
           <dl class="kv">
-            <dt>Cash allocation</dt><dd id="sleeve-alloc">&mdash;</dd>
+            <dt>Cash reserve</dt><dd id="sleeve-alloc">&mdash;</dd>
             <dt>Sleeve cash</dt><dd id="sleeve-cash">&mdash;</dd>
             <dt>Sleeve equity</dt><dd id="sleeve-equity">&mdash;</dd>
             <dt>Unrealized P&amp;L</dt><dd id="sleeve-upnl">&mdash;</dd>
@@ -71,6 +113,15 @@
               </tr>
             </thead>
             <tbody id="positions-body"></tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel" aria-labelledby="recent-sessions-heading">
+        <h2 id="recent-sessions-heading">Recent sessions</h2>
+        <div class="table-scroll" tabindex="0" role="region" aria-label="Recent sessions table">
+          <table>
+            <thead><tr><th>Date</th><th>Execution</th><th>State</th><th>Decision reason</th><th>Orders</th></tr></thead>
+            <tbody id="sessions-body"></tbody>
           </table>
         </div>
       </section>

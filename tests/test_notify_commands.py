@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import pytest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
 from nightwatch.config import Config, EtoroConfig, EtoroEnvironment, RiskConfig
 from nightwatch.config import StrategyConfig, SymbolConfig, TelegramConfig, TradingMode
@@ -358,3 +360,72 @@ def test_help_reply_lists_every_supported_command(repo: Repo, host: DesktopHost)
     assert result.accepted
     for command in SUPPORTED_COMMANDS:
         assert f"/{command}" in (result.reply or "")
+
+
+@pytest.mark.parametrize("url", ["", "http://example.test", "https://",
+    "https:///path", "https://user:pass@example.test", "https://user@example.test",
+    "https://example.test?token=private", "https://example.test#fragment",
+    "https://example.test?", "https://example.test#", "https://example.test\n/path",
+    "https://example.test/%0a", "https://example.test:bad", "https://[broken",
+    "//example.test", "https://example.test:0", 42])
+def test_dashboard_unconfigured_or_invalid(repo, host, url):
+    config = _config()
+    config = replace(config, telegram=replace(config.telegram, dashboard_url=url))
+    result = _send(repo, host, config, "/dashboard", counter=1)
+    assert result.accepted
+    assert result.reply == "Dashboard address is not configured."
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize("character", [chr(code) for code in range(0x80, 0xA0)] + [
+    "\x00", "\t", "\n", "\r", "\x1f", "\x7f", " ", " ", " ",
+    " ", " ", " ", " ", " ", "　",
+])
+def test_dashboard_rejects_controls_and_whitespace_via_authorized_command(repo, host, character, encoded):
+    value = quote(character, safe="") if encoded else character
+    config = _config()
+    config = replace(config, telegram=replace(config.telegram,
+                     dashboard_url=f"https://example.test/{value}dashboard"))
+    result = _send(repo, host, config, "/dashboard", counter=1)
+    assert result.accepted
+    assert result.reply == "Dashboard address is not configured."
+
+
+@pytest.mark.parametrize("url", [None, "https://example.test/dashboard"])
+def test_dashboard_authorized_link_and_unauthorized_silence(repo, host, url):
+    config = _config()
+    config = replace(config, telegram=replace(config.telegram, dashboard_url=url))
+    authorized = _send(repo, host, config, "/dashboard", counter=1)
+    assert authorized.accepted
+    expected_url = url if url is not None else "https://etoro-nightwatch-pages.pages.dev/"
+    assert authorized.reply == f"Dashboard: {expected_url}"
+    rejected = _send(repo, host, config, "/dashboard", counter=2, chat_id="other")
+    assert not rejected.accepted and rejected.command.reason == "unauthorized"
+    assert rejected.reply is None
+    fcm = _send(repo, host, config, "/dashboard", counter=3, channel="fcm")
+    assert not fcm.accepted and fcm.command.reason == "unknown_command"
+
+
+@pytest.mark.parametrize("mode", list(TradingMode))
+@pytest.mark.parametrize("environment", list(EtoroEnvironment) + [None])
+def test_dashboard_fallback_requires_explicit_demo_environment(repo, host, mode, environment):
+    config = _config()
+    config = replace(config, mode=mode, arm_flag_present=True,
+                     etoro=replace(config.etoro, environment=environment))
+    result = _send(repo, host, config, "/dashboard", counter=1)
+    assert result.accepted
+    assert result.reply == (
+        "Dashboard: https://etoro-nightwatch-pages.pages.dev/"
+        if environment is EtoroEnvironment.DEMO
+        else "Dashboard address is not configured."
+    )
+
+
+def test_dashboard_setting_loaded_only_from_telegram(config_path, secrets_path, host):
+    from nightwatch.config import load_config
+
+    assert load_config(config_path, secrets_path, host=host, env={}).telegram.dashboard_url is None
+    config_path.write_text(config_path.read_text().replace("[telegram]",
+        '[telegram]\ndashboard_url = "https://example.test/dashboard"'), encoding="utf-8")
+    assert load_config(config_path, secrets_path, host=host, env={}).telegram.dashboard_url == (
+        "https://example.test/dashboard")

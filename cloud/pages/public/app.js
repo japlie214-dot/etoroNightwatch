@@ -57,6 +57,9 @@ function isManaged(position) {
 }
 
 function renderEnvBadge(snapshot) {
+  document.getElementById("source-mode").textContent = snapshot?.stub === true
+    ? "API FIXTURE · not live evidence"
+    : snapshot ? "LIVE SOURCE · stored snapshot" : "NO SNAPSHOT · source unavailable";
   const raw = snapshot && (snapshot.environment ?? snapshot.mode ?? snapshot.account_environment);
   const env = typeof raw === "string" ? raw.trim().toLowerCase() : "";
   els.envBadge.classList.remove("badge-demo", "badge-real", "badge-unknown");
@@ -80,7 +83,7 @@ function renderAsOf(updatedAt) {
     els.asofText.textContent = "No snapshot yet";
   } else {
     const when = new Date(updatedAt).toLocaleString();
-    els.asofText.textContent = `As of ${when} (${formatAge(ageMs)})`;
+    els.asofText.textContent = `Cloud received ${when} (${formatAge(ageMs)}; ${level})`;
   }
 }
 
@@ -92,7 +95,7 @@ function renderAccountAndSleeve(snapshot) {
   els.acctCash.textContent = fmtUsd(account.total_cash_usd);
   els.acctAvail.textContent = fmtUsd(account.broker_available_cash_usd);
 
-  els.sleeveAlloc.textContent = fmtUsd(sleeve.cash_allocation_usd);
+  els.sleeveAlloc.textContent = fmtUsd(sleeve.cash_reserve_usd);
   els.sleeveCash.textContent = fmtUsd(sleeve.sleeve_cash_usd);
   els.sleeveEquity.textContent = fmtUsd(sleeve.sleeve_equity_usd);
 
@@ -108,7 +111,7 @@ function renderAccountAndSleeve(snapshot) {
 
   const signalBits = [];
   if (sleeve.cone_z !== undefined) signalBits.push(`z=${fmtNum(sleeve.cone_z)}`);
-  if (sleeve.spy_drawdown !== undefined) signalBits.push(`dd=${fmtNum(sleeve.spy_drawdown * 100, 1)}%`);
+  if (sleeve.spy_drawdown !== undefined) signalBits.push(`dd=${fmtNum(sleeve.spy_drawdown == null ? null : sleeve.spy_drawdown * 100, 1)}%`);
   if (sleeve.tier !== undefined) signalBits.push(`tier ${sleeve.tier}`);
   els.sleeveSignal.textContent = signalBits.length ? signalBits.join(" ") : "—";
 }
@@ -151,6 +154,56 @@ function renderPositions(snapshot) {
   }
 }
 
+function execution(armed) {
+  return armed === true ? "ARMED" : armed === false ? "DRY" : "Unknown";
+}
+
+function reasonText(reason) {
+  return typeof reason === "string" ? Array.from(reason).slice(0, 300).join("") : "—";
+}
+
+function renderSessions(snapshot) {
+  const session = snapshot.last_session || {};
+  const decision = snapshot.last_decision || {};
+  const set = (id, value) => { document.getElementById(id).textContent = value ?? "—"; };
+  document.getElementById("session-empty").hidden = Boolean(snapshot.last_session);
+  set("session-date", session.trading_date);
+  set("session-environment", snapshot.environment);
+  set("session-armed", execution(session.armed));
+  set("session-state", session.state);
+  set("session-preflight", `${session.preflight ?? "—"} / ${session.failed_gate ?? "—"}`);
+  set("session-reason", reasonText(decision.reason));
+  set("session-intents", decision.intents);
+  set("session-seed", snapshot.seed?.status);
+  const source = classifyStaleness(session.snapshot_taken_at);
+  set("session-source", source.level === "none" ? "Unknown" :
+    `${new Date(session.snapshot_taken_at).toLocaleString()} (${formatAge(source.ageMs)}; ${source.level})`);
+  set("session-complete", session.snapshot_complete === true ? "Complete" :
+    session.snapshot_complete === false ? "Incomplete — figures may be missing" : "Unknown");
+  set("session-omitted", session.omitted_managed_positions);
+  const body = document.getElementById("sessions-body");
+  body.replaceChildren();
+  const rows = Array.isArray(snapshot.recent_sessions) ? snapshot.recent_sessions.slice(0, 30) : [];
+  if (!rows.length) {
+    const row = document.createElement("tr");
+    const cell = document.createElement("td");
+    cell.colSpan = 5;
+    cell.textContent = "No sessions yet";
+    row.appendChild(cell);
+    body.appendChild(row);
+  }
+  for (const session of rows) {
+    const row = document.createElement("tr");
+    for (const value of [session.trading_date, execution(session.armed), session.state,
+      reasonText(session.reason), session.orders]) {
+      const cell = document.createElement("td");
+      cell.textContent = value ?? "—";
+      row.appendChild(cell);
+    }
+    body.appendChild(row);
+  }
+}
+
 function showState(name) {
   els.emptyState.hidden = name !== "empty";
   els.errorState.hidden = name !== "error";
@@ -185,6 +238,7 @@ async function loadSnapshot() {
       return;
     }
 
+    renderSessions(snapshot);
     renderAccountAndSleeve(snapshot);
     renderPositions(snapshot);
     showState("data");
@@ -196,32 +250,74 @@ async function loadSnapshot() {
   }
 }
 
-async function requestRefresh() {
-  els.refreshBtn.disabled = true;
-  els.refreshStatus.textContent = "Requesting refresh…";
-  els.refreshStatus.className = "refresh-status";
+const pauseButton = document.getElementById("pause-demo-btn");
+const controlStatus = document.getElementById("control-status");
+const controlRecords = document.getElementById("control-records");
+let control = null;
+let sending = false;
+
+function controlButtons() {
+  const allowed = action => !sending && control?.environment === "demo" && control.writable === true &&
+    Array.isArray(control.capabilities) && control.capabilities.includes(action);
+  els.refreshBtn.disabled = !allowed("refresh_demo_broker");
+  pauseButton.disabled = !allowed("pause_demo_orders");
+}
+
+async function loadControl() {
   try {
-    const res = await fetch("/api/refresh", { method: "POST" });
-    const body = await res.json().catch(() => ({}));
-    if (res.status === 409) {
-      // Expected current state: no phone has registered a device token yet.
-      els.refreshStatus.textContent = "No phone registered yet — the app can't push a refresh until the device is set up.";
-      els.refreshStatus.classList.add("status-error");
-    } else if (res.ok) {
-      els.refreshStatus.textContent = "Refresh requested — the phone will push a fresh snapshot if it can wake up. Reload in a few seconds.";
-      els.refreshStatus.classList.add("status-ok");
-    } else {
-      els.refreshStatus.textContent = `Refresh failed (HTTP ${res.status}): ${body.error || body.message || "unknown error"}`;
-      els.refreshStatus.classList.add("status-error");
+    const response = await fetch("/api/demo-control", { cache: "no-store" });
+    const body = await response.json();
+    if (!response.ok || body.environment !== "demo" || !Array.isArray(body.records)) throw new Error();
+    control = body;
+    controlStatus.textContent = body.writable ? "Verified demo controls available." : "Demo controls unavailable for writes.";
+    controlRecords.replaceChildren();
+    for (const record of body.records) {
+      const row = document.createElement("li");
+      const confirmation = record.confirmation;
+      const observed = confirmation?.brokerObservation?.observedAt;
+      row.textContent = `${record.action} · ${record.requestId} · ${record.status} · delivery: ${record.delivery}` +
+        ` · issued ${new Date(record.issuedAt).toISOString()} · deadline ${new Date(record.deadlineAt).toISOString()}` +
+        (confirmation ? ` · device executed ${new Date(confirmation.executedAt).toISOString()}` +
+          ` · cloud received ${new Date(confirmation.receivedAt).toISOString()}` : "") +
+        (observed !== undefined ? ` · broker observed ${new Date(observed).toISOString()}` : "") +
+        (confirmation?.pausePersisted === true ? " · durable pause and final guard confirmed" : "");
+      controlRecords.appendChild(row);
     }
-  } catch (err) {
-    els.refreshStatus.textContent = `Network error requesting refresh: ${err && err.message ? err.message : err}`;
-    els.refreshStatus.classList.add("status-error");
+  } catch {
+    control = null;
+    controlStatus.textContent = "Demo control unavailable — status not verified; previous rows may be stale.";
+  }
+  controlButtons();
+}
+
+async function requestDemoControl(action) {
+  if (sending || !control?.writable || !control.capabilities?.includes(action)) return;
+  if (action === "pause_demo_orders" && !window.confirm("Pause new demo orders? Open and in-flight orders are not canceled. This interface cannot resume.")) return;
+  sending = true;
+  controlButtons();
+  let requestId;
+  try {
+    requestId = crypto.randomUUID();
+    els.refreshStatus.textContent = `Sending ${requestId}…`;
+    const response = await fetch("/api/demo-control", { method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ requestId, action, deviceId: control.deviceId, environment: "demo" }) });
+    const body = await response.json();
+    els.refreshStatus.textContent = response.ok
+      ? `${requestId}: ${body.status}; delivery ${body.delivery}. Reload status for the device receipt.`
+      : `${requestId}: request rejected (HTTP ${response.status}). Reload status; do not infer device state.`;
+  } catch {
+    els.refreshStatus.textContent = `${requestId || "Request"}: send unconfirmed. Reload status before doing anything else; no automatic retry.`;
   } finally {
-    els.refreshBtn.disabled = false;
+    await loadControl();
+    sending = false;
+    controlButtons();
   }
 }
 
-els.refreshBtn.addEventListener("click", requestRefresh);
+els.refreshBtn.addEventListener("click", () => requestDemoControl("refresh_demo_broker"));
+pauseButton.addEventListener("click", () => requestDemoControl("pause_demo_orders"));
+document.getElementById("control-reload-btn").addEventListener("click", loadControl);
 
 loadSnapshot();
+loadControl();

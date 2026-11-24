@@ -20,9 +20,11 @@ import hmac
 import logging
 from dataclasses import dataclass
 from datetime import datetime
+from unicodedata import category
+from urllib.parse import unquote, urlsplit
 
 from ..cli import clear_halt
-from ..config import Config, MissingCredentialError
+from ..config import Config, EtoroEnvironment, MissingCredentialError
 from ..db.repo import Command, Repo
 from ..engine.halt import read_halt, write_halt
 from ..host import Host
@@ -43,7 +45,7 @@ _logger = logging.getLogger("nightwatch.notify.commands")
 #: Explicitly NOT here, ever: config changes, arming live mode, manual
 #: trades, budget changes.
 SUPPORTED_COMMANDS = frozenset(
-    {"status", "positions", "pnl", "today", "logs", "next", "halt", "resume", "help"}
+    {"status", "positions", "pnl", "today", "logs", "next", "halt", "resume", "help", "dashboard"}
 )
 
 #: How many trailing lines of the current day's log file `/logs` returns.
@@ -177,7 +179,7 @@ def handle(
             return _reject("replay")
 
     # -- 4. the command must be in the fixed table -----------------------------
-    if command_word not in SUPPORTED_COMMANDS:
+    if command_word not in SUPPORTED_COMMANDS or (command_word == "dashboard" and channel != "telegram"):
         return _reject("unknown_command")
 
     # -- accepted ----------------------------------------------------------------
@@ -233,11 +235,32 @@ def _dispatch(
         return _logs_reply(host)
     if command_word == "next":
         return _next_reply(repo)
+    if command_word == "dashboard":
+        return _dashboard_reply(config)
     if command_word == "help":
         return "Supported commands: " + ", ".join(f"/{c}" for c in sorted(SUPPORTED_COMMANDS))
     raise AssertionError(  # pragma: no cover - unreachable, guarded by handle()
         f"unhandled command {command_word!r}; not in SUPPORTED_COMMANDS?"
     )
+
+
+def _dashboard_reply(config: Config) -> str:
+    url = config.telegram.dashboard_url
+    if url is None and config.environment is EtoroEnvironment.DEMO:
+        url = "https://etoro-nightwatch-pages.pages.dev/"
+    if isinstance(url, str) and url and not any(
+        category(c) == "Cc" or c.isspace()
+        for value in (url, unquote(url)) for c in value
+    ):
+        try:
+            parsed = urlsplit(url)
+            if (parsed.scheme == "https" and parsed.hostname and parsed.port != 0
+                    and parsed.username is None and parsed.password is None
+                    and "?" not in url and "#" not in url and "\\" not in url):
+                return f"Dashboard: {url}"
+        except ValueError:
+            pass
+    return "Dashboard address is not configured."
 
 
 def _status_reply(repo: Repo, host: Host, config: Config) -> str:

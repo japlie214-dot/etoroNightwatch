@@ -15,6 +15,8 @@
 // cross-checking it rather than replacing it.
 
 import { json, unauthorized, badRequest, checkSecret, nowIso } from "./utils.js";
+import { routeDemoControl } from "./demo-control.js";
+export { DemoControlStore } from "./demo-control.js";
 import { sendPush, isStaleTokenError, FcmConfigError, FcmSendError } from "./fcm.js";
 import { ALLOWED_COMMANDS, isAllowedCommand, normalizeCommand, hmacCommand } from "./commands.js";
 import { shouldFireSessionTrigger, tradingDateKey, isHalfDay } from "./holidays.js";
@@ -239,6 +241,9 @@ async function handleCommand(request, env) {
 
 const ROUTES = {
   "GET /health": (request, env) => handleHealth(env),
+  "GET /demo-control": routeDemoControl,
+  "POST /demo-control": routeDemoControl,
+  "POST /demo-control/ack": routeDemoControl,
   "POST /snapshot": handleSnapshotPost,
   "GET /snapshot": handleSnapshotGet,
   "POST /device-token": handleDeviceToken,
