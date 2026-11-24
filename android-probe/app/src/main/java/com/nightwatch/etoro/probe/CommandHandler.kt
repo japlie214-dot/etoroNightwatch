@@ -128,9 +128,20 @@ object CommandHandler {
                 }
             }
 
+            "positions", "pnl", "today", "next" -> {
+                // Read-only: Python answers from the local database by Telegram. The label is
+                // fixed vocabulary, so only the status word is logged.
+                val raw = PyBridge.readCommand(context, File(context.filesDir, "nightwatch_demo").absolutePath, command)
+                val status = try {
+                    org.json.JSONObject(raw ?: "{}").optString("status", "busy")
+                        .takeIf { Regex("^[a-z_]{1,20}$").matches(it) } ?: "other"
+                } catch (_: Exception) { "unparsed" }
+                store.log("COMMAND_READ", "command=$command status=${if (raw == null) "busy" else status}")
+            }
+
             "help" -> {
                 val detail = "supported: ping, status, logs, runchecks, selftest, schedule, " +
-                    "refresh, halt, resume, help"
+                    "refresh, halt, resume, positions, pnl, today, next, help"
                 store.log("COMMAND_HELP", detail)
                 NotificationHelper.post(context, "Nightwatch: help", detail)
             }

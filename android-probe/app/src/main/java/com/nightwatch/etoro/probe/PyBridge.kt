@@ -345,6 +345,25 @@ object PyBridge {
         }
     }
 
+    /** T075: answer one read-only command (positions/pnl/today/next) by Telegram. Null when busy. */
+    internal fun readCommand(context: Context, home: String, command: String): String? {
+        if (!sessionLock.tryLock()) return null
+        try {
+            if (!bridgeLock.tryLock()) return null
+            try {
+                ensureStarted(context)
+                return Python.getInstance().getModule("nightwatch.android_entry")
+                    .callAttr("run_read_command", home, command).toString()
+            } catch (_: Exception) {
+                return null
+            } finally {
+                bridgeLock.unlock()
+            }
+        } finally {
+            sessionLock.unlock()
+        }
+    }
+
     /** Manual adoption only; share the session monitor to avoid changing its active host. */
     fun planAdoption(context: Context, home: String): String {
         ensureStarted(context)

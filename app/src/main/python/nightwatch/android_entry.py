@@ -158,6 +158,48 @@ def poll_telegram(base_dir: str) -> str:
     return json.dumps(envelope)
 
 
+#: Read-only commands the FCM path may answer on the phone (T075 command parity).
+READ_COMMANDS = frozenset({"positions", "pnl", "today", "next"})
+
+
+def run_read_command(base_dir: str, command: str) -> str:
+    """Answer one read-only command by Telegram. The caller has already verified its HMAC.
+
+    Only :data:`READ_COMMANDS`; reads the local database, never the broker, never trades.
+    Demo home only; skips (``busy``) rather than wait for a running session.
+    """
+    from .notify.commands import _dispatch
+
+    if command not in READ_COMMANDS:
+        return json.dumps(dict(status="refused", reason_code="not_read_only"))
+    if Path(base_dir).name != "nightwatch_demo":
+        return json.dumps(dict(status="refused", reason_code="wrong_home"))
+    envelope = dict(status="error")
+    previous_host = get_host()
+    try:
+        host = DesktopHost(Path(base_dir))
+        set_host(host)
+        config = load_config(host=host)
+        if config.environment is not EtoroEnvironment.DEMO or config.etoro.is_real_money:
+            return json.dumps(dict(status="refused", reason_code="real_not_allowed"))
+        with _session_lock(host.data_dir() / "session.lock") as acquired:
+            if not acquired:
+                return json.dumps(dict(status="busy", reason_code="session_locked"))
+            with ExitStack() as resources:
+                repo = Repo.open(default_db_path(host), host=host)
+                resources.callback(repo.close)
+                notifier = TelegramNotifier(config.telegram, repo, environment=config.environment.value)
+                resources.callback(notifier.close)
+                reply = _dispatch(command, repo, host, config)
+                sent = notifier.send(reply, event="command_reply")
+                envelope = dict(status="ok", sent=getattr(sent, "status", None) == "sent")
+    except Exception as exc:
+        envelope = dict(status="error", error_type=type(exc).__name__)
+    finally:
+        set_host(previous_host)
+    return json.dumps(envelope)
+
+
 def _run_entry(base_dir: str, *, armed: bool, now_utc: datetime | None) -> str:
     """Return one sanitized JSON envelope. ``now_utc`` is an aware test hook only."""
     if now_utc is not None and (

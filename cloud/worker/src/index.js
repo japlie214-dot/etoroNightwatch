@@ -20,6 +20,7 @@ export { DemoControlStore } from "./demo-control.js";
 import { sendPush, isStaleTokenError, FcmConfigError, FcmSendError } from "./fcm.js";
 import { ALLOWED_COMMANDS, isAllowedCommand, normalizeCommand, hmacCommand } from "./commands.js";
 import { shouldFireSessionTrigger, tradingDateKey, isHalfDay } from "./holidays.js";
+import { deadPhoneCheckDue, snapshotMissedSession, deadPhoneMessage, sendTelegram } from "./deadphone.js";
 
 const MAX_SNAPSHOT_BODY_BYTES = 256 * 1024; // 256 KiB is generous for a portfolio snapshot JSON
 const MAX_COMMAND_BODY_BYTES = 4 * 1024;
@@ -251,6 +252,22 @@ const ROUTES = {
   "POST /command": handleCommand,
 };
 
+/** T075: tell the Boss by Telegram if the phone never reported this session. Never throws. */
+async function checkDeadPhone(env, kv, now, dateKey) {
+  try {
+    const alertKey = `dead_phone_alerted:${dateKey}`;
+    if (!deadPhoneCheckDue(now, Boolean(await kv.get(alertKey)))) return;
+    const raw = await kv.get(KV_KEYS.snapshot);
+    const updatedAt = raw ? JSON.parse(raw).updated_at : null;
+    if (!snapshotMissedSession(updatedAt, now)) return;
+    const status = await sendTelegram(env, deadPhoneMessage(now));
+    if (status === "sent") await kv.put(alertKey, "1", { expirationTtl: 60 * 60 * 24 * 3 });
+    else console.error(`scheduled: dead-phone alert for ${dateKey} not sent (${status})`);
+  } catch (err) {
+    console.error("scheduled: dead-phone check failed", err && err.message ? err.message : err);
+  }
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -301,6 +318,8 @@ export default {
     const dateKey = tradingDateKey(now);
     const firedKey = `cron_fired:${dateKey}`;
     const alreadyFired = Boolean(await kv.get(firedKey));
+
+    await checkDeadPhone(env, kv, now, dateKey);
 
     if (!shouldFireSessionTrigger(now, alreadyFired)) return;
 
