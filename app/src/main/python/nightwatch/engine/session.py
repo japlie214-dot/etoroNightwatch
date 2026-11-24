@@ -30,8 +30,8 @@ from ..market.window import AssembledSignal, WindowAssemblyError, assemble_spy_s
 from ..notify.telegram import TelegramNotifier
 from ..strategy.ladder import decide, _floor_cents, LadderConfig, LadderLot, ReentryBucket, LadderInputs, LadderIntent
 from ..strategy.state import load, save
-from .executor import ExecutionReport, RecoveryReport, execute_buys, recover_unfinished
-from .close_executor import execute_closes, execute_schg_sell, recover_unfinished_closes
+from .executor import ExecutionReport, RecoveryReport, execute_buys, recover_unfinished, remaining_order_budget
+from .close_executor import execute_closes, execute_schg_sell, plan_schg_sell, recover_unfinished_closes
 from .limits import apply_submission_limits
 from .halt import write_halt
 from .interval_pnl import ClosedLot, IntervalResult, PartialCloseEvidence, _utc, compute_interval, observe
@@ -825,6 +825,24 @@ def _run_session_core(
                     except Exception as exc:
                         close_error = f"SCHG sell portfolio read failed: {type(exc).__name__}: {exc}"
                     else:
+                        # A funding sell is only worth sending if the buy it funds can also go.
+                        ceiling = config.risk.max_orders_per_session
+                        if ceiling is not None:
+                            try:
+                                legs = len(plan_schg_sell(
+                                    positions, amount=schg_sells[0].amount,
+                                    price=inputs.schg_price if inputs.schg_price is not None
+                                    else mi.provisional_closes["SCHG"].value,
+                                    instrument_id=mi.instrument_ids["SCHG"],
+                                    allow_partial=True).legs)
+                            except Exception:
+                                legs = 1
+                            left = remaining_order_budget(repo, s.id, ceiling)
+                            if 0 < left < legs + 1:
+                                reason += ("; SCHG funding sell deferred: order ceiling leaves no "
+                                           "send for the buy it funds")
+                                schg_sells = []
+                    if close_error is None and schg_sells:
                         # An executor raise cannot tell us whether the broker accepted a send.
                         orders_sent = True
                         try:
@@ -846,8 +864,18 @@ def _run_session_core(
                             for r in schg_report.results:
                                 reason += f"; SCHG close {r.position_id}: {r.outcome} {r.detail}"
                             reason += f"; SCHG stopped={schg_report.stopped}"
-                            if schg_report.blocks_buys:
+                            # A pure shortfall (every sent leg confirmed, nothing deferred or
+                            # unresolved) only means less cash to buy with: the buy limits
+                            # cap by real cash, so it must not veto buys or the save.
+                            shortfall_only = (
+                                bool(schg_report.results) and not schg_report.deferred
+                                and not schg_report.followups
+                                and all(r.outcome == "confirmed" for r in schg_report.results)
+                            )
+                            if schg_report.blocks_buys and not shortfall_only:
                                 close_error = "SCHG sell blocked buys"
+                            elif schg_report.blocks_buys:
+                                reason += "; SCHG sell short of target: buying with the cash available"
                     if close_error is not None:
                         status = "executed_partial"
                 if close_error is None and (closes or schg_sells):

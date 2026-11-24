@@ -785,10 +785,8 @@ def test_schg_fresh_portfolio_failure_blocks_without_schg_send(schg, repo, upro)
     assert schg.client.close_position.call_count == int(upro)
 
 
-@pytest.mark.parametrize("case,stopped,sends", [("prefix", "shortfall", 1),
-                                                ("empty", "no candidates", 0),
-                                                ("disabled", "partials disabled; shortfall", 1)])
-def test_schg_shortfall_always_blocks_final_save(schg, repo, case, stopped, sends):
+@pytest.mark.parametrize("case,stopped,sends", [("empty", "no candidates", 0)])
+def test_schg_shortfall_without_any_sale_blocks_final_save(schg, repo, case, stopped, sends):
     schg.decision.intents = [SELL, BUY]
     if case == "prefix":
         schg.decision.intents[0] = replace(SELL, amount=500)
@@ -808,6 +806,25 @@ def test_schg_shortfall_always_blocks_final_save(schg, repo, case, stopped, send
     schg.save.assert_not_called()
     assert repo.get_strategy_state().bars == 1
     assert repo.get_strategy_state().recyclable_cash == 0
+
+
+@pytest.mark.parametrize("case,stopped", [("prefix", "shortfall"),
+                                          ("disabled", "partials disabled; shortfall")])
+def test_schg_confirmed_shortfall_buys_with_available_cash(schg, repo, case, stopped):
+    """T074: a confirmed-but-short funding sell must not veto the buys for ever."""
+    schg.decision.intents = [SELL, BUY]
+    if case == "prefix":
+        schg.decision.intents[0] = replace(SELL, amount=500)
+    else:
+        schg.positions = [p for p in schg.positions if p.instrument_id != IDS["SCHG"]]
+        schg.positions += [position("s", "SCHG", units=0.5), position("t", "SCHG", units=4)]
+        repo.insert_lot_annotation(replace(annotation("t"), symbol="SCHG"))
+        repo.upsert_instrument(Instrument("SCHG", IDS["SCHG"], allow_partial_close=False))
+    result = schg.run()
+    assert f"SCHG stopped={stopped}" in result.reason
+    assert "SCHG sell short of target: buying with the cash available" in result.reason
+    assert schg.client.close_position.call_count == 1
+    schg.execute.assert_called_once()
 
 
 @pytest.mark.parametrize("upro", [False, True])
@@ -950,6 +967,16 @@ def test_upro_exhausted_budget_defers_schg_without_saving_final(schg, repo):
     assert schg.save.call_count == 1 and repo.get_strategy_state().bars == 1
     assert repo.pending_partial_closes() == []
     assert len(repo.get_intents(result.session_id)) == 1
+
+
+def test_funding_sell_is_deferred_when_the_ceiling_cannot_also_send_the_buy_it_funds(schg, repo):
+    """T074: with one send left, the buy goes and the funding SCHG sell does not."""
+    schg.decision.intents = [SELL, BUY]
+    schg.config = replace(schg.config, risk=replace(schg.config.risk, max_orders_per_session=1))
+    result = schg.run()
+    assert "SCHG funding sell deferred" in result.reason
+    schg.client.close_position.assert_not_called()
+    schg.execute.assert_called_once()
 
 
 @pytest.mark.parametrize("status", ["pending", "sent", "filled", "recovered", "rejected",
