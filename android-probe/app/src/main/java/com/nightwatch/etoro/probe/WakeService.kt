@@ -107,8 +107,10 @@ class WakeService : Service() {
             NotificationHelper.post(this, "Nightwatch Probe woke up", "trigger=$trigger — running checks")
 
             // 1. Network-after-wake check.
+            store.log("NETWORK_STATE", "phase=wake_start ${ConnectivityDiagnostics.summary(this)}")
             try {
                 val netResult = NetworkCheck.checkHealth(BuildConfig.WORKER_BASE_URL)
+                store.log("NETWORK_STATE", "phase=after_check ${ConnectivityDiagnostics.summary(this)}")
                 store.log(
                     "NETWORK_CHECK",
                     "trigger=$trigger success=${netResult.success} attempts=${netResult.attempts} " +
