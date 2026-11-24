@@ -1,0 +1,18 @@
+# Trusted verifier behind the DEMO_CONTROL_AUTH service binding. No public URL on purpose:
+# only the Pages project and the main Worker can call it.
+name = "etoro-nightwatch-demo-auth"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+workers_dev = false
+preview_urls = false
+
+[vars]
+ACCESS_TEAM_DOMAIN = "bitter-moon-0f0a.cloudflareaccess.com"
+ACCESS_AUD = "54c324a3e1dbf25ee61e123ebe04cb113f29ff5aa6bae3b54ca50c98018b8fda"
+DEVICE_ID = "z10-demo"
+DEVICE_KEY_ID = "z10-receipt-v1"
+# Public SPKI of the phone's Keystore receipt key (android: files/demo_control_pubkey.txt).
+DEVICE_PUBKEY_SPKI = "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv/ySeVCuCOqtFRimN2eSrGk13u4TXS6toObmvc1POOw5Wm2PY1Do8x+hJgc9588VKmYZEvm0ncausaHcqU5yUFYcvgH+Xzmet+gN/yvmwNwJCxjK+1s95L94eUCAsNjbg/i6F7pY+TRc/wngG4WKCdACZGowPIw4DDpfp14ZL8HSl5bGqCMM+ePGDSZzsUDVmN82ZVaY0DnDhN8iN1AZ2q7kUYXbbghy1WDQNRMGDBG1sQAijxr96UvckyRoImzzoZqPTXnHn6s5orDokiM6O0gqsNADw/XlDq8TGP8JA0DYT4ln/C/LyMEJ+KzwWaF/4GHk6ihoNL9WDpcH0zBy0QIDAQAB"
+DEVICE_KEY_REVOKED = "false"
+# Comma-separated Access identities allowed to read and to press Refresh/Pause.
+OPERATOR_EMAILS = "japlie214@gmail.com"

@@ -36,6 +36,26 @@ crons = ["*/5 16-21 * * *"]
 # --- Vars (non-secret) ------------------------------------------------------
 [vars]
 FIREBASE_PROJECT_ID = "etoronightwatch"
+# Exact protected Pages origin; operator writes must come from it (same-origin POST).
+DEMO_CONTROL_ORIGIN = "https://etoro-nightwatch-pages.pages.dev"
+
+# --- Demo control (cloud/demo-auth, cloud/demo-dispatch) -----------------------
+# Deploy etoro-nightwatch-demo-auth and etoro-nightwatch-demo-dispatch FIRST.
+[[durable_objects.bindings]]
+name = "DEMO_CONTROL_STORE"
+class_name = "DemoControlStore"
+
+[[migrations]]
+tag = "demo-control-v1"
+new_sqlite_classes = ["DemoControlStore"]
+
+[[services]]
+binding = "DEMO_CONTROL_AUTH"
+service = "etoro-nightwatch-demo-auth"
+
+[[services]]
+binding = "DEMO_CONTROL_DISPATCH"
+service = "etoro-nightwatch-demo-dispatch"
 
 # --- Secrets (set via `npx wrangler secret put <NAME>`, never in this file) -
 #

@@ -15,6 +15,16 @@ compatibility_flags = []
 [vars]
 WORKER_BASE_URL = "https://etoro-nightwatch-worker.japlie214.workers.dev"
 
+# Fail-closed protection: functions/_middleware.js returns 503 for EVERY request unless
+# DEMO_CONTROL_AUTH accepts it, so deploy this only after the auth worker is live and tested.
+[[services]]
+binding = "DEMO_CONTROL_AUTH"
+service = "etoro-nightwatch-demo-auth"
+
+[[services]]
+binding = "DEMO_CONTROL_WORKER"
+service = "etoro-nightwatch-worker"
+
 # --- Secrets (set via `npx wrangler pages secret put <NAME>`, never here) --
 #
 #   npx wrangler pages secret put WEB_READ_TOKEN --project-name etoro-nightwatch-pages
